@@ -8,7 +8,7 @@ def stage_support(stage: str) -> dict:
     if stage in ('annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
-    if stage=='source':return {'runnable':True,'reason':'명시 recorded target stream으로 실제 Simulation Source 수집. 실물 Leader/Follower는 실행하지 않습니다.'}
+    if stage=='source':return {'runnable':True,'reason':'Recorded Target Stream 또는 Live Leader 읽기 → Simulation Source. 실제 Follower 명령 없음.'}
     return {'runnable':False,'reason':'이 단계의 실행 Runner는 구현·검증되지 않았습니다. 직접 API 기능과 구분합니다.'}
 
 
@@ -28,13 +28,22 @@ def prepared(path: str,modules: str) -> dict:
     from ..cli import prepare
     plan=prepare(path,task_modules=modules);support=stage_support(plan.stage)
     if not support['runnable']:return {**support,'state':'prepared','plan':plan.summary()}
-    if plan.stage in ('capture','precision_calibration','real_evaluation','real_sim') and plan.effective_settings['execution'].get('mode')!='offline':return {'runnable':False,'state':'prepared','reason':'명시 offline 검사만 지원합니다. 실물 장치 실행은 비활성입니다.','plan':plan.summary()}
+    if plan.stage in ('capture','precision_calibration','real_evaluation','real_sim') and plan.effective_settings['execution'].get('mode')!='offline':
+        from ..robot.live import open_inputs
+        if not 1<=plan.effective_settings['execution'].get('max_frames',0)<=300:raise ValueError('명시 max_frames 1..300을 지정하세요')
+        if 'calibration_profile'not in plan.resolved_inputs:raise ValueError('선택한 Precision Profile이 필요합니다')
+        open_inputs(plan)  # Constructors only: no connection, camera start or motor writes.
+        return {**support,'state':'runtime_ready','reason':'실물 읽기 전용 · Goal/Torque 쓰기 없음 · 실물 팔 구동 금지','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage=='source':
-        if 'source_dataset' not in plan.resolved_inputs:return {'runnable':False,'state':'prepared','reason':'이번 UI는 recorded target stream 수집만 지원합니다. 실물 장치 실행은 차단됩니다.','plan':plan.summary()}
-        from ..data.native import load_catalog
-        from robot_learning_workbench.data.recording import validate_recording
-        source=load_catalog(plan.resolved_inputs['source_dataset']['path']);validate_recording(source.execution.get('recording',{}))
-        if source.execution.get('stage')!='source' or source.execution.get('engine')!=plan.engine or not source.episodes:raise ValueError('엔진이 일치하는 Source target stream이 필요합니다')
+        if 'source_dataset' in plan.resolved_inputs:
+            from ..data.native import load_catalog
+            from robot_learning_workbench.data.recording import validate_recording
+            source=load_catalog(plan.resolved_inputs['source_dataset']['path']);validate_recording(source.execution.get('recording',{}))
+            if source.execution.get('stage')!='source' or source.execution.get('engine')!=plan.engine or not source.episodes:raise ValueError('엔진이 일치하는 Source target stream이 필요합니다')
+        else:
+            from ..robot.configuration import create_leader
+            device=create_leader(plan)
+            if not device.read_only:raise ValueError('Live Leader must preserve torque and never send motor commands')
     if plan.stage=='datagen':
         from importlib import import_module
         import_module('robot_learning_workbench.engines.'+plan.engine+'.datagen').load_inputs(plan)

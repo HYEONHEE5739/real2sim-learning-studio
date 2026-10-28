@@ -91,3 +91,27 @@ def test_backend_error_serializes_recipe_issues_without_losing_cause(monkeypatch
     assert operations.main()==2
     result=json.loads(capsys.readouterr().out)
     assert result['error']['code']=='INPUT_CONFLICT' and result['error']['issues'][0]['field']=='inputs.training_config.resume'
+
+
+def test_live_source_and_observe_only_controls_are_distinct(tmp_path):
+    import subprocess,os
+    from test_workbench_window import UI
+    code='''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([])
+p=WorkflowPage('source',sys.executable,'modules')
+assert p.source_kind.count()==2
+assert 'Live Leader' in p.source_kind.itemText(1)
+assert 'device_profile' in p.inputs
+assert {'save','discard'}<=set(p.commands)
+q=WorkflowPage('real_evaluation',sys.executable,'modules')
+assert q.mode.findText('observe_only')>=0
+assert q.mode.findText('full_robot')<0
+assert q.gripper_button.isEnabled() is False
+for page in (p,q):page.timer.stop();page.close()
+'''
+    result=subprocess.run([UI,'-B','-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
+    assert result.returncode==0,result.stderr

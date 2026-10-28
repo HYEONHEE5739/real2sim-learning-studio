@@ -24,8 +24,8 @@ class WorkflowPage(QWidget):
         self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
         self.inputs={};self.form=QVBoxLayout();box.addLayout(self.form)
         if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):self.form.addWidget(self.engine)
-        for key in ({'source':['scene','source_dataset','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
-                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile']}[stage]):
+        for key in ({'source':['scene','source_dataset','device_profile','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
+                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile','scene','robot_model'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile','engine_config','robot_model']}[stage]):
             line=QLineEdit();line.setPlaceholderText(key);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
             row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(line);self.form.addLayout(row)
             if key=='scene':
@@ -46,12 +46,23 @@ class WorkflowPage(QWidget):
         if stage in ('source','datagen'):
             self.dataset_resume=QCheckBox('기존 Dataset 경로에 추가 (Resume)');self.form.addWidget(self.dataset_resume);self.dataset_resume.toggled.connect(self.edit_dataset_resume)
             choose=QPushButton('Dataset 경로 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['offline'] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
+        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['offline','observe_only','live_capture'] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
         if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
+        self.source_kind=None
+        if stage=='source':
+            self.source_kind=QComboBox();self.source_kind.addItems(['Recorded Target Stream','Live Leader (read only → Simulation)']);self.form.addWidget(self.source_kind)
+            self.source_kind.currentIndexChanged.connect(self.change_source_kind)
+        self.gripper_button=QPushButton('Gripper-Only: 별도 현장 승인 필요 · 팔 5축 구동 금지')
+        self.gripper_button.setEnabled(False)
+        if stage=='real_evaluation':self.form.addWidget(self.gripper_button)
         self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000)
         if stage=='annotation':
             row=QHBoxLayout();box.addLayout(row);row.addWidget(QLabel('수동 grasp 원본 frame'));row.addWidget(self.mark_frame)
             for kind,text in [('pause','일시정지'),('resume','재생'),('step','1 step'),('mark','grasp 표시'),('skip','Episode 제외')]:
+                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));row.addWidget(button);self.commands[kind]=button
+        if stage=='source':
+            row=QHBoxLayout();box.addLayout(row)
+            for kind,text in [('save','현재 Episode 저장'),('discard','현재 Episode 폐기')]:
                 button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));row.addWidget(button);self.commands[kind]=button
         self.object_table=None
         if stage in ('datagen','simulation_evaluation'):
@@ -156,6 +167,7 @@ class WorkflowPage(QWidget):
         self._syncing=True
         try:
             self.engine.setCurrentText(data.get('engine','mujoco'));self.output.setText(data['output']['directory'])
+            if self.source_kind is not None:self.source_kind.setCurrentIndex(1 if 'device_profile'in data['inputs'] else 0)
             for key,line in self.inputs.items():line.setText(data['inputs'].get(key,''))
             for key,spin in self.counts.items():spin.setValue(int(data['execution'].get(key,data['execution'].get('episodes',data['execution'].get('target_successes',1)) if key=='num_episodes' else 1)))
             self.preview_env.setRange(0,max(0,int(data['execution'].get('env_num',data['execution'].get('num_envs',1)))-1))
@@ -173,6 +185,11 @@ class WorkflowPage(QWidget):
     def safe_update(self,fn):
         try:self.editor.update(fn);return True
         except Exception as error:self.edit_error=True;self.invalidate();self.state.setText('Recipe 편집 오류: '+str(error))
+    def change_source_kind(self,index):
+        live=index==1
+        self.inputs['source_dataset'].setEnabled(not live);self.inputs['device_profile'].setEnabled(live)
+        if not self._syncing and self.editor.path is not None:
+            self.safe_update(lambda data:data['inputs'].pop('source_dataset' if live else 'device_profile',None))
     def edit_field(self,key,value):
         if self._syncing or self.editor.path is None:return
         self.safe_update(lambda data:data.__setitem__(key,value))

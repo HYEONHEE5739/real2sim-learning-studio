@@ -68,16 +68,16 @@ _INPUTS={
  'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
  'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
- 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
- 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session'})}
+ 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session','scene','robot_model'}),
+ 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session','engine_config','robot_model'})}
 _EXEC={
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
- 'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction'}),'train':({'mode'},set()),
+ 'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction','max_frames'}),'train':({'mode'},set()),
  'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),set()),'merge':(set(),set()),
- 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes','mode'}),
- 'precision_calibration':(set(),{'mode'}),'real_sim':(set(),{'headless','mode'})}
+ 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes','mode','max_frames'}),
+ 'precision_calibration':(set(),{'mode','max_frames'}),'real_sim':(set(),{'headless','mode','max_frames'})}
 _ROLES={'source':{'signals','metrics'},'annotation':{'signals','acceptance','metrics'},
  'datagen':{'signals','acceptance','metrics'},'simulation_evaluation':{'signals','success','metrics'},'real_sim':{'signals','metrics'}}
 
@@ -112,7 +112,7 @@ def _validate(data,path):
     req,opt=_EXEC[stage];_mapping(data['execution'],req|opt,req,'execution',path)
     for key,value in data['execution'].items():
         where='execution.'+key
-        if key in ('episodes','target_successes','max_attempts','env_num','num_envs','num_episodes','batch_size','max_batches','max_episode_steps'):
+        if key in ('episodes','target_successes','max_attempts','env_num','num_envs','num_episodes','batch_size','max_batches','max_episode_steps','max_frames'):
             if type(value) is not int or value<1:_fail(where,'positive integer required',path)
         elif key=='repo_type':
             if value not in ('dataset','model'):_fail(where,'dataset or model required',path)
@@ -127,7 +127,7 @@ def _validate(data,path):
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
-            if value not in (('manual','auto') if stage=='annotation' else ('offline',) if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
+            if value not in (('manual','auto') if stage=='annotation' else ('offline','observe_only','live_capture') if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -381,7 +381,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if identity!=entry['identity']:_fail('inputs.'+key,'catalog identity differs from saved input',doc.path,code='INPUT_CHANGED')
             items.append(_freeze(entry))
         resolved[key]=tuple(items) if key=='datasets' else items[0]
-    if spec.stage=='real_evaluation' and (calibration:=documents.get('device_profile',{}).get('calibration_path')):
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','source') and (calibration:=documents.get('device_profile',{}).get('calibration_path')):
         path=Path(calibration)
         if not path.is_absolute():_fail('inputs.device_profile.calibration_path','explicit absolute SDK calibration path required',doc.path)
         resolved['motor_calibration']=_freeze(_artifact(path.resolve()))
@@ -445,7 +445,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
-    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation'):
         from .robot.offline import capture_reader
