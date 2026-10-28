@@ -24,6 +24,6 @@ def test_changed_training_metadata_is_rejected_before_leakage_claim(tmp_path,mon
     original=native.load_catalog(train);record={'dataset_path':str(train),'dataset_identity':vars(original.identity),'control_contract':lerobot.control_contract(native.load_catalog(val))}
     p=train/'workbench.json';doc=json.loads(p.read_text());doc['note']='changed after checkpoint';p.write_text(json.dumps(doc))
     monkeypatch.setattr(validate,'load_policy',lambda *args:(None,None,None,record));monkeypatch.setattr(__import__('robot_learning_workbench.recipe',fromlist=['verify_prepared_inputs']),'verify_prepared_inputs',lambda plan:None)
-    plan=SimpleNamespace(resolved_inputs={'dataset':{'path':str(val)},'policy':{'path':'unused'}},output_path=tmp_path/'out')
+    plan=SimpleNamespace(input_documents={},resolved_inputs={'dataset':{'path':str(val)},'policy':{'path':'unused'}},output_path=tmp_path/'out')
     with pytest.raises(ValueError):validate.evaluate(plan,events=lambda row:None,commands=lambda:())
     assert not plan.output_path.exists()

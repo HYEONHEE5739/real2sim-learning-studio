@@ -66,7 +66,7 @@ _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
  'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
- 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},set()),
+ 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
  'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
  'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session'})}
