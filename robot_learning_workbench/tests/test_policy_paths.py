@@ -82,3 +82,17 @@ def test_owned_metadata_and_processor_tampering_are_pinned(tmp_path,leaf):
     with pytest.raises(ValueError):verify_prepared_inputs(plan)
     with pytest.raises(ValueError)as error:load_policy(policy)
     assert error.value.code=='CHECKPOINT_INTEGRITY_MISMATCH'
+
+
+def test_external_model_inside_checkpoint_does_not_select_parent_policy(tmp_path):
+    from robot_learning_workbench.learning.policy import load_policy
+    root=tmp_path/'owned';shutil.copytree(MODEL,root,copy_function=os.link)
+    source=ROOT/'docs/evidence/architecture-completion/phase3-learning/diffusion-resume/checkpoints/000002/pretrained_model'
+    external=root/'downloaded_diffusion';external.mkdir()
+    for p in source.iterdir():
+        if p.is_file():(external/p.name).symlink_to(p)
+    p=validation(tmp_path,external)
+    assert p.input_documents['policy_config']['type']=='diffusion'
+    assert Path(p.resolved_inputs['policy']['path'])==external
+    model,_,_,record=load_policy(external)
+    assert model.config.type=='diffusion' and record['external_official'] is True

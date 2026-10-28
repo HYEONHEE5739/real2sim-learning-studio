@@ -47,7 +47,7 @@ def training_command(plan) -> tuple[list[str],dict]:
         if 'policy' not in plan.resolved_inputs:raise DataError('TRAIN_CONFIG_INVALID','policy','Recipe must pin local fine-tune Policy')
         folder=policy_model_path(plan.resolved_inputs['policy']['path'])
         if folder!=Path(config['policy']['pretrained_path']).resolve():raise DataError('TRAIN_CONFIG_INVALID','policy','Recipe and official pretrained_path differ')
-        if (folder.parent/'workbench-checkpoint.json').is_file():checkpoint_record(folder.parent)
+        if folder.name=='pretrained_model' and (folder.parent/'workbench-checkpoint.json').is_file():checkpoint_record(folder.parent)
     path=Path(plan.resolved_inputs['training_config']['path']);module='robot_learning_workbench.learning.smol_compat' if config['policy']['type']=='smolvla' else 'lerobot.scripts.lerobot_train';args=[sys.executable,'-B','-m',module,'--config_path='+str(path)]
     if mode=='resume':
         if 'checkpoint' not in plan.resolved_inputs:raise DataError('RESUME_INCOMPATIBLE','checkpoint','Explicit closed local checkpoint required')

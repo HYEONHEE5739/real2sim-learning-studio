@@ -347,7 +347,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
             path=Path(pinned['path']).resolve() if pinned is not None else _resolve(doc,item)
             if key=='policy':
                 folder=policy_model_path(path)
-                if (folder.parent/'workbench-checkpoint.json').is_file():path=folder.parent
+                if folder.name=='pretrained_model' and (folder.parent/'workbench-checkpoint.json').is_file():path=folder.parent
             if key=='scene':
                 actual=load_scene(path,expected=scene.identity if scene is not None else None);scene=actual
                 identity=_plain(actual.identity);entry={'kind':'scene','path':str(path),'identity':identity}

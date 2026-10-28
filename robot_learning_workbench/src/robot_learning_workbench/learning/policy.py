@@ -123,7 +123,7 @@ def policy_catalog() -> list[dict]:
 
 def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
     from ..recipe import policy_model_path
-    _pinned();folder=policy_model_path(path);root=folder.parent if (folder.parent/'workbench-checkpoint.json').is_file() else folder
+    _pinned();folder=policy_model_path(path);root=folder.parent if folder.name=='pretrained_model' and (folder.parent/'workbench-checkpoint.json').is_file() else folder
     if (root/'workbench-checkpoint.json').is_file():
         record=checkpoint_record(root,expected=expected);folder=root/'pretrained_model'
     else:
