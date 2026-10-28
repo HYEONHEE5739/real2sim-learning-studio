@@ -122,12 +122,11 @@ def policy_catalog() -> list[dict]:
 
 
 def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
-    _pinned();root=Path(path).resolve();root=root.parent if root.name=='pretrained_model' else root
+    from ..recipe import policy_model_path
+    _pinned();folder=policy_model_path(path);root=folder.parent if (folder.parent/'workbench-checkpoint.json').is_file() else folder
     if (root/'workbench-checkpoint.json').is_file():
         record=checkpoint_record(root,expected=expected);folder=root/'pretrained_model'
     else:
-        folder=Path(path).resolve()
-        if not (folder/'config.json').is_file():folder=folder/'pretrained_model'
         required=['config.json','model.safetensors','policy_preprocessor.json','policy_postprocessor.json']
         if any(not (folder/name).is_file() for name in required):raise DataError('CHECKPOINT_INCOMPLETE','policy','Official local model/config/processors required')
         files={p.name:file_sha256(p) for p in folder.iterdir() if p.is_file()}
@@ -187,6 +186,7 @@ def policy_inputs(plan,urdf_sha256):
         cameras={n:dict(color='rgb',fps=30.,shape=[480,640,3]) for n in ('side','wrist')})
     if contract and 'command_processing' in contract:expected['command_processing']={'position_target_policy':'saturation_inward_v1','training_target':'applied'}
     if contract!=expected:raise DataError('POLICY_INCOMPATIBLE','policy','Explicit Scene/model/Calibration/joint/unit/phase/camera contract mismatch')
+    if any(getattr(policy.config,k,False) for k in ('adapt_to_pi_aloha','use_delta_joint_actions_aloha')):raise DataError('POLICY_INCOMPATIBLE','policy.action','Absolute model-radian targets required; Aloha/delta remapping is incompatible')
     features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
     if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')
     return policy,pre,post,record,contract

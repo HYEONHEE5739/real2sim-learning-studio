@@ -72,7 +72,9 @@ class TrainingSettings(QWidget):
             data=copy.deepcopy(self.config);data['policy']=json.loads(self.policy_json.toPlainText());data['steps']=self.steps.value();data['batch_size']=self.batch.value();data['policy']['device']=self.device.currentText()
             if data['policy']['type']=='smolvla':data['policy']['load_vlm_weights']=self.pretrained.isChecked()
             if data['policy'].get('type')!=self.model.currentText():raise ValueError('Policy JSON과 선택 모델이 다릅니다')
-            if self.page.mode.currentText()=='finetune':data['policy']['pretrained_path']=str((self.page.editor.path.parent/self.page.inputs['policy'].text()).resolve())
+            if self.page.mode.currentText()=='finetune':
+                from ..recipe import policy_model_path
+                data['policy']['pretrained_path']=str(policy_model_path(self.page.editor.path.parent/self.page.inputs['policy'].text()))
             base=self.page.editor.path.parent
             data['output_dir']=str((base/self.page.output.text()).resolve());data['dataset']['root']=str((base/self.page.inputs['dataset'].text()).resolve());data['resume']=self.page.mode.currentText()=='resume'
             with target.open('x') as stream:json.dump(data,stream,ensure_ascii=False,indent=2)

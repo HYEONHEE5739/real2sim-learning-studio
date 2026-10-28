@@ -25,7 +25,7 @@ class WorkflowPage(QWidget):
         self.inputs={};self.form=QVBoxLayout();box.addLayout(self.form)
         if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):self.form.addWidget(self.engine)
         for key in ({'source':['scene','source_dataset','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
-                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy'],'capture':['device_profile','camera_config','capture_session','calibration_profile'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile']}[stage]):
+                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile']}[stage]):
             line=QLineEdit();line.setPlaceholderText(key);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
             row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(line);self.form.addLayout(row)
             if key=='scene':
@@ -87,7 +87,8 @@ class WorkflowPage(QWidget):
 
     def show_policy_model(self,path):
         try:
-            root=(self.editor.path.parent/path).resolve();config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
+            from ..recipe import policy_model_path
+            root=policy_model_path(self.editor.path.parent/path);config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
         except (OSError,ValueError,KeyError):self.policy_model.setText('Policy 모델: Config 확인 필요')
 
     def select_preview(self,index):

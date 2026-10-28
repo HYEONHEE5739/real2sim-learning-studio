@@ -4,9 +4,23 @@ Live collection, measured Calibration and real rollout are separate hardware gat
 Reports contain diagnostics/references, not another Capture or Dataset format.
 """
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
 import numpy as np
 from ..data.native import DataError,atomic_json
-from .calibration import JOINTS,load_profile,review_joint,mapper_from_scene
+from .calibration import JOINTS,load_profile,review_joint,mapper_from_scene,joint_specs
+if TYPE_CHECKING:
+    from lerobot.robots.so101_follower.config_so101_follower import SO101FollowerConfig
+    from .devices import Follower
+    from ..recipe import PreparedRun
+
+
+def capture_reader() -> ModuleType:
+    """Builder owns this reader; independent Workbench stages do not need it."""
+    from importlib import import_module
+    try:return import_module('real2sim_builder.capture')
+    except ImportError as error:
+        raise DataError('STAGE_DEPENDENCY_MISSING','offline','Install the offline extra in the backend environment; Builder Capture unavailable: '+str(error)) from error
 
 
 def sdk_configuration(spec):
@@ -40,9 +54,44 @@ def capture_binding(manifest,scene,calibration_id):
     return reasons
 
 
+def _encoding_follower(profile: dict, config: 'SO101FollowerConfig', calibration_path: Path) -> 'Follower':
+    """Tables for official SDK normalization; no serial constructor or IO handles."""
+    import hashlib,json
+    from types import SimpleNamespace
+    from lerobot.motors import Motor,MotorCalibration,MotorNormMode
+    from lerobot.motors.motors_bus import MotorsBus
+    from lerobot.motors.feetech.feetech import FeetechMotorsBus
+    from .devices import Follower
+    raw=calibration_path.read_bytes();identity=profile['identity']
+    if hashlib.sha256(raw).hexdigest()!=identity['calibration_sha256']:raise ValueError('Motor calibration file identity changed')
+    motors={n:Motor(i+1,'sts3215',MotorNormMode.RANGE_0_100 if n=='gripper' else MotorNormMode.DEGREES) for i,n in enumerate(JOINTS)}
+    data=json.loads(raw)
+    if set(data)!=set(JOINTS):raise ValueError('Six SDK motor calibration records required')
+    for n,c in data.items():
+        if set(c)!={'id','drive_mode','homing_offset','range_min','range_max'} or any(type(v)is not int for v in c.values()):raise ValueError('Invalid integer SDK calibration')
+        if c['id']!=motors[n].id or c['drive_mode'] not in (0,1) or not 0<=c['range_min']<c['range_max']<4096:raise ValueError('Invalid SDK motor ID/range')
+    # Unlike Feetech.__init__, the official base initializer only builds tables.
+    bus=object.__new__(FeetechMotorsBus)
+    MotorsBus.__init__(bus,config.port,motors,{n:MotorCalibration(**c) for n,c in data.items()})
+    follower=Follower(SimpleNamespace(id=config.id,bus=bus),profile=profile,identity=identity,calibration_path=calibration_path,model_hash=profile['urdf_sha256'])
+    follower._check_identity(hardware=False)
+    low=bus._normalize({c.id:c.range_min for c in bus.calibration.values()})
+    high=bus._normalize({c.id:c.range_max for c in bus.calibration.values()})
+    follower.limits={n:sorted((low[m.id],high[m.id])) for n,m in motors.items()}
+    return follower
+
+
+def _reject_command(plan: 'PreparedRun', report: dict, error: Exception) -> None:
+    report['status']='REJECTED'
+    report['policy']['command_preflight']={**getattr(error,'command_preflight',{}),
+        'encoding_possible':False,'reason':str(error),'code':getattr(error,'code',type(error).__name__)}
+    plan.output_path.mkdir();atomic_json(plan.output_path/'offline-inspection.json',report)
+
+
 def run(plan,*,events,commands):
     opts=plan.effective_settings['execution']
     if opts.get('mode')!='offline' or opts.get('enable_motion'):raise DataError('HARDWARE_NOT_APPROVED','execution','Only explicit offline inspection is enabled; no port, torque or camera access')
+    reader=capture_reader() if plan.stage in ('capture','real_sim','real_evaluation') else None
     from ..recipe import verify_prepared_inputs,_plain
     from ..run import StageResult
     verify_prepared_inputs(plan)
@@ -63,8 +112,7 @@ def run(plan,*,events,commands):
     if plan.stage in ('capture','real_sim','real_evaluation'):
         if 'capture_session' not in plan.resolved_inputs:raise DataError('CAPTURE_INPUT_REQUIRED','capture_session','Explicit preserved Capture/Snapshot session required for offline mode')
         # Builder owns portable Capture schemas and measured-time validation.
-        from real2sim_builder.capture import load_session
-        root=Path(plan.resolved_inputs['capture_session']['path']);manifest,samples,_=load_session(root)
+        root=Path(plan.resolved_inputs['capture_session']['path']);manifest,samples,_=reader.load_session(root)
         report['capture']={'samples':len(samples),'clock':manifest['clock'],'joint_names':manifest['joint_names'],
                            'images':sum(len(s['images']) for s in samples),'schema':manifest['schema']}
         if not samples:raise ValueError('No committed measured observations')
@@ -107,8 +155,22 @@ def run(plan,*,events,commands):
                 # Even an offline encoder preflight requires the command-phase record.
                 mapper=mapper_from_scene(plan.scene,command_id,role='follower',phase='device_command')
                 if profile is None or mapper.profile!=profile:raise ValueError('Selected Calibration and Scene command binding identity/model differ')
-                requested=dict(zip(JOINTS,action.tolist()));encoded=mapper.urdf_to_calibrated(requested)
-                report['policy']['native_target']=encoded;report['command_binding']='validated offline; no motor activation/SDK send'
+                if 'motor_calibration' not in plan.resolved_inputs:
+                    report.update(status='PARTIAL',command_binding='device_profile.calibration_path missing; SDK encoding not verified')
+                else:
+                    from .control import encode_model_target
+                    from .devices import DeviceError
+                    from ..data.native import file_sha256
+                    models=[plan.scene.root/f.path for f in plan.scene.files if f.sha256==urdf and f.path.endswith('.urdf')]
+                    if len(models)!=1 or file_sha256(models[0])!=mapper.profile['urdf_sha256']:raise ValueError('Command Calibration execution URDF identity differs')
+                    try:
+                        follower=_encoding_follower(profile,cfg,Path(plan.resolved_inputs['motor_calibration']['path']))
+                        _,native,checked=encode_model_target(action,follower=follower,model_bounds={n:s['limits'] for n,s in joint_specs(models[0]).items()})
+                    except (ValueError,DeviceError) as error:
+                        _reject_command(plan,report,error)
+                        raise
+                    report['policy'].update(native_target=native,sdk_goal_raw=follower.last_encoded_goal_raw,command_preflight=checked)
+                    report['command_binding']='encoding verified offline; no hardware safety approval or command send'
     if plan.stage=='precision_calibration' and 'joint_reviews' not in report:raise ValueError('Explicit preserved calibration_profile required')
     plan.output_path.mkdir();path=plan.output_path/'offline-inspection.json';atomic_json(path,report)
     return StageResult('completed',(str(path),),0,{'status':report['status'],'hardware_connected':False,'physical_verified':False})
