@@ -122,11 +122,12 @@ def policy_catalog() -> list[dict]:
 
 
 def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
-    from ..recipe import policy_directory
-    _pinned();folder=policy_directory(path);root=folder.parent if (folder.parent/'workbench-checkpoint.json').is_file() else folder
+    _pinned();root=Path(path).resolve();root=root.parent if root.name=='pretrained_model' else root
     if (root/'workbench-checkpoint.json').is_file():
         record=checkpoint_record(root,expected=expected);folder=root/'pretrained_model'
     else:
+        folder=Path(path).resolve()
+        if not (folder/'config.json').is_file():folder=folder/'pretrained_model'
         required=['config.json','model.safetensors','policy_preprocessor.json','policy_postprocessor.json']
         if any(not (folder/name).is_file() for name in required):raise DataError('CHECKPOINT_INCOMPLETE','policy','Official local model/config/processors required')
         files={p.name:file_sha256(p) for p in folder.iterdir() if p.is_file()}

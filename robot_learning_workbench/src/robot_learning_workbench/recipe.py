@@ -65,8 +65,8 @@ class RecipeDocument:
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
- 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract','motor_calibration'}),
- 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
+ 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
+ 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},set()),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
  'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
  'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session'})}
@@ -235,15 +235,6 @@ def _resolve(doc,value):
     return (doc.base_dir/path).resolve() if not path.is_absolute() else path.resolve()
 
 
-def policy_directory(path: Path|str) -> Path:
-    """Official model folder; a Workbench root keeps its closed-record ownership."""
-    root=Path(path).resolve()
-    if (root/'workbench-checkpoint.json').is_file():return root/'pretrained_model'
-    if (root/'config.json').is_file():return root
-    if (root/'pretrained_model/config.json').is_file():return root/'pretrained_model'
-    raise RecipeError('INPUT_INVALID','inputs.policy','official policy directory/config required')
-
-
 def _artifact(path):
     from .data.native import file_sha256
     if not path.exists():_fail('inputs',f'missing {path}',code='INPUT_MISSING')
@@ -345,9 +336,6 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                         or not isinstance(pinned.get('path'),str) or not Path(pinned['path']).is_absolute()):
                     _fail('inputs.'+key,'official resolver must supply a pinned local snapshot; no implicit network/cache write',doc.path,code='INPUT_UNRESOLVED')
             path=Path(pinned['path']).resolve() if pinned is not None else _resolve(doc,item)
-            if key=='policy':
-                folder=policy_directory(path)
-                if (folder.parent/'workbench-checkpoint.json').is_file():path=folder.parent
             if key=='scene':
                 actual=load_scene(path,expected=scene.identity if scene is not None else None);scene=actual
                 identity=_plain(actual.identity);entry={'kind':'scene','path':str(path),'identity':identity}
@@ -367,9 +355,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                     if key=='training_config' and isinstance(data.get('policy'),dict) and str(data['policy'].get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.training_config','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents[key]=_freeze(data)
                 if key=='policy':
-                    folder=policy_directory(path);key_path=(folder/'config.json').relative_to(path).as_posix()
-                    config,digest=_json_input(folder/'config.json')
-                    if entry['files'][key_path]!=digest:_fail('inputs.policy','changed config',doc.path,code='INPUT_CHANGED')
+                    if not path.is_dir() or not (path/'config.json').is_file():_fail('inputs.policy','official policy directory/config required',doc.path)
+                    config,digest=_json_input(path/'config.json')
+                    if entry['files']['config.json']!=digest:_fail('inputs.policy','changed config',doc.path,code='INPUT_CHANGED')
                     if str(config.get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.policy','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents['policy_config']=_freeze(config)
                 if key=='dataset' and spec.stage in ('train','offline_validation') and (not path.is_dir() or not (path/'meta/info.json').is_file()):
@@ -441,11 +429,10 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
-    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation'):
-        from .robot.offline import capture_module
-        capture=capture_module()
+        import real2sim_builder.capture as capture
         for name in ('capture.py','files.py','scene.py'):
             p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)

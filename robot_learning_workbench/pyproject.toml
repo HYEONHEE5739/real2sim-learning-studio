@@ -13,7 +13,6 @@ dependencies = ["scene-contract>=0.2,<0.3", "PyYAML>=6,<7", "numpy>=1.26,<2", "h
 test = ["pytest>=8"]
 ui = ["PyQt6>=6.11,<6.12"]
 native = ["lerobot==0.4.1"]
-offline = ["real2sim-builder>=0.1,<0.2", "lerobot==0.4.1"]
 simulation = ["mujoco==3.3.7", "scipy>=1.15,<1.16", "pin==2.7.0", "trimesh>=4,<5", "torch==2.7.0"]
 
 [tool.setuptools.packages.find]

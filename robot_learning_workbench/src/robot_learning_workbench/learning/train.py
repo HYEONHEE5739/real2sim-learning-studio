@@ -39,14 +39,11 @@ def validate_config(config: dict,*,dataset: Path,output: Path,mode: str) -> None
 
 
 def training_command(plan) -> tuple[list[str],dict]:
-    from ..recipe import _plain,policy_directory
+    from ..recipe import _plain
     config=_plain(plan.input_documents['training_config']);dataset=Path(plan.resolved_inputs['dataset']['path']);mode=plan.effective_settings['execution']['mode']
     validate_config(config,dataset=dataset,output=plan.output_path,mode=mode)
     control_contract(load_catalog(dataset))  # Known IO must validate; external official data may have no Workbench provenance.
-    if mode=='finetune' and ('policy' not in plan.resolved_inputs or policy_directory(plan.resolved_inputs['policy']['path'])!=Path(config['policy']['pretrained_path']).resolve()):raise DataError('TRAIN_CONFIG_INVALID','policy','Recipe policy must pin local fine-tune weights')
-    if mode=='finetune':
-        folder=policy_directory(plan.resolved_inputs['policy']['path'])
-        if (folder.parent/'workbench-checkpoint.json').is_file():checkpoint_record(folder.parent)
+    if mode=='finetune' and Path(plan.resolved_inputs.get('policy',{}).get('path','')).resolve()!=Path(config['policy']['pretrained_path']).resolve():raise DataError('TRAIN_CONFIG_INVALID','policy','Recipe policy must pin local fine-tune weights')
     path=Path(plan.resolved_inputs['training_config']['path']);module='robot_learning_workbench.learning.smol_compat' if config['policy']['type']=='smolvla' else 'lerobot.scripts.lerobot_train';args=[sys.executable,'-B','-m',module,'--config_path='+str(path)]
     if mode=='resume':
         if 'checkpoint' not in plan.resolved_inputs:raise DataError('RESUME_INCOMPATIBLE','checkpoint','Explicit closed local checkpoint required')
