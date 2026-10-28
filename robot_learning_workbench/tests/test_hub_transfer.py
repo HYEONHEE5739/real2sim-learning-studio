@@ -37,3 +37,15 @@ def test_upload_rejects_disguised_external_credential_symlink(tmp_path,monkeypat
     secret=tmp_path/'token';secret.write_text('controlled-fixture-secret');(artifact/'notes.bin').symlink_to(secret)
     monkeypatch.setattr(hub,'api',lambda:pytest.fail('Must reject before any remote call'))
     with pytest.raises(ValueError,match='symlink'):hub.upload(artifact,'owner/data','dataset',parent='a'*40,private=True,confirm=True)
+
+
+def test_create_repository_needs_explicit_approval_and_never_reuses_existing(tmp_path,monkeypatch):
+    from robot_learning_workbench.learning import hub
+    calls=[]
+    class API:
+        def create_repo(self,**kw):calls.append(kw);return 'https://huggingface.co/datasets/owner/new-data'
+    monkeypatch.setattr(hub,'api',lambda:API())
+    with pytest.raises(ValueError):hub.create_repository('owner/new-data','dataset',private=True,confirm=False)
+    assert calls==[]
+    out=hub.create_repository('owner/new-data','dataset',private=True,confirm=True)
+    assert out['private'] is True and calls==[{'repo_id':'owner/new-data','repo_type':'dataset','private':True,'exist_ok':False}]

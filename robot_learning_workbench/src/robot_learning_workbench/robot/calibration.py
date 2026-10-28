@@ -447,3 +447,28 @@ def mapper_from_scene(package, calibration_id, *, role, phase):
     mapper = mapper_from_metadata(parameters) if parameters.get('schema') == MAPPING else PrecisionMapper(effective)
     if mapper.profile != effective: raise ValueError('Execution model mapping mismatch')
     return mapper
+
+
+def review_revision(source: Path|str, output: Path|str, *, references: dict|None=None, tolerance_deg: float=.5) -> dict:
+    """Review explicit angle references; save a new revision without motor writes.
+
+    Feedback alone supplies no angle ground truth. Omitted references re-review
+    the existing evidence and cannot establish new independent physical accuracy.
+    """
+    from ..data.native import atomic_json
+    import uuid
+    source=Path(source).resolve();output=Path(output).resolve();raw=source.read_bytes();profile=load_profile(source)
+    if output==source or output.exists():raise FileExistsError('A new profile Revision path is required')
+    if references is not None and (not isinstance(references,dict) or not references or set(references)-set(profile['joints'])):raise ValueError('Explicit measured joint reference records required')
+    previous=copy.deepcopy(profile);joints={}
+    for n,entry in profile['joints'].items():
+        candidate=copy.deepcopy(entry)
+        if references is not None and n in references:
+            candidate=fit_joint(references[n],entry['motor'],n,entry['limits'],entry.get('reference_mode','angle'))
+        reviewed=review_joint(candidate,tolerance_deg)
+        if reviewed['status']!='REVIEWED_MANUAL':raise ValueError(n+': NEEDS_MORE_DATA; no reviewed revision published')
+        joints[n]=reviewed
+    profile.update(id='profile_'+uuid.uuid4().hex,parent_sha256=hashlib.sha256(raw).hexdigest(),parent_path=str(source),joints=joints,physical_verified=False)
+    PrecisionMapper(profile);atomic_json(output,profile,exclusive=True)
+    return {'path':str(output),'parent_sha256':profile['parent_sha256'],'physical_verified':False,'new_reference_input':references is not None,'new_independent_reference':False,
+        'comparison':{n:{'slope_delta':joints[n]['rad_per_count']-previous['joints'][n]['rad_per_count'],'reference_angle_delta_rad':joints[n]['reference_angle_rad']-previous['joints'][n]['reference_angle_rad'],'max_fit_error_deg':joints[n]['review']['max_error_deg']}for n in joints}}

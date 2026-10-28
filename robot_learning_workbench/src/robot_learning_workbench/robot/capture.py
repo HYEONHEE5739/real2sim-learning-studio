@@ -298,6 +298,8 @@ def save_session(root, *, model, mapping: dict, samples: list, images: list, met
     from ..data.native import atomic_json
     from real2sim_builder.capture import load_session
     root=Path(root);model=Path(model).resolve()
+    reserved={'schema','session_id','group_id','split','purpose','clock','joint_names','joint_units','q_measured_source','joint_mapping','source_robot_sha256','robot','cameras','samples','events','files','quality'}
+    if reserved&metadata.keys():raise ValueError('Capture metadata cannot override reserved measurement/identity fields')
     if not samples or len(samples)!=len(images):raise ValueError('Aligned nonempty samples/images required')
     dependencies=set()
     def visit(path):
@@ -327,7 +329,7 @@ def save_session(root, *, model, mapping: dict, samples: list, images: list, met
             relative=f'images/{index:08d}-{camera}.png';target=root/relative;target.parent.mkdir(exist_ok=True)
             Image.fromarray(rgb).save(target);files[relative]=hashlib.sha256(target.read_bytes()).hexdigest()
             timing=row.get('camera_timing',{}).get(camera,{})
-            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
+            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
     atomic_json(root/'samples.json',rows);atomic_json(root/'events.json',[])
     for name in ('samples.json','events.json'):files[name]=hashlib.sha256((root/name).read_bytes()).hexdigest()
     manifest=dict(schema='real2sim.capture/1',session_id=root.name.replace('-','_'),group_id=root.name.replace('-','_'),split='train',purpose='snapshot' if len(rows)==1 else 'demonstration',

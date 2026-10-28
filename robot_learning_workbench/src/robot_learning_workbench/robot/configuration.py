@@ -21,6 +21,15 @@ def create_observer(spec: dict, profile: dict):
     return cls.from_config(cfg,profile=profile,calibration_path=path,identity=profile['identity'],model_hash=profile['urdf_sha256'])
 
 
+def bind_gripper_command(device, scene, calibration_id: str) -> dict:
+    """Explicit command-phase evidence only; this grants no motion approval."""
+    from .calibration import mapper_from_scene
+    mapper=mapper_from_scene(scene,calibration_id,role='follower',phase='device_command')
+    if device.profile!=mapper.profile or 'gripper'not in mapper.profile['joints']:raise ValueError('Command Calibration differs from connected motor/model mapping')
+    device._command_binding_verified=True
+    return {'calibration_id':calibration_id,'mapping_sha256':mapper.metadata()['sha256'],'motion_approved':False}
+
+
 def create_leader(plan):
     """Explicit SDK construction; callers must call connect/activate separately."""
     from .calibration import mapper_from_scene

@@ -213,7 +213,7 @@ class NativeRun:
     def __init__(self,output,execution,*,metadata=None,append=False):
         import fcntl
         self.root=Path(output).resolve();self.execution=read_execution=plain(execution)
-        if execution.get('stage') not in ('source','annotation','datagen','simulation_evaluation','real_evaluation'):raise DataError('DATA_INVALID','execution.stage','recording stage required')
+        if execution.get('stage') not in ('source','annotation','datagen','simulation_evaluation','real_evaluation','teleoperation'):raise DataError('DATA_INVALID','execution.stage','recording stage required')
         if append:
             self._append_existing(metadata)
             return

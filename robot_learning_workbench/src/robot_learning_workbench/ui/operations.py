@@ -5,7 +5,7 @@ import sys
 
 
 def stage_support(stage: str) -> dict:
-    if stage in ('annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
+    if stage in ('teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
     if stage=='source':return {'runnable':True,'reason':'Recorded Target Stream 또는 Live Leader 읽기 → Simulation Source. 실제 Follower 명령 없음.'}
@@ -34,6 +34,17 @@ def prepared(path: str,modules: str) -> dict:
         if 'calibration_profile'not in plan.resolved_inputs:raise ValueError('선택한 Precision Profile이 필요합니다')
         open_inputs(plan)  # Constructors only: no connection, camera start or motor writes.
         return {**support,'state':'runtime_ready','reason':'실물 읽기 전용 · Goal/Torque 쓰기 없음 · 실물 팔 구동 금지','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+    if plan.stage=='teleoperation':
+        if plan.effective_settings['execution']['mode']=='fake_all':
+            from ..robot.teleoperation import fake_device
+            from ..robot.calibration import load_profile
+            for key,profile in (('device_profile','calibration_profile'),('leader_device_profile','leader_calibration_profile')):
+                if key not in plan.input_documents or profile not in plan.resolved_inputs:raise ValueError('Fake full-axis Teleoperation needs explicit Leader and Follower profiles')
+                from ..recipe import _plain
+                fake_device(_plain(plan.input_documents[key]),load_profile(plan.resolved_inputs[profile]['path']))
+        else:
+            from ..robot.live import open_inputs
+            open_inputs(plan)
     if plan.stage=='source':
         if 'source_dataset' in plan.resolved_inputs:
             from ..data.native import load_catalog
@@ -91,6 +102,12 @@ def execute(request: dict) -> dict:
     if op=='hub_resolve':
         from ..learning.hub import resolve
         return resolve(**args)
+    if op=='precision_revision':
+        from ..robot.calibration import review_revision
+        return review_revision(**args)
+    if op=='hub_create':
+        from ..learning.hub import create_repository
+        return create_repository(**args)
     if op=='prepare':return prepared(**args)
     if op=='scene':
         from scene_contract.package import load_scene

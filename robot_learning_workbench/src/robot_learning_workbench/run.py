@@ -291,13 +291,14 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
     _atomic(path,_plain(receipt));_append_event(run_dir,state,'command_ack',_plain(receipt));return receipt
 
 
-_COMMANDS={'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
+_COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
 
 
 def _command(command):
     if not isinstance(command,dict) or set(command)-{'command_id','kind','payload','episode_id','env_index'}:_fail('PROTOCOL_INVALID','command','unknown envelope fields')
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
+    if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')
     if kind=='step' and (type(payload.get('count')) is not int or not 1<=payload['count']<=1000):_fail('PROTOCOL_INVALID','step.count','expected 1..1000')
     if kind=='mark' and (not isinstance(payload.get('event'),str) or type(payload.get('frame')) is not int or payload['frame']<0):_fail('PROTOCOL_INVALID','mark','event and nonnegative frame required')
     if kind in ('mark','skip','save','discard') and not command.get('episode_id'):_fail('PROTOCOL_INVALID','episode_id','explicit target required')
@@ -387,6 +388,7 @@ def _run_stage(plan,*,events,commands):
         module=f'engines.{plan.engine}.{filename}';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.live';function='run'
+    elif plan.stage=='teleoperation':module='robot.teleoperation';function='run'
     elif plan.stage in ('hub_download','hub_upload'):module='learning.hub';function='run'
     elif plan.stage=='train':module='learning.train';function='train'
     elif plan.stage=='offline_validation':module='learning.validate';function='evaluate'
@@ -394,7 +396,7 @@ def _run_stage(plan,*,events,commands):
     if not (package/Path(*module.split('.'))).with_suffix('.py').is_file():_fail('STAGE_UNAVAILABLE','stage',module+' is not implemented')
     launcher=None
     try:
-        if plan.engine=='isaac' and plan.stage in ('source','annotation','datagen','simulation_evaluation'):
+        if plan.engine=='isaac' and (plan.stage in ('source','annotation','datagen','simulation_evaluation') or plan.stage=='real_sim' and plan.effective_settings['execution'].get('mode')!='offline'):
             from isaaclab.app import AppLauncher
             # SimulationApp5.1 fast_shutdown=True may exit the process inside
             # close(), before execute() publishes its terminal run record.

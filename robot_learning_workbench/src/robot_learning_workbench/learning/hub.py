@@ -12,6 +12,14 @@ from ..data.native import DataError,atomic_json
 def api():return HfApi()
 
 
+def create_repository(repo_id: str, repo_type: str, *, private: bool, confirm: bool) -> dict:
+    """Explicit remote mutation only; never create a Repo as an upload fallback."""
+    validate(repo_id,repo_type,'main')
+    if type(private)is not bool or confirm is not True:raise DataError('HUB_APPROVAL_REQUIRED','hub','Explicit Repo/type/visibility and creation approval required')
+    url=api().create_repo(repo_id=repo_id,repo_type=repo_type,private=private,exist_ok=False)
+    return dict(repo_id=repo_id,repo_type=repo_type,private=private,url=str(url),created=True)
+
+
 def validate(repo_id,repo_type,revision):
     validate_repo_id(repo_id)
     if repo_type not in ('model','dataset') or not isinstance(revision,str) or not revision.strip():

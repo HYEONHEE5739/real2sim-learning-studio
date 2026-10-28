@@ -132,3 +132,15 @@ def test_fit_review_validation_are_separate_and_coefficients_checked(slope_sign)
     c.PrecisionMapper(meta)
     meta=copy.deepcopy(meta);meta['joints']['shoulder_pan']['anchor_raw']+=1
     with pytest.raises(ValueError):c.PrecisionMapper(meta)
+
+
+def test_review_revision_preserves_original_and_never_claims_physical_accuracy(tmp_path):
+    profile=Path(INV['roles']['follower']['profile_path']);original=profile.read_bytes()
+    target=tmp_path/'reviewed.json'
+    result=c.review_revision(profile,target)
+    saved=c.load_profile(target)
+    assert result['physical_verified'] is False and saved['physical_verified'] is False
+    assert saved['parent_sha256']==hashlib.sha256(original).hexdigest()
+    assert profile.read_bytes()==original and all(e['status']=='REVIEWED_MANUAL'for e in saved['joints'].values())
+    assert result['new_independent_reference'] is False
+    with pytest.raises(FileExistsError):c.review_revision(profile,target)

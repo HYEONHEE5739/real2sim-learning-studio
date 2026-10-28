@@ -24,3 +24,10 @@ def test_capture_writer_reuses_builder_reader_and_preserves_model_and_measuremen
     assert model.read_bytes()==(output/m['robot']['path']).read_bytes()
     assert samples[0]['images']==[]
     with pytest.raises(FileExistsError):capture.save_session(output,model=model,mapping=mapping,samples=samples,images=[images],metadata={})
+
+
+def test_capture_rejects_metadata_that_relabels_measured_data(tmp_path):
+    from robot_learning_workbench.robot.calibration import JOINTS
+    model=tmp_path/'robot.urdf';model.write_text('<robot>'+''.join('<joint name="'+n+'" type="revolute"/>'for n in JOINTS)+'</robot>')
+    with pytest.raises(ValueError,match='reserved'):
+        capture.save_session(tmp_path/'bad',model=model,mapping={},samples=[{'id':'s','timestamp_ns':1,'q_measured':[0.]*6}],images=[{n:np.zeros((480,640,3),np.uint8)for n in ('side','wrist')}],metadata={'q_measured_source':'policy_prediction'})

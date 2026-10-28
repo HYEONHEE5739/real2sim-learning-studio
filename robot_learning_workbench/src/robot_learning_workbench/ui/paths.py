@@ -2,7 +2,7 @@
 from pathlib import Path
 import uuid
 
-GROUPS={'scene':'scenes','source':'source','annotation':'annotation','datagen':'datagen',
+GROUPS={'teleoperation':'source','scene':'scenes','source':'source','annotation':'annotation','datagen':'datagen',
         'curation':'dataset','convert':'dataset','merge':'dataset','train':'policy',
         'simulation_evaluation':'evaluation','offline_validation':'evaluation','real_evaluation':'evaluation',
         'capture':'evaluation','precision_calibration':'evaluation','real_sim':'evaluation'}

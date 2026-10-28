@@ -85,6 +85,7 @@ class Follower:
         self.last_raw=None; self.last_encoded_goal_raw=None; self._last_goal_ns=None
         self.cleanup=None; self.metadata={'native_units':{n:'percent_0_100' if n=='gripper' else 'calibration_relative_degree' for n in JOINTS}}
         self.read_only=bool(read_only or any(c.__module__.startswith('lerobot.') for c in type(self.bus).__mro__))
+        self._port_lock=None
 
     def _check_identity(self, *, hardware=False):
         if self.identity != self.profile['identity'] or self.identity.get('role') != self.role or self.profile.get('role') != self.role:
@@ -110,6 +111,11 @@ class Follower:
     def connect(self):
         if self._connected or self._closed: raise DeviceError('connect','Already connected or closed',effect='not_applied')
         try:
+            if self.read_only:
+                import os,fcntl
+                key=hashlib.sha256(str(Path(self.bus.port).resolve()).encode()).hexdigest()
+                fd=os.open('/tmp/rlw-'+str(os.getuid())+'-serial-'+key+'.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+                self._port_lock=os.fdopen(fd,'r+b');fcntl.flock(self._port_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             self.bus.connect()  # Official device.connect would configure/calibrate.
             self._check_identity(hardware=True)
             if self.role=='follower' and set(self.device.action_features) != {n+'.pos' for n in JOINTS}: raise ValueError('Unexpected action schema')
@@ -159,6 +165,7 @@ class Follower:
     def stop(self):
         """No bus write: prohibit new goals, hold the last hardware target."""
         self._sending=False; self._last_goal_ns=None
+        self._gripper_proposal=None
 
     def encode_goal(self,target):
         from .control import encode_goal
@@ -199,6 +206,7 @@ class Follower:
                 if self.bus.is_connected: self.bus.port_handler.closePort()
             except BaseException as exc: errors.append(str(exc))
             self._closed=True; self._connected=False
+            if self._port_lock is not None:self._port_lock.close();self._port_lock=None
         closed=not self.bus.is_connected
         self.cleanup=CleanupResult(closed,release,'unknown' if errors else ('unmeasured' if release else 'preserved'),tuple(errors))
         if errors or not closed: raise DeviceError('disconnect','; '.join(errors) or 'Port state unknown',cleanup=self.cleanup)
@@ -228,16 +236,18 @@ def gripper_proposal(follower: Follower, requested_rad: float, *, model_bounds: 
     """Calculate a single-motor command; explicit displacement budget has no default."""
     from .control import checked_target,encode_goal
     import numpy as np
+    if any(c.__module__.startswith('lerobot.')for c in type(follower.bus).__mro__) and not getattr(follower,'_command_binding_verified',False):
+        raise DeviceError('gripper_preflight','Explicit command Calibration binding required; observation mapping alone cannot authorize motion',effect='not_applied')
     if not follower.read_only or follower.role!='follower' or not follower._connected or getattr(follower,'_gripper_consumed',False):
         raise DeviceError('gripper_preflight','Connected observation-only Follower required; one shot per connection',effect='not_applied')
     if type(max_delta_raw)is not int or max_delta_raw<=0 or isinstance(requested_rad,bool) or not math.isfinite(requested_rad):
         raise DeviceError('gripper_preflight','Explicit finite target and positive integer displacement budget required',effect='not_applied')
     follower._check_identity(hardware=True)
     native,interval=follower.read();bus=follower.bus;current=int(follower.last_raw['gripper'])
-    if time.monotonic_ns()-interval['end']['monotonic_ns']>200_000_000:raise DeviceError('gripper_preflight','Stale feedback',effect='not_applied')
+    if time.monotonic_ns()-interval['end']['monotonic_ns']>200_000_000 or interval['end']['monotonic_ns']-interval['start']['monotonic_ns']>200_000_000:raise DeviceError('gripper_preflight','Stale or slow feedback',effect='not_applied')
     if bus.motors['gripper'].id!=6 or bus.read('Operating_Mode','gripper',normalize=False)!=0 or bus.read('Torque_Enable','gripper',normalize=False)!=1:
         raise DeviceError('gripper_preflight','Expected motor6 in existing position mode with torque already on; no automatic torque change',effect='not_applied')
-    if abs(bus.read('Goal_Position','gripper',normalize=False)-current)>1:
+    if bus.read('Goal_Position','gripper',normalize=False)!=current:
         raise DeviceError('gripper_preflight','Existing gripper goal differs from feedback; motion state unclear',effect='not_applied')
     # Only the gripper inverse is needed: arm feedback is never an arm goal.
     profile=copy.deepcopy(follower.profile)
@@ -270,10 +280,11 @@ def send_gripper_once(follower: Follower, proposal: dict, *, approved: bool=Fals
         raise DeviceError('gripper_send','Proposal/Device identity changed',effect='not_applied')
     if not 0<=time.monotonic_ns()-proposal['created_ns']<=30_000_000_000:
         raise DeviceError('gripper_send','Proposal expired; new read and approval required',effect='not_applied')
-    follower._check_identity(hardware=True);bus=follower.bus
-    if bus.read('Present_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Torque_Enable','gripper',normalize=False)!=1 or bus.read('Operating_Mode','gripper',normalize=False)!=0:
-        raise DeviceError('gripper_send','Feedback/torque/mode changed; authorization invalid',effect='not_applied')
     follower._gripper_consumed=True
+    check_start=time.monotonic_ns();follower._check_identity(hardware=True);bus=follower.bus
+    if bus.read('Present_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Goal_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Torque_Enable','gripper',normalize=False)!=1 or bus.read('Operating_Mode','gripper',normalize=False)!=0:
+        raise DeviceError('gripper_send','Feedback/torque/mode changed; authorization invalid',effect='not_applied')
+    if time.monotonic_ns()-check_start>200_000_000:raise DeviceError('gripper_send','Pre-send reads exceeded 200ms; authorization consumed without sending',effect='not_applied')
     try:
         start=stamp();bus.write('Goal_Position','gripper',proposal['target_raw'],normalize=False);end=stamp()
         feedback=bus.read('Present_Position','gripper',normalize=False)

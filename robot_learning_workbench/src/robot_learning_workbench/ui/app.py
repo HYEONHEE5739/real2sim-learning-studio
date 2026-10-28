@@ -67,12 +67,12 @@ class Window(QMainWindow):
         self.closing=False;self.cancelled_on_close=set()
         central=QWidget();self.setCentralWidget(central);layout=QHBoxLayout(central);self.navigation=QListWidget();layout.addWidget(self.navigation,1);self.stack=QStackedWidget();layout.addWidget(self.stack,5)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
-        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self) for stage in ('source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
+        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self) for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
         self.source_tabs=QTabWidget();self.source_tabs.addTab(self.workflows['source'],'Simulation Source 수집');self.source_tabs.addTab(self.source,'저장 Source 검토')
-        pages=[('Scene',self.scene),('Source',self.source_tabs),('Annotation',self.workflows['annotation']),('DataGen',self.workflows['datagen']),('Curation',self.curation),('LeRobot Training',self.workflows['train']),('Evaluation',self.workflows['simulation_evaluation']),('독립 Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture 오프라인',self.workflows['capture']),('Precision 오프라인',self.workflows['precision_calibration']),('Real Policy 오프라인',self.workflows['real_evaluation']),('Real/Sim 오프라인',self.workflows['real_sim'])]
+        pages=[('Scene',self.scene),('Source',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('DataGen',self.workflows['datagen']),('Curation',self.curation),('LeRobot Training',self.workflows['train']),('Evaluation',self.workflows['simulation_evaluation']),('독립 Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture · 실물 읽기/보존',self.workflows['capture']),('Precision · 측정/검토',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real/Sim · 비교',self.workflows['real_sim'])]
         for name,page in pages:self.navigation.addItem(name);self.stack.addWidget(page)
         self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex);self.navigation.setCurrentRow(0)
-        self.statusBar().showMessage('공식 LeRobot 학습·Simulation · 모델/Scene 호환성 별도 검사 · 실물 제어 비활성 · Hub 업로드는 명시 요청')
+        self.statusBar().showMessage('공식 LeRobot 학습·Simulation · 모델/Scene 호환성 별도 검사 · 실물 읽기 전용 · 팔 Goal/Torque 금지 · Gripper는 별도 승인 · Hub 쓰기 별도 승인')
     def closeEvent(self,event):
         active=[page for page in self.workflows.values() if page.active()]
         if active:
