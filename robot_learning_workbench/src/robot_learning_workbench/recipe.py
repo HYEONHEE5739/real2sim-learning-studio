@@ -65,19 +65,19 @@ class RecipeDocument:
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
- 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile'}),
+ 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
  'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},set()),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
- 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile'}),
- 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile'})}
+ 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
+ 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session'})}
 _EXEC={
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
- 'real_evaluation':({'episodes'},{'timeout_s','enable_motion'}),'train':({'mode'},set()),
+ 'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction'}),'train':({'mode'},set()),
  'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),set()),'merge':(set(),set()),
- 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes'}),
- 'precision_calibration':(set(),set()),'real_sim':(set(),{'headless'})}
+ 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes','mode'}),
+ 'precision_calibration':(set(),{'mode'}),'real_sim':(set(),{'headless','mode'})}
 _ROLES={'source':{'signals','metrics'},'annotation':{'signals','acceptance','metrics'},
  'datagen':{'signals','acceptance','metrics'},'simulation_evaluation':{'signals','success','metrics'},'real_sim':{'signals','metrics'}}
 
@@ -127,7 +127,7 @@ def _validate(data,path):
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
-            if value not in (('manual','auto') if stage=='annotation' else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
+            if value not in (('manual','auto') if stage=='annotation' else ('offline',) if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -429,7 +429,12 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
+    if spec.stage in ('capture','real_sim','real_evaluation'):
+        import real2sim_builder.capture as capture
+        for name in ('capture.py','files.py','scene.py'):
+            p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)
     if 'env_num' in runtime_execution:runtime_execution['num_envs']=runtime_execution['env_num']
     effective={'execution':runtime_execution,'task_modules_sha256':source_files,'code_files':code_files}

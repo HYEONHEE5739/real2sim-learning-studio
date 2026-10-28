@@ -49,3 +49,13 @@ Hub는 명시 Resolve→Commit 고정→공식 cache snapshot 경로를 반환�
 독립 Spec 리뷰의 Scratch/가중치 의미 혼동·외부 심볼릭 링크 유출·Registry 응답 race와 Standards 리뷰의 승인 표시/Recipe 불일치·Fine-tune 상대 경로를 수정했다. Spec 보고서는 수정 확인을 기록했지만 최종 agent turn은 서비스 usage limit으로 종료됐다. Standards의 두 건은 주 에이전트의 실제 Qt/실행 및 소스 확인으로 closure했으며 독립 재검토 완료라고 보고하지 않는다. 외부 공식 Dataset의 독립 Validation은 IO 오차만 측정할 수 있으며 lineage가 없으면 train/val 격리를 입증했다고 표시하지 않는다. SO101 배포 검사는 여전히 별도 strict 계약을 요구한다.
 
 Phase3 최종 전체 회귀981 PASS/skip0, 기존 torchvision warning2개. 실제 UI의10개 페이지·Registry/config·승인 초기화, ACT/Smol/Diffusion Validation 및 Diffusion 양 엔진1/4 실행을 구분해 검증했다.
+
+## Phase4 — 실물 경로의 오프라인 경계
+
+기존 Leader/Follower/CalibrationDevice/CameraReader의 수명·mapping·encoder·cleanup 계산을 재사용했다. 실제 ACT checkpoint/processor 출력→Saturation된 승인 model/motor 교집합→Precision inverse→SDK 정수 encoding→Fake Follower send/close를 시험했다. SDK 생성자의 공식 Config dataclass만 별도 검사하며 실물 SDK Device/포트를 생성하거나 연결하지 않는다.
+
+`robot/offline.py`는 기존 R03의 capture/precision_calibration/real_sim/real_evaluation Stage에서 **명시 offline** 보존 입력 검사만 수행한다. Builder가 소유한 Capture Reader·기존 profile fitter/검증과 Policy API를 호출하고 작은 inspection report만 저장한다. 새로운 Capture 저장 포맷/실행 프레임워크가 아니다. Qt에는 오프라인임을 명시한 네 화면을 연결했다. 실물 Calibration 수집·토크·실측 정확도·실제 Policy Rollout은 UNSUPPORTED/미검증이며 검사 worker 완료와 구분한다.
+
+원래 보존 snapshot/Precision 근거를 새 worker에서 읽었다. Capture는 내부 clock/image/model SHA가 유효하더라도 현재 Scene과 mapping/model/단위가 결합되지 않으면 PARTIAL이다. 이 상태에서 Policy inference/command 변환을 수행하지 않는다. 한계가 다른 역사 모델의 SHA를 같다고 재명명하지 않는다. 실물 command record가 없는 현재 v8을 자동 승인하지 않는다.
+
+Phase4 실제 Qt→기존 R03 worker의 보존 Precision 검사, 실제 저장 Snapshot/Capture 및 Real/Sim 입력 검사를 완료했다. Real Policy 보고서는 과거 Capture 결합 부재 때문에 PARTIAL·inference_performed=false·command_sent=false다. 공식 SDK/Fake 장치·Policy 집중110 PASS. 독립 Spec/Standards 두 축의 identity/단위/실행 코드 누락 지적을 수정하고 High/Medium0 closure를 받았다. Camera/Scene Calibration identity도 명시 결합이 없으면 승격하지 않는다. 전체 회귀의 진행 중 스냅샷과 최종 집중 검사를 구분하고 Phase6에서 다시 고정 코드 전체를 검증한다.

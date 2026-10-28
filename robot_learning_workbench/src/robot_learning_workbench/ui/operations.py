@@ -7,6 +7,7 @@ import sys
 def stage_support(stage: str) -> dict:
     if stage in ('annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
+    if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
     if stage=='source':return {'runnable':True,'reason':'명시 recorded target stream으로 실제 Simulation Source 수집. 실물 Leader/Follower는 실행하지 않습니다.'}
     return {'runnable':False,'reason':'이 단계의 실행 Runner는 구현·검증되지 않았습니다. 직접 API 기능과 구분합니다.'}
 
@@ -27,6 +28,7 @@ def prepared(path: str,modules: str) -> dict:
     from ..cli import prepare
     plan=prepare(path,task_modules=modules);support=stage_support(plan.stage)
     if not support['runnable']:return {**support,'state':'prepared','plan':plan.summary()}
+    if plan.stage in ('capture','precision_calibration','real_evaluation','real_sim') and plan.effective_settings['execution'].get('mode')!='offline':return {'runnable':False,'state':'prepared','reason':'명시 offline 검사만 지원합니다. 실물 장치 실행은 비활성입니다.','plan':plan.summary()}
     if plan.stage=='source':
         if 'source_dataset' not in plan.resolved_inputs:return {'runnable':False,'state':'prepared','reason':'이번 UI는 recorded target stream 수집만 지원합니다. 실물 장치 실행은 차단됩니다.','plan':plan.summary()}
         from ..data.native import load_catalog

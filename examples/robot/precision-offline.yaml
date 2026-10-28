@@ -1,0 +1,9 @@
+schema_version: 1
+stage: precision_calibration
+inputs:
+  device_profile: /your/device-profile.json
+  calibration_profile: /your/preserved-precision-profile.json
+execution:
+  mode: offline
+output:
+  directory: /your/workspace/evaluation/precision-inspection

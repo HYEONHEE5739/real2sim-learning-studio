@@ -9,7 +9,7 @@ def test_ui_never_offers_unimplemented_or_hardware_stages():
     assert operations.stage_support('hub_upload')['runnable']
     for name in ('real_evaluation','capture'):
         support=operations.stage_support(name)
-        assert not support['runnable'] and support['reason']
+        assert support['runnable'] and '오프라인' in support['reason']
 
 
 def test_worker_end_is_not_target_completion_or_task_success():

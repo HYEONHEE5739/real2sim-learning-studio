@@ -1,0 +1,114 @@
+"""Inspect preserved device/Capture/Policy inputs through R03; never open devices.
+
+Live collection, measured Calibration and real rollout are separate hardware gates.
+Reports contain diagnostics/references, not another Capture or Dataset format.
+"""
+from pathlib import Path
+import numpy as np
+from ..data.native import DataError,atomic_json
+from .calibration import JOINTS,load_profile,review_joint,mapper_from_scene
+
+
+def sdk_configuration(spec):
+    """Validate official constructor config, without constructing a serial SDK bus."""
+    role=spec.get('role')
+    if role=='leader':
+        from lerobot.teleoperators.so101_leader.config_so101_leader import SO101LeaderConfig
+        cls=SO101LeaderConfig
+    elif role=='follower':
+        from lerobot.robots.so101_follower.config_so101_follower import SO101FollowerConfig
+        cls=SO101FollowerConfig
+    else:raise ValueError('Explicit leader/follower role required')
+    cfg=cls(**dict(spec['sdk']))
+    if not cfg.use_degrees:raise ValueError('Precision mapping requires degree-native SDK config')
+    if role=='follower' and (cfg.cameras or cfg.max_relative_target is not None or not cfg.disable_torque_on_disconnect):raise ValueError('Explicit camera ownership, no SDK target limiter, release-on-disconnect required')
+    return cfg
+
+
+def capture_binding(manifest,scene,calibration_id):
+    """Return explicit unbound reasons; historical model changes need evidence."""
+    reasons=[]
+    if manifest.get('joint_names')!=list(JOINTS) or manifest.get('joint_units')!=['rad']*6:reasons.append('Capture requires declared six-joint model-radian coordinates')
+    if scene is None or not calibration_id:return reasons+['Explicit Scene/device_observation calibration binding missing']
+    from ..recipe import _plain
+    from ..data.native import digest
+    if manifest.get('scene_identity')!=_plain(scene.identity) or manifest.get('calibration_sha256')!=digest(_plain(scene.calibration)):
+        reasons.append('Capture camera/Scene Calibration identity is not explicitly bound')
+    mapper=mapper_from_scene(scene,calibration_id,role='follower',phase='device_observation')
+    if manifest.get('source_robot_sha256')!=mapper.profile['urdf_sha256'] or manifest.get('joint_mapping',{}).get('sha256')!=mapper.metadata()['sha256']:
+        reasons.append('Historical Capture model/mapping differs; approved rebinding/equivalence evidence required')
+    return reasons
+
+
+def run(plan,*,events,commands):
+    opts=plan.effective_settings['execution']
+    if opts.get('mode')!='offline' or opts.get('enable_motion'):raise DataError('HARDWARE_NOT_APPROVED','execution','Only explicit offline inspection is enabled; no port, torque or camera access')
+    from ..recipe import verify_prepared_inputs,_plain
+    from ..run import StageResult
+    verify_prepared_inputs(plan)
+    for cmd in commands():
+        if cmd['kind']=='cancel':
+            events({'kind':'command_ack','payload':{'command_id':cmd['command_id'],'status':'completed'}})
+            return StageResult('cancelled',(),0,{'hardware_connected':False})
+    device=_plain(plan.input_documents['device_profile']);cfg=sdk_configuration(device)
+    report=dict(stage=plan.stage,mode='offline',hardware_connected=False,physical_verified=False,
+                status='CODE_READY',sdk_config_class=type(cfg).__module__+'.'+type(cfg).__name__,
+                scope='preserved-input inspection; not hardware operation',inputs=_plain(plan.resolved_inputs))
+    profile=None
+    if 'calibration_profile' in plan.resolved_inputs:
+        profile=load_profile(plan.resolved_inputs['calibration_profile']['path'],role=device['role'])
+        if any(profile['identity'].get(k)!=getattr(cfg,k) for k in ('id','port')):raise ValueError('Selected device/config and Calibration identity differ')
+        report['joint_reviews']={n:{k:v for k,v in review_joint(e).items() if k in ('status','review','reason')} for n,e in profile['joints'].items()}
+        report['profile_physical_verified']=profile.get('physical_verified',False)
+    if plan.stage in ('capture','real_sim','real_evaluation'):
+        if 'capture_session' not in plan.resolved_inputs:raise DataError('CAPTURE_INPUT_REQUIRED','capture_session','Explicit preserved Capture/Snapshot session required for offline mode')
+        # Builder owns portable Capture schemas and measured-time validation.
+        from real2sim_builder.capture import load_session
+        root=Path(plan.resolved_inputs['capture_session']['path']);manifest,samples,_=load_session(root)
+        report['capture']={'samples':len(samples),'clock':manifest['clock'],'joint_names':manifest['joint_names'],
+                           'images':sum(len(s['images']) for s in samples),'schema':manifest['schema']}
+        if not samples:raise ValueError('No committed measured observations')
+        if 'camera_config' in plan.input_documents:
+            cameras=_plain(plan.input_documents['camera_config']).get('cameras',{})
+            actual={c['id']:c['resolution'] for c in manifest['cameras']}
+            if {n:c['resolution'] for n,c in cameras.items()}!=actual:raise ValueError('Selected camera config differs from recorded Capture')
+        if plan.scene is not None:
+            if tuple(manifest['joint_names'])!=JOINTS or tuple(plan.scene.scene['robot']['joint_order'])!=JOINTS:raise ValueError('Scene and measured Capture joint order differ')
+            report['scene_identity']=_plain(plan.scene_identity)
+            reasons=capture_binding(manifest,plan.scene,device.get('calibration_id'))
+            report['capture_binding']={'compatible':not reasons,'reasons':reasons}
+            if reasons:report['status']='PARTIAL'
+            report['real_sim_comparison']='measured inputs validated; new engine rendering/residual fitting not performed'
+        if plan.stage=='real_evaluation' and report.get('capture_binding',{}).get('compatible') is not True:
+            report.update(status='PARTIAL',policy={'inference_performed':False,'command_sent':False},command_binding='Capture coordinates not bound to selected Scene; no inference or command conversion')
+        elif plan.stage=='real_evaluation':
+            if plan.scene is None:raise ValueError('Explicit Scene required for offline Policy binding')
+            from ..learning.policy import policy_inputs,observation_batch,infer
+            from PIL import Image
+            robot=plan.scene.scene['robot'];urdf=robot.get('model_sha256')
+            if not urdf:
+                records=plan.scene.calibration['records'].values()
+                hashes={r['execution_model_sha256'] for r in records if r.get('kind')=='robot_residual' and r['application']['mode']=='baked'}
+                if len(hashes)!=1:raise ValueError('Explicit execution model identity required')
+                urdf=next(iter(hashes))
+            policy,pre,post,record,contract=policy_inputs(plan,urdf)
+            sample=samples[0];images={}
+            from real2sim_builder.scene import local_path
+            for image in sample['images']:
+                name=image['camera'].removeprefix('real_')
+                if name not in ('side','wrist'):raise ValueError('Explicit Side/Wrist camera mapping required')
+                images[name]=np.asarray(Image.open(local_path(root,image['path'])).convert('RGB'))
+            batch=observation_batch(np.asarray(sample['q_measured']),images,joint_order=manifest['joint_names'],task=opts.get('task_instruction'))
+            action=infer(policy,pre,post,batch,contract=contract)[0]
+            report['policy']={'step':record['step'],'action_model_rad':action.tolist(),'command_sent':False}
+            command_id=device.get('command_calibration_id')
+            if not command_id:report.update(status='PARTIAL',command_binding='missing explicit device_command calibration ID')
+            else:
+                # Even an offline encoder preflight requires the command-phase record.
+                mapper=mapper_from_scene(plan.scene,command_id,role='follower',phase='device_command')
+                if profile is None or mapper.profile!=profile:raise ValueError('Selected Calibration and Scene command binding identity/model differ')
+                requested=dict(zip(JOINTS,action.tolist()));encoded=mapper.urdf_to_calibrated(requested)
+                report['policy']['native_target']=encoded;report['command_binding']='validated offline; no motor activation/SDK send'
+    if plan.stage=='precision_calibration' and 'joint_reviews' not in report:raise ValueError('Explicit preserved calibration_profile required')
+    plan.output_path.mkdir();path=plan.output_path/'offline-inspection.json';atomic_json(path,report)
+    return StageResult('completed',(str(path),),0,{'status':report['status'],'hardware_connected':False,'physical_verified':False})
