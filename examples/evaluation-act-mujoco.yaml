@@ -1,0 +1,58 @@
+schema_version: 1
+stage: simulation_evaluation
+engine: mujoco
+inputs:
+  scene: ../assets-private/scene-v8-native/scene.json
+  engine_config: ../assets-private/mujoco-model.json
+  policy: ../checkpoints/act/pretrained_model
+execution:
+  episodes: 4
+  seed: 1047
+  timeout_s: 0.4
+  env_num: 4
+objects:
+  cube_red:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.00016576439562532378
+        - -0.2199281034363855
+  cube_blue:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.05516576439562532
+        - -0.2199281034363855
+  cube_green:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.11016576439562532
+        - -0.2199281034363855
+functions:
+  success:
+    function: pick_place.v8_evaluation
+    params:
+      object: cube_red
+      target: cup_a
+  signals:
+    grasp:
+      function: pick_place.stable_grasp
+      params:
+        object: cube_red
+  metrics:
+    function: pick_place.v8_metrics
+    params:
+      object: cube_red
+      target: cup_a
+output:
+  directory: ../workbench_runs/evaluation-act-mujoco

@@ -1,0 +1,44 @@
+{
+  "dataset": {
+    "repo_id": "workbench/native",
+    "root": "datasets/train",
+    "video_backend": "pyav",
+    "use_imagenet_stats": false
+  },
+  "policy": {
+    "type": "smolvla",
+    "device": "cpu",
+    "push_to_hub": false,
+    "vlm_model_name": "pretrained_models/SmolVLM2-500M-Video-Instruct",
+    "load_vlm_weights": true,
+    "chunk_size": 4,
+    "n_action_steps": 4,
+    "num_vlm_layers": 1,
+    "num_expert_layers": 1,
+    "num_steps": 2
+  },
+  "output_dir": "workbench_runs/train-smolvla",
+  "steps": 2,
+  "batch_size": 1,
+  "num_workers": 0,
+  "eval_freq": 0,
+  "log_freq": 1,
+  "save_freq": 1,
+  "save_checkpoint": true,
+  "seed": 1047,
+  "wandb": {
+    "enable": false
+  },
+  "use_policy_training_preset": false,
+  "optimizer": {
+    "type": "adamw",
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "grad_clip_norm": 10
+  },
+  "scheduler": {
+    "type": "diffuser",
+    "name": "constant",
+    "num_warmup_steps": 0
+  }
+}

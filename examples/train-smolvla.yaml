@@ -1,0 +1,9 @@
+execution:
+  mode: scratch
+inputs:
+  dataset: ../datasets/train
+  training_config: smolvla-smoke.json
+output:
+  directory: ../workbench_runs/train-smolvla
+schema_version: 1
+stage: train

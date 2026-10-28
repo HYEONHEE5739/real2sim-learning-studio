@@ -1,0 +1,285 @@
+"""Host receipt-time Capture calculations. No acquisition, engine or writer loop."""
+from collections import deque
+import copy
+import time
+import numpy as np
+from .calibration import JOINTS, LEGACY_MAPPER, mapper_from_metadata, values
+
+def require_capture_mapping(state):
+    mapper_from_metadata(state['sim_joint_mapping'])
+
+def to_sim(native): return LEGACY_MAPPER.calibrated_to_urdf(values(native))
+
+def observed_positions(mapper, native, raw=None, motor_specs=None):
+    """Decode real feedback without clipping; preserve raw SDK saturation evidence."""
+    convert = getattr(mapper, 'calibrated_to_observation', mapper.calibrated_to_urdf)
+    q = convert(native, raw=raw) if raw is not None and hasattr(mapper,'calibrated_to_observation') else convert(native)
+    if raw is not None and motor_specs is not None:
+        from .calibration import native_from_raw
+        if set(raw) != set(JOINTS) or not np.isfinite(list(raw.values())).all():
+            raise ValueError("Invalid raw feedback packet")
+        entries=getattr(mapper,'profile',{}).get('joints',{})
+        legacy=LEGACY_MAPPER if entries else mapper
+        for n in JOINTS:
+            if n in entries: continue
+            spec=motor_specs[n];cal=spec['calibration']
+            expected=native_from_raw(np.clip(raw[n],cal['range_min'],cal['range_max'])
+                if spec['mode']=='RANGE_0_100' else raw[n],spec)
+            if abs(expected-native[n])>1e-6: raise ValueError(n+': raw/native packet mismatch')
+            unbounded=dict(native);unbounded[n]=native_from_raw(raw[n],spec)
+            q[n]=legacy.calibrated_to_urdf(unbounded)[n]
+    if set(q) != set(JOINTS) or not np.isfinite(list(q.values())).all():
+        raise ValueError('Non-finite or invalid observed joint coordinates')
+    return {n:float(q[n]) for n in JOINTS}
+
+class Stability:
+    def __init__(self, window_s=0.6, arm_span_deg=1.0, gripper_span=2.0, max_gap_s=0.2):
+        self.window_s = window_s
+        self.arm_span_deg = arm_span_deg
+        self.gripper_span = gripper_span
+        self.max_gap_s = max_gap_s
+        self.history = deque(maxlen=600)
+
+    def add(self, t_ns, native, tip=None):
+        if not isinstance(t_ns,(int,np.integer)) or isinstance(t_ns,bool):raise ValueError('Integer host timestamp required')
+        native=values(native)
+        if tip is not None:
+            tip=np.array(tip,dtype=float,copy=True)
+            if tip.shape!=(3,) or not np.isfinite(tip).all():raise ValueError('Invalid measured tip')
+        if self.history and t_ns <= self.history[-1][0]:
+            raise ValueError("History timestamps must increase")
+        self.history.append((t_ns, np.array([native[n] for n in JOINTS]), tip))
+        while len(self.history) > 2 and (t_ns - self.history[1][0]) / 1e9 > self.window_s * 1.5:
+            self.history.popleft()
+
+    def assess(self):
+        if len(self.history) < 3:
+            return {"stable": False, "reason": "insufficient_history"}
+        end = self.history[-1][0]
+        start = end - int(self.window_s * 1e9)
+        rows = list(self.history)
+        before = [i for i, r in enumerate(rows) if r[0] <= start]
+        if not before:
+            return {"stable": False, "reason": "warming_up"}
+        rows = rows[before[-1] :]
+        gaps = np.diff([r[0] for r in rows]) / 1e9
+        span = np.ptp(np.array([r[1] for r in rows]), axis=0)
+        tips = [r[2] for r in rows if r[2] is not None]
+        tip_span = max(np.linalg.norm(np.asarray(tips) - np.median(tips, axis=0), axis=1)) * 1000 if tips else None
+        stable = bool(
+            max(gaps) <= self.max_gap_s and max(span[:-1]) <= self.arm_span_deg and span[-1] <= self.gripper_span
+        )
+        return {
+            "stable": stable,
+            "window_start_ns": rows[0][0],
+            "window_end_ns": end,
+            "max_gap_ms": float(max(gaps) * 1000),
+            "arm_span_deg": float(max(span[:-1])),
+            "gripper_span_percentage_points": float(span[-1]),
+            "sim_tip_spread_mm": float(tip_span) if tip_span is not None else None,
+            "thresholds": {
+                "window_s": self.window_s,
+                "arm_span_deg": self.arm_span_deg,
+                "gripper_span": self.gripper_span,
+                "max_gap_s": self.max_gap_s,
+            },
+            "reason": "stable" if stable else "motion_or_sampling_gap",
+        }
+
+def align_measured(samples, timestamp, max_skew_ns=100_000_000, mapper=None, observation_only=False, motor_specs=None):
+    """Interpolate measured arm values; gripper is held from the last sample."""
+    if not samples:
+        raise ValueError('Measured joint history missing')
+    times = np.asarray([s['timestamp_ns'] for s in samples], dtype=np.int64)
+    if np.any(np.diff(times) <= 0):
+        raise ValueError('Measured timestamps must increase')
+    def measured(sample):
+        if mapper:
+            return observed_positions(mapper,sample['native'],raw=sample.get('raw'),motor_specs=motor_specs)
+        return to_sim(sample['native'])
+    positions = np.asarray([[measured(s)[n] for n in JOINTS] for s in samples])
+    right = int(np.searchsorted(times, timestamp))
+    if right < len(times) and times[right] == timestamp:
+        return positions[right].tolist()
+    if right == 0 or right == len(times):
+        index = 0 if right == 0 else len(times) - 1
+        if abs(int(times[index]) - timestamp) > max_skew_ns:
+            raise ValueError('Image/joint timestamp skew exceeds 100 ms')
+        return positions[index].tolist()
+    left = right - 1
+    if max(timestamp - int(times[left]), int(times[right]) - timestamp) > max_skew_ns:
+        raise ValueError('Measured interpolation gap exceeds 100 ms')
+    alpha = (timestamp - times[left]) / float(times[right] - times[left])
+    q = positions[left] * (1 - alpha) + positions[right] * alpha
+    q[-1] = positions[left, -1]
+    return q.tolist()
+
+def render_k(camera):
+    # Isaac Lab 2.3 pinhole limitation: use centred square-pixel virtual camera.
+    # Real images are rectified to this same K for appearance comparisons.
+    w, h = camera["resolution"]
+    k = np.asarray(camera["K"], float)
+    f = float((k[0, 0] + k[1, 1]) / 2)
+    return np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])
+
+def assess_pair(
+    frames,
+    sim_stamp,
+    follower_interval,
+    real_stability,
+    sim_stability,
+    error,
+    now_ns,
+    max_skew_ms=100.0,
+    max_age_ms=200.0,
+    max_arm_error_rad=0.035,
+    max_gripper_error=2.0,
+):
+    numeric=[max_skew_ms,max_age_ms,max_arm_error_rad,max_gripper_error]
+    if error is not None:numeric += [error['max_arm_error_rad'],error['gripper_error_percentage_points']]
+    if not np.isfinite(numeric).all() or min(numeric)<0:raise ValueError('Finite nonnegative pairing values required')
+    for packet in frames.values():
+        if packet is not None and not packet['read_start']['monotonic_ns']<=packet['read_end']['monotonic_ns']<=now_ns:
+            raise ValueError('Invalid camera read interval')
+    reasons = []
+    timing = {}
+    stamps = [sim_stamp["monotonic_ns"]]
+    for name in ("real_side", "real_wrist"):
+        f = frames.get(name)
+        if f is None:
+            reasons.append("missing_" + name)
+            continue
+        t = f["read_end"]["monotonic_ns"]
+        stamps.append(t)
+        timing[name] = {
+            "receive_minus_sim_ms": (t - sim_stamp["monotonic_ns"]) / 1e6,
+            "age_ms": (now_ns - t) / 1e6,
+            "timestamp_kind": "host_read_completion_not_exposure",
+            "exposure_timestamp": None,
+        }
+        if now_ns - t > max_age_ms * 1e6:
+            reasons.append("stale_" + name)
+        if abs(t - sim_stamp["monotonic_ns"]) > max_skew_ms * 1e6:
+            reasons.append("skew_" + name)
+        if (
+            real_stability.get("window_start_ns", now_ns) > f["read_start"]["monotonic_ns"]
+            or real_stability.get("window_end_ns", 0) < t
+        ):
+            reasons.append("frame_not_covered_by_stability_" + name)
+    if follower_interval:
+        rt = follower_interval["end"]["monotonic_ns"]
+        stamps.append(rt)
+        timing["follower_read_minus_sim_ms"] = (rt - sim_stamp["monotonic_ns"]) / 1e6
+        timing["follower_read_duration_ms"] = (rt - follower_interval["start"]["monotonic_ns"]) / 1e6
+        if now_ns - rt > max_age_ms * 1e6 or timing["follower_read_duration_ms"] > max_skew_ms:
+            reasons.append("follower_measurement_stale_or_slow")
+    else:
+        reasons.append("no_physical_follower_measurement")
+    spread = (max(stamps) - min(stamps)) / 1e6
+    if spread > max_skew_ms:
+        reasons.append("observation_time_spread")
+    if now_ns - sim_stamp["monotonic_ns"] > max_age_ms * 1e6:
+        reasons.append("stale_sim")
+    if not real_stability.get("stable"):
+        reasons.append("physical_follower_not_stable")
+    if not sim_stability.get("stable"):
+        reasons.append("sim_not_stable")
+    if error is None:
+        reasons.append("joint_error_unavailable")
+    elif error["max_arm_error_rad"] > max_arm_error_rad or error["gripper_error_percentage_points"] > max_gripper_error:
+        reasons.append("real_sim_joint_error")
+    return {
+        "hardware_synchronized": False,
+        "eligible_for_calibration": not reasons,
+        "reasons": reasons,
+        "observation_time_spread_ms": spread,
+        "timing": timing,
+        "thresholds": {
+            "max_skew_ms": max_skew_ms,
+            "max_age_ms": max_age_ms,
+            "max_arm_error_rad": max_arm_error_rad,
+            "max_gripper_error_percentage_points": max_gripper_error,
+        },
+        "limitation": "Software pairing of host receipt times only; USB exposure/buffering latency is unknown. Eligibility is a heuristic, not proof of geometric calibration.",
+    }
+
+def prepare_snapshot(state, images, profile, now_ns=None):
+    """Validate and freeze one whole observation before publishing any files."""
+    state=copy.deepcopy(state)
+    now_ns = state.get('captured_host_ns', time.monotonic_ns()) if now_ns is None else now_ns
+    if set(images) != {'real_side', 'real_wrist'}:
+        raise ValueError('Both real Side/Wrist frames are required; retry Capture')
+    if state.get('joint_names') != list(JOINTS):
+        raise ValueError('Measured joint names/order mismatch')
+    if not state.get('sim_joint_mapping'):
+        raise ValueError('Snapshot requires explicit joint mapping metadata')
+    require_capture_mapping(state)
+    from .calibration import mapper_from_metadata
+    mapper = mapper_from_metadata(state['sim_joint_mapping'])
+    convert = mapper.calibrated_to_urdf
+    observation_only = state.get('precision_observation_only') is True
+    if observation_only:
+        if state.get('sent_target') is not None: raise ValueError('Passive capture must not contain a motor command')
+    raw=(state.get('precision_raw_feedback') or {}).get('follower')
+    motor_specs=state.get('hardware',{}).get('follower',{}).get('motor_specs')
+    q = observed_positions(mapper,state['physical_follower_measured_joint_state'],raw=raw,motor_specs=motor_specs)
+    samples = copy.deepcopy(state.get('measured_samples', []))
+    feedback_time = state['timestamps']['follower']['end']['monotonic_ns']
+    if not samples or samples[-1]['timestamp_ns'] != feedback_time:
+        raise ValueError('Latest measured feedback missing from history')
+    if not np.allclose([q[n] for n in JOINTS], align_measured(samples, feedback_time, mapper=mapper, observation_only=observation_only, motor_specs=motor_specs), atol=1e-8):
+        raise ValueError('Measured feedback/history mismatch')
+    if now_ns - feedback_time > 200_000_000 or feedback_time > now_ns:
+        raise ValueError('Measured joint feedback is stale')
+    stability = state.get('real_stability', {})
+    if not stability.get('stable'):
+        raise ValueError('Robot pose is moving or feedback is warming up; hold still and retry')
+    warnings = []
+    joint_limit_warnings = copy.deepcopy(state.get('joint_limit_warnings', {})) or {n: {'measured_rad':q[n], 'limits_rad':entry['limits']}
+                           for n,entry in getattr(mapper, 'profile', {}).get('joints', {}).items()
+                           if not entry['limits'][0]-1e-6 <= q[n] <= entry['limits'][1]+1e-6}
+    for n,detail in joint_limit_warnings.items():
+        warnings.append(f'{n}: measured {np.degrees(detail["measured_rad"]):.2f} deg outside URDF limits; original measurement retained')
+    observed = []
+    import cv2
+    for name in ('side', 'wrist'):
+        rgb = images['real_' + name]
+        if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError('Real camera must provide RGB uint8')
+        if list(rgb.shape[1::-1]) != profile['cameras'][name]['resolution']:
+            raise ValueError('Original image resolution differs from pixel calibration')
+        packet = state['timestamps']['real_cameras']['real_' + name]
+        t = packet['read_end']['monotonic_ns']
+        start = packet['read_start']['monotonic_ns']
+        if not start <= t <= now_ns or now_ns - t > 200_000_000:
+            raise ValueError(name + ' camera frame is stale; retry Capture')
+        if abs(t - feedback_time) > 100_000_000:
+            raise ValueError(name + ' image/joint timestamp skew exceeds 100 ms')
+        if start < stability['window_start_ns'] or t > stability['window_end_ns']:
+            raise ValueError(name + ' frame is not covered by stable measured feedback')
+        blur = float(cv2.Laplacian(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var())
+        if blur < 10:
+            warnings.append(name + ': blurred or textureless image; excluded from calibration')
+        observed.append({'camera': name, 'path': name + '.png', 'timestamp_ns': t,
+                         'read_start_ns': start, 'sequence': packet['sequence'],
+                         'resolution': list(rgb.shape[1::-1]), 'blur_variance': blur,
+                         'q_measured': align_measured(samples, t, mapper=mapper, observation_only=observation_only, motor_specs=motor_specs),
+                         'joint_skew_ns': t - feedback_time, 'eligible': blur >= 10,
+                         'timestamp_kind': 'host_read_interval_not_exposure'})
+    # Read the recorded applied q of historical snapshots, without generating
+    # that retired controller's metadata in new snapshots.
+    command = (state.get('joint_control',{}).get('applied_joint_rad') or convert(state['sent_target'])) if state.get('sent_target') is not None else None
+    measured = {'timestamp_ns': feedback_time, 'q_measured': [q[n] for n in JOINTS],
+                'q_native': state['physical_follower_measured_joint_state'],
+                'q_command': [command[n] for n in JOINTS] if command else None,
+                'command_timestamp_ns': state['timestamps']['send']['end']['monotonic_ns'] if command else None,
+                'captured_host_ns': now_ns,
+                'measured_samples': [{**a,'q_measured':align_measured([a],a['timestamp_ns'],mapper=mapper,observation_only=observation_only,motor_specs=motor_specs)} for a in samples], 'timestamps': state['timestamps'], 'real_stability': stability,
+                'precision_raw_feedback': state.get('precision_raw_feedback'), 'tracking': state.get('tracking'),
+                'precision_run_configuration': state.get('precision_run_configuration', {})}
+    measured.update(precision_observation_only=observation_only, joint_limit_warnings=joint_limit_warnings,
+                    sim_pose_matches_measured=state.get('sim_pose_matches_measured'))
+    measured.update(mapping_sha256=state['sim_joint_mapping']['sha256'],
+                    model_sha256=mapper.profile['urdf_sha256'],joint_order=list(JOINTS),
+                    model_units=['rad']*6,hardware_synchronized=False)
+    return measured, observed, warnings

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-learning-workbench"
+version = "0.4.0"
+description = "Recipe-driven robot learning workflow contracts"
+requires-python = ">=3.11"
+dependencies = ["scene-contract>=0.2,<0.3", "PyYAML>=6,<7", "numpy>=1.26,<2", "h5py>=3.14,<4", "av>=15,<16"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+ui = ["PyQt6>=6.11,<6.12"]
+native = ["lerobot==0.4.1"]
+simulation = ["mujoco==3.3.7", "scipy>=1.15,<1.16", "pin==2.7.0", "trimesh>=4,<5", "torch==2.7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/robot-learning-workbench" = ["task_modules.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.package-data]
+"robot_learning_workbench.generation.reference" = ["LICENSE", "LICENSE-mimic", "NOTICE.md", "UPSTREAM.json"]

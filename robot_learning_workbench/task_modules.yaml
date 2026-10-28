@@ -1,0 +1,4 @@
+# Explicit trusted Task modules; no discovery or automatic engine execution.
+modules:
+  - robot_learning_workbench.tasks.pick_place
+  - robot_learning_workbench.tasks.placement

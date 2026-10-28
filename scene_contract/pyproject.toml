@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scene-contract"
+version = "0.2.0"
+description = "Read-only Scene package contracts shared by Builder and Workbench"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,52 @@
+# Preserve local validation history and datasets; audited release docs live in docs/.
+/docs/evidence/
+/workbench_runs/
+/datasets/
+/outputs/
+/runs/
+/checkpoints/
+/pretrained_models/
+/assets-private/
+
+# Local IDE/session artifacts (the current .vscode contains 1.4 GB of copies).
+/.vscode/
+/robot_development.code-workspace
+
+# Python environments, caches, packaging outputs.
+.venv/
+.venv-*/
+venv/
+env/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+htmlcov/
+.coverage
+.coverage.*
+
+# Per-run IPC/preview/encoder scratch; never a source/config/asset exclusion.
+.workbench-runs/
+.workbench-preview/
+.workbench-output-*.json
+.writer.lock
+
+# Local authentication material. Keep named public examples possible.
+.env
+.env.*
+!.env.example
+/.ssh/
+/.aws/
+/.config/gh/
+id_rsa
+id_ed25519
+credentials.json
+service-account.json
+
+.DS_Store
+*~

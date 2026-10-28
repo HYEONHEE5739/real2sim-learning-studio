@@ -1,0 +1,18 @@
+engine: isaaclab
+execution:
+  mode: auto
+  env_num: 4
+  headless: true
+functions:
+  acceptance:
+    function: pick_place.v8_annotation
+    params:
+      object: cube_red
+      target: cup_a
+inputs:
+  dataset: ../datasets/source-isaac
+  scene: ../assets-private/scene-v8-native/scene.json
+output:
+  directory: ../workbench_runs/annotation-isaac
+schema_version: 1
+stage: annotation

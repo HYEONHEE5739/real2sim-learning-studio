@@ -1,0 +1,43 @@
+{
+  "isaaclab_mimic_version": "1.0.15",
+  "sources": {
+    "/home/hyeonhee/IsaacLab/source/isaaclab_mimic/isaaclab_mimic/datagen/data_generator.py": {
+      "sha256": "f54d7694d1251c060c35451234069382bd352b21443fb74046f1f27423f886b8"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab_mimic/isaaclab_mimic/datagen/datagen_info.py": {
+      "sha256": "3ccbcc2ed9c2970f2b0b6189eef0adc478713f26a06a343c0d06fcc6de9ff0b5"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab_mimic/isaaclab_mimic/datagen/datagen_info_pool.py": {
+      "sha256": "1ba4bf40c8a308b03bb50347ec4139f22453940e5efae8af2c67b7e1e41268e9"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab_mimic/isaaclab_mimic/datagen/selection_strategy.py": {
+      "sha256": "26862e8379a2ccb84db696661a3ff801095a8f8ff05ad7f8b49f0d7403b82339"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab_mimic/isaaclab_mimic/datagen/waypoint.py": {
+      "sha256": "4c1c82cdd1f0125a0defecc871f189a1239fbaf495c8ce91c7ec720984f75d5f"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab/isaaclab/envs/mimic_env_cfg.py": {
+      "sha256": "b8182ebfbabb009af8f11e31c37df38bf8e8d26f3216add623346d5bef901d1b"
+    },
+    "/home/hyeonhee/IsaacLab/source/isaaclab/isaaclab/utils/math.py": {
+      "sha256": "48f7052ed30d9e7ae21e0e20ac963ccb52f784a076f1a602cae1c641e923e3cd",
+      "functions": [
+        "_sqrt_positive_part",
+        "axis_angle_from_quat",
+        "interpolate_poses",
+        "interpolate_rotations",
+        "make_pose",
+        "matrix_from_quat",
+        "normalize",
+        "pose_in_A_to_pose_in_B",
+        "pose_inv",
+        "quat_from_angle_axis",
+        "quat_from_matrix",
+        "quat_slerp",
+        "unmake_pose"
+      ]
+    }
+  },
+  "adaptations": "Import destinations only; math transitive function subset; configuration construction and dataset I/O use portable adapters. No source selection, boundaries, transforms, interpolation, noise, gripper or generate logic edits.",
+  "workbench_subset": "Pure math/DatagenInfo, source selection, Waypoint/Sequence/Trajectory, object pose transforms and Pool ingestion; no DataGenerator.generate/MultiWaypoint execution, SkillGen, custom reader, configuration framework, scheduler or IK."
+}

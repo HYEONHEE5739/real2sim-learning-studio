@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "real2sim-builder"
+version = "0.1.0"
+description = "Explicit scene authoring, calibration and immutable Scene exports"
+requires-python = ">=3.11"
+dependencies = ["scene-contract>=0.2,<0.3", "numpy>=1.26,<2", "PyYAML>=6,<7", "scipy>=1.15,<1.16", "Pillow>=10", "trimesh>=4,<5", "opencv-python>=4.11,<4.12"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+ui = ["PyQt6>=6"]
+native = ["mujoco==3.3.7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

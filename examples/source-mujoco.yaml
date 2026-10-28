@@ -1,0 +1,41 @@
+schema_version: 1
+stage: source
+engine: mujoco
+inputs:
+  scene: ../assets-private/scene-v8-native/scene.json
+  source_dataset: ../datasets/source-input
+execution:
+  num_episodes: 2
+  seed: 1047
+  resume: false
+  env_num: 1
+output:
+  directory: ../workbench_runs/source-mujoco
+objects:
+  cube_red:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.00016576439562532378
+        - -0.2199281034363855
+  cube_blue:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.05516576439562532
+        - -0.2199281034363855
+  cube_green:
+    placement:
+      function: placement.fixed_xy
+      params:
+        frame: world
+        support: table
+        xy_m:
+        - 0.11016576439562532
+        - -0.2199281034363855

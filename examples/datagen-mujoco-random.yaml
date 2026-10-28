@@ -1,0 +1,42 @@
+schema_version: 1
+stage: datagen
+engine: mujoco
+inputs:
+  scene: ../assets-private/scene-v8-native/scene.json
+  dataset: ../datasets/annotation
+execution:
+  num_episodes: 4
+  max_attempts: 8
+  seed: 1047
+  resume: false
+  env_num: 4
+output:
+  directory: ../workbench_runs/datagen-mujoco-random
+objects:
+  cube_red:
+    placement:
+      function: placement.random_workspace
+      params:
+        frame: object_marker
+        support: table
+        workspace: marker
+  cube_blue:
+    placement:
+      function: placement.random_workspace
+      params:
+        frame: object_marker
+        support: table
+        workspace: marker
+  cube_green:
+    placement:
+      function: placement.random_workspace
+      params:
+        frame: object_marker
+        support: table
+        workspace: marker
+functions:
+  acceptance:
+    function: pick_place.v8_datagen
+    params:
+      object: cube_red
+      target: cup_a
