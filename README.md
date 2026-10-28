@@ -125,6 +125,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
+- [Four code-review fixes and verification](docs/code-review-followup.md)
 
 Historical reports contain local absolute paths and links to `docs/evidence/`.
 Those preserved evidence directories are excluded from publication; such links are

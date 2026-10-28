@@ -148,7 +148,7 @@ imitation_learnig_project/
 
 Builder의 export 검증과 Workbench의 load 검증은 **동일 Scene 계약**을 검사해야 한다. 양쪽에 별도 validator를 복제하지 않기 위해 `scene_contract/package.py` 하나를 공유한다. `transforms.py`는 양쪽에서 사용하는 명시적 좌표·SE(3) 연산만 가진다. 설치 시 버전 의존성을 선언하며 sibling 경로를 sys.path에 추가하지 않는다.
 
-이 패키지는 NumPy/표준 라이브러리 수준으로 제한하고 엔진·Qt·LeRobot·장치·Task를 import하지 않는다. Calibration 전체, Episode, Recipe, 범용 registry를 넣지 않는다. 실제 공유 호출이 없는 계산은 제품 안에 둔다. 두 제품은 이 작은 계약 패키지에 의존할 수 있지만 서로의 내부 구현에는 의존하지 않는다.
+이 패키지는 NumPy/표준 라이브러리 수준으로 제한하고 엔진·Qt·LeRobot·장치·Task를 import하지 않는다. Calibration 전체, Episode, Recipe, 범용 registry를 넣지 않는다. 실제 공유 호출이 없는 계산은 제품 안에 둔다. 두 제품은 이 작은 계약 패키지에 의존할 수 있지만 서로의 내부 구현에는 의존하지 않는다. Workbench의 선택적 `offline` 기능은 Builder가 소유한 공개 Capture Reader를 재사용하므로 `real2sim-builder>=0.1,<0.2`를 별도 선택 의존성으로 선언한다. 기본 Simulation/Training import는 Builder를 요구하지 않으며 역방향 의존은 없다. [후속 검증](code-review-followup.md)을 따른다.
 
 ## 3. 파일별 책임과 필요한 이유
 
