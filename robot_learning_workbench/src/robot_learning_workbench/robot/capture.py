@@ -283,3 +283,64 @@ def prepare_snapshot(state, images, profile, now_ns=None):
                     model_sha256=mapper.profile['urdf_sha256'],joint_order=list(JOINTS),
                     model_units=['rad']*6,hardware_synchronized=False)
     return measured, observed, warnings
+
+
+def save_session(root, *, model, mapping: dict, samples: list, images: list, metadata: dict):
+    """Publish the existing Builder real2sim.capture/1 format, not a second Dataset.
+
+    Only measured observations are written. No action labels are inferred from q.
+    Model dependencies share immutable files; original model bytes stay unchanged.
+    """
+    from pathlib import Path
+    import os,hashlib,json
+    import xml.etree.ElementTree as ET
+    from PIL import Image
+    from ..data.native import atomic_json
+    from real2sim_builder.capture import load_session
+    root=Path(root);model=Path(model).resolve()
+    if not samples or len(samples)!=len(images):raise ValueError('Aligned nonempty samples/images required')
+    dependencies=set()
+    def visit(path):
+        path=path.resolve()
+        if not path.is_file():raise ValueError('Missing model dependency: '+str(path))
+        if path in dependencies:return
+        dependencies.add(path)
+        if path==model or path.suffix.lower()=='.urdf':
+            for node in ET.parse(path).iter():
+                reference=node.get('filename') or node.get('file')
+                if reference:
+                    if Path(reference).is_absolute() or '://'in reference:raise ValueError('Portable relative model dependencies required')
+                    visit(path.parent/reference)
+    visit(model)
+    common=Path(os.path.commonpath([str(p.parent)for p in dependencies]));root.mkdir()
+    files={};rows=copy.deepcopy(samples)
+    for source in dependencies:
+        relative=Path('model')/source.relative_to(common);target=root/relative;target.parent.mkdir(parents=True,exist_ok=True)
+        os.link(source,target);files[relative.as_posix()]=hashlib.sha256(target.read_bytes()).hexdigest()
+    previous=-1
+    for index,(row,frames)in enumerate(zip(rows,images)):
+        q=np.asarray(row['q_measured']);t=row['timestamp_ns']
+        if q.shape!=(6,) or not np.isfinite(q).all() or t<=previous or set(frames)!={'side','wrist'}:raise ValueError('Invalid measured sample/image ordering')
+        previous=t;row['images']=[]
+        for camera,rgb in frames.items():
+            if rgb.dtype!=np.uint8 or rgb.shape!=(480,640,3):raise ValueError('640x480 uint8 original RGB required')
+            relative=f'images/{index:08d}-{camera}.png';target=root/relative;target.parent.mkdir(exist_ok=True)
+            Image.fromarray(rgb).save(target);files[relative]=hashlib.sha256(target.read_bytes()).hexdigest()
+            timing=row.get('camera_timing',{}).get(camera,{})
+            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
+    atomic_json(root/'samples.json',rows);atomic_json(root/'events.json',[])
+    for name in ('samples.json','events.json'):files[name]=hashlib.sha256((root/name).read_bytes()).hexdigest()
+    manifest=dict(schema='real2sim.capture/1',session_id=root.name.replace('-','_'),group_id=root.name.replace('-','_'),split='train',purpose='snapshot' if len(rows)==1 else 'demonstration',
+        clock=dict(domain='host_monotonic_ns',hardware_synchronized=False,timestamp_kind='host_receipt_not_exposure'),
+        joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',
+        joint_mapping=mapping,source_robot_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
+        robot=dict(path=(Path('model')/model.relative_to(common)).as_posix(),mapping_verified=False),
+        cameras=[dict(id=n,resolution=[640,480],color='rgb')for n in ('side','wrist')],samples='samples.json',events='events.json',files=files,
+        quality=dict(incomplete=False),**metadata)
+    atomic_json(root/'capture_manifest.yaml',manifest)
+    (root/'COMPLETE').write_text('complete\n')
+    try:load_session(root)
+    except BaseException:
+        (root/'COMPLETE').unlink()
+        raise
+    return root
