@@ -26,7 +26,7 @@ Workbench use `scene_contract`; simulation engines own live physics state.
 ## Workflow
 
 Scene Builder → Source → Annotation → Fixed/Random DataGen → Curation →
-official LeRobot Dataset → ACT/SmolVLA Training → Simulation Evaluation.
+official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 
 ## Features
 
@@ -37,7 +37,9 @@ official LeRobot Dataset → ACT/SmolVLA Training → Simulation Evaluation.
 - Source/DataGen append to the same Native dataset path, immutable closed segments and attempt history.
 - Original/curated/materialized separation, selection, trim, split, distributions and compatible Merge.
 - Official LeRobot Dataset materialization with existing encoded video sharing.
-- Official ACT and SmolVLA Trainer/checkpoints/Resume, independent validation and simulation rollout.
+- Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
+- Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
+- Preserved Capture/Calibration and real-policy offline inspection; live device control stays disabled.
 - Qt workflow pages and selected-environment Side/Wrist 640×480 latest-frame Preview.
 
 The SmolVLA path explicitly compiles one SHA-pinned LeRobot 0.4.1 module with a
@@ -93,6 +95,10 @@ python -B -m robot_learning_workbench.cli run /path/to/recipe.yaml \
   --task-modules robot_learning_workbench/task_modules.yaml --request-id unique-run-id
 ```
 
+New Run output suggestions use `scenes/`, `source/`, `annotation/`, `datagen/`,
+`dataset/`, `policy/` and `evaluation/` under the Workspace. Explicit saved Recipe
+paths stay authoritative; collection Resume appends to the selected existing Dataset.
+
 Review and adapt the [Recipe/config examples](examples/README.md) first. They are
 copies of exercised settings with local paths replaced; external inputs must be
 provided before `prepare` or execution. Do not enable real hardware.
@@ -103,7 +109,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - Real Follower command binding, motor-range approval and physical safety are unverified.
 - `env_num=1/4` was tested; arbitrary N, all Scenes, long runs and OOM recovery are not certified.
 - Preview polling targets approximately 30Hz; actual simulation/Preview throughput is lower.
-- ACT/SmolVLA short smoke training does not establish convergence or task success. The canonical
+- ACT/SmolVLA/Diffusion short smoke training does not establish convergence or task success. The earlier canonical
   rollout matrix recorded 20 maximum-step failures per engine, Placement success **0**.
 - The historical Isaac cube–cup position residual **1.197188790mm** remains OPEN.
 - Same-path collection Resume is an Episode boundary operation, not an exact mid-physics checkpoint.
@@ -118,6 +124,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - [Saturation recovery](docs/position-saturation-recovery.md)
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
+- [Architecture completion and feature transfer](docs/architecture-completion.md)
 
 Historical reports contain local absolute paths and links to `docs/evidence/`.
 Those preserved evidence directories are excluded from publication; such links are

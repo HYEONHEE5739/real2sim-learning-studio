@@ -284,6 +284,6 @@ Read-only comparison baseline: Studio8a8210d, original Builderad018a0, SO101875e
 - [x] Phase3b: pinned Hub Dataset/Policy download and explicit opt-in upload; UI/Runner; no smoke uploads.
 - [x] Phase4: offline/fake device/Capture/Calibration/real-policy contract and truthful stage availability.
 - [x] Phase5: stage-scoped UI output defaults and input selection; no existing-data relocation.
-- [ ] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.
+- [x] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.
 
 Each Phase precedes the next; isolate thin slices, run focused checks, preserve SDK/original/evidence. Status meanings: VERIFIED(actual), CODE_READY(wired/unexecuted), PARTIAL, UNSUPPORTED, EXCLUDED. Hardware, uploads, newv9/real calibration are not executed by smoke validation.

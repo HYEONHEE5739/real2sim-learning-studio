@@ -345,3 +345,19 @@ Curation의 기존 자동 선택/필터 기능을 삭제하지 않는다. 새로
 [확장 결과](resume-multienv-smolvla-preview.md)를 따른다. MuJoCo는 공유 read-only Model+Env별 Data/IK/Renderer/Policy loop를 native thread에서 실행하고 단일 publisher가 기존 Native segment를 게시한다. Isaac은 공식 vector Scene과 Env별 pre/target/post generator를 같은 물리 Step에서 진행하며 완료 Env만 reset한다. 엔진 Adapter나 별도 실행 서버는 추가하지 않는다.
 
 Source/DataGen의 기존 경로 추가는 기존 Native 수명·lock·staging/publish·attempt를 재사용한다. root Metadata는 누적 목표와 검증된 producer history만 갱신하며 닫힌 공식 HDF5/MP4는 불변이다. 학습은 공식 Trainer child, Smol padding 정정은 정확한0.4.1 모듈에 한정한 명시 patch다. Qt는 선택 Env의 최신 RGB two-slot mmap만 소비하고 Torch/엔진을 import하지 않는다. 실제 보호·한계·성과는 링크의 검증 결과와 구분한다.
+
+## Architecture completion ownership (2026-10-28)
+
+Engine-neutral frame recording lives in data/recording.py, Native publications in
+data/publication.py, cooperative command events in commands.py, Task evaluation
+calculations in tasks/evaluation.py. Each engine retains its concrete physics loop,
+reset, camera/contact acquisition and per-env state. Isaac does not import MuJoCo
+workflow helpers. See architecture-completion.md for moved-function equivalence.
+
+Builder owns scene/evidence/capture/candidate/editing/scan/initialization modules;
+Project and Reconstruction retain direct public API aliases for compatibility.
+The public Capture Reader is reused by Workbench offline inspection; Builder has
+no dependency on Workbench. Official LeRobot factories own models/processors and
+the CLI owns optimization. Hub and Robot offline modules are concrete stage
+functions called by the existing R03 worker, without a second scheduler/registry.
+Qt backend jobs keep heavy imports and network operations outside the GUI process.
