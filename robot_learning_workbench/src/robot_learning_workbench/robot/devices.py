@@ -84,7 +84,7 @@ class Follower:
         self._closed=False; self._connected=False; self._activated=False; self._sending=False
         self.last_raw=None; self.last_encoded_goal_raw=None; self._last_goal_ns=None
         self.cleanup=None; self.metadata={'native_units':{n:'percent_0_100' if n=='gripper' else 'calibration_relative_degree' for n in JOINTS}}
-        self.read_only=read_only
+        self.read_only=bool(read_only or any(c.__module__.startswith('lerobot.') for c in type(self.bus).__mro__))
 
     def _check_identity(self, *, hardware=False):
         if self.identity != self.profile['identity'] or self.identity.get('role') != self.role or self.profile.get('role') != self.role:
@@ -224,6 +224,64 @@ class Leader(Follower):
     def send(self,target): raise DeviceError('send','Leader has no follower goal API',effect='not_applied')
 
 
+def gripper_proposal(follower: Follower, requested_rad: float, *, model_bounds: dict, max_delta_raw: int) -> dict:
+    """Calculate a single-motor command; explicit displacement budget has no default."""
+    from .control import checked_target,encode_goal
+    import numpy as np
+    if not follower.read_only or follower.role!='follower' or not follower._connected or getattr(follower,'_gripper_consumed',False):
+        raise DeviceError('gripper_preflight','Connected observation-only Follower required; one shot per connection',effect='not_applied')
+    if type(max_delta_raw)is not int or max_delta_raw<=0 or isinstance(requested_rad,bool) or not math.isfinite(requested_rad):
+        raise DeviceError('gripper_preflight','Explicit finite target and positive integer displacement budget required',effect='not_applied')
+    follower._check_identity(hardware=True)
+    native,interval=follower.read();bus=follower.bus;current=int(follower.last_raw['gripper'])
+    if time.monotonic_ns()-interval['end']['monotonic_ns']>200_000_000:raise DeviceError('gripper_preflight','Stale feedback',effect='not_applied')
+    if bus.motors['gripper'].id!=6 or bus.read('Operating_Mode','gripper',normalize=False)!=0 or bus.read('Torque_Enable','gripper',normalize=False)!=1:
+        raise DeviceError('gripper_preflight','Expected motor6 in existing position mode with torque already on; no automatic torque change',effect='not_applied')
+    if abs(bus.read('Goal_Position','gripper',normalize=False)-current)>1:
+        raise DeviceError('gripper_preflight','Existing gripper goal differs from feedback; motion state unclear',effect='not_applied')
+    # Only the gripper inverse is needed: arm feedback is never an arm goal.
+    profile=copy.deepcopy(follower.profile)
+    if 'gripper'not in profile['joints']:raise DeviceError('gripper_preflight','Approved gripper Precision mapping missing',effect='not_applied')
+    profile['joints']={'gripper':profile['joints']['gripper']};mapper=PrecisionMapper(profile)
+    bounds=mapper.command_limits(model_bounds);request=np.zeros(6);request[-1]=requested_rad
+    diagnostic={};target=checked_target(request,limits=[bounds[n] for n in JOINTS],applied_dtype=np.float64,diagnostics=diagnostic)
+    native_goal=mapper.urdf_to_calibrated(dict(zip(JOINTS,target.tolist())))['gripper']
+    command,encoded=encode_goal(follower,{'gripper':native_goal},joints=('gripper',))
+    raw=int(follower.last_encoded_goal_raw[6]);delta=raw-current
+    actual=mapper.calibrated_to_urdf({**dict.fromkeys(JOINTS,0.),**encoded})['gripper']
+    if not bounds['gripper'][0]<=actual<=bounds['gripper'][1] or not 0<abs(delta)<=max_delta_raw:
+        raise DeviceError('gripper_preflight','Target exceeds the explicitly approved single-step displacement or has no displacement',effect='not_applied')
+    proposal=dict(identity=copy.deepcopy(follower.identity),mapping_sha256=follower._mapping_hash,motor_id=6,joint='gripper',
+        current_raw=current,target_raw=raw,raw_delta=delta,max_delta_raw=max_delta_raw,requested_model_rad=requested_rad,
+        applied_model_rad=actual,native_command=command['gripper'],saturation=diagnostic,created_ns=time.monotonic_ns(),command_sent=False)
+    follower._gripper_proposal=fingerprint(proposal)
+    return proposal
+
+
+def send_gripper_once(follower: Follower, proposal: dict, *, approved: bool=False) -> dict:
+    """One explicit Goal_Position write to motor6; no arm/torque/configuration writes.
+
+    Approval must be supplied by a supervised user after reviewing this proposal.
+    A timeout/unknown send consumes the authorization; it is never retried.
+    """
+    if approved is not True or not follower.read_only or not follower._connected or getattr(follower,'_gripper_consumed',False):
+        raise DeviceError('gripper_send','Explicit one-shot approval and unchanged connection required',effect='not_applied')
+    if fingerprint(proposal)!=getattr(follower,'_gripper_proposal',None) or proposal['identity']!=follower.identity or proposal['mapping_sha256']!=follower._mapping_hash or proposal['motor_id']!=6 or proposal['joint']!='gripper':
+        raise DeviceError('gripper_send','Proposal/Device identity changed',effect='not_applied')
+    if not 0<=time.monotonic_ns()-proposal['created_ns']<=30_000_000_000:
+        raise DeviceError('gripper_send','Proposal expired; new read and approval required',effect='not_applied')
+    follower._check_identity(hardware=True);bus=follower.bus
+    if bus.read('Present_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Torque_Enable','gripper',normalize=False)!=1 or bus.read('Operating_Mode','gripper',normalize=False)!=0:
+        raise DeviceError('gripper_send','Feedback/torque/mode changed; authorization invalid',effect='not_applied')
+    follower._gripper_consumed=True
+    try:
+        start=stamp();bus.write('Goal_Position','gripper',proposal['target_raw'],normalize=False);end=stamp()
+        feedback=bus.read('Present_Position','gripper',normalize=False)
+        return dict(sent_joint='gripper',motor_id=6,command_count=1,start=start,end=end,feedback_raw=feedback,
+                    target_raw=proposal['target_raw'],reached=feedback==proposal['target_raw'],arm_commands=0,torque_commands=0)
+    except BaseException as error:raise DeviceError('gripper_send',str(error),effect='unknown')from error
+
+
 class CalibrationDevice:
     """Exclusive read-only reference collection; approved joint release is explicit."""
     def __init__(self, device, *, role, identity, calibration_path):
@@ -273,7 +331,7 @@ class CalibrationDevice:
         except BaseException as exc:raise DeviceError('calibration_sample',str(exc),effect='not_applied') from exc
 
     def release(self,joint,*,approved=False):
-        if joint not in JOINTS or approved is not True or not self.exclusive or not self.unchanged():
+        if joint!='gripper' or approved is not True or not self.exclusive or not self.unchanged():
             raise DeviceError('calibration_release','Explicit approval and unchanged connected device required',effect='not_applied')
         try:
             self.bus.disable_torque([joint])

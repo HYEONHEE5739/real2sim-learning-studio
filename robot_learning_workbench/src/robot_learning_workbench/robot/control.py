@@ -89,16 +89,20 @@ def encode_model_target(requested: Sequence[float]|np.ndarray, *, follower: 'Fol
         raise
     return q,command,{**diagnostics,'encoded_model_rad':actual,'encoding_possible':True}
 
-def encode_goal(self, target):
+def encode_goal(self, target, *, joints=JOINTS):
     """Read-only SDK encoding preflight, including integer truncation."""
     from .calibration import raw_from_native, native_from_raw
-    target=values(target).copy(); bus=self.device.bus
-    if any(target[n] < self.limits[n][0]-1e-6 or target[n] > self.limits[n][1]+1e-6 for n in JOINTS):
+    if tuple(joints) not in (JOINTS,('gripper',)):raise ValueError('Only full Fake encoding or gripper encoding is supported')
+    if tuple(joints)==JOINTS:target=values(target).copy()
+    elif set(target)!= {'gripper'} or not math.isfinite(target['gripper']):raise ValueError('Finite gripper target required')
+    else:target=dict(target)
+    bus=self.device.bus
+    if any(target[n] < self.limits[n][0]-1e-6 or target[n] > self.limits[n][1]+1e-6 for n in joints):
         raise ValueError("Follower native goal outside calibrated motor range")
     entries=getattr(getattr(self,'precision_mapper',None),'profile',{}).get('joints',{})
-    def encode(): return bus._unnormalize({bus.motors[n].id:target[n] for n in JOINTS})
+    def encode(): return bus._unnormalize({bus.motors[n].id:target[n] for n in joints})
     raw=encode()
-    for name in JOINTS:
+    for name in joints:
         spec=entries[name]['motor'] if name in entries else self.motor_specs[name]
         identifier=bus.motors[name].id
         expected=round(raw_from_native(target[name],spec))
@@ -112,10 +116,11 @@ def encode_goal(self, target):
             if raw[identifier]!=expected-1: raise ValueError(name+': SDK encoder disagrees with Precision inverse')
             target[name]=math.nextafter(target[name],direction);raw=encode()
         if raw[identifier]!=expected: raise ValueError(name+': SDK encoder cannot roundtrip calibrated goal')
-    for n in JOINTS:
+    for n in joints:
         cal=bus.calibration[n]; goal=raw[bus.motors[n].id]
         if not cal.range_min <= goal <= cal.range_max:
             raise ValueError(n+": SDK goal outside calibrated motor range")
     normalized=bus._normalize(raw)
     self.last_encoded_goal_raw=dict(raw)
-    return target,values({n:normalized[bus.motors[n].id] for n in JOINTS})
+    packet={n:normalized[bus.motors[n].id] for n in joints}
+    return target,values(packet) if tuple(joints)==JOINTS else packet
