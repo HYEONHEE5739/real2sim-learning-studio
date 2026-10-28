@@ -13,8 +13,8 @@ from .operations import stage_support,run_outcome
 
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
-        super().__init__(parent);self.stage=stage;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
-        box=QVBoxLayout(self);self.heading=QLabel({'source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'ACT / SmolVLA Training','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation'}[stage]);box.addWidget(self.heading)
+        super().__init__(parent);self.stage=stage;self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
+        box=QVBoxLayout(self);self.heading=QLabel({'source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation'}[stage]);box.addWidget(self.heading)
         row=QHBoxLayout();box.addLayout(row)
         self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사')
         for button in (self.load_button,self.save_button,self.check_button):row.addWidget(button)
@@ -24,13 +24,13 @@ class WorkflowPage(QWidget):
         self.inputs={};self.form=QVBoxLayout();box.addLayout(self.form)
         if stage in ('source','annotation','datagen','simulation_evaluation'):self.form.addWidget(self.engine)
         for key in ({'source':['scene','source_dataset','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
-                     'train':['dataset','training_config','checkpoint'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset'],'offline_validation':['dataset','policy']}[stage]):
+                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy']}[stage]):
             line=QLineEdit();line.setPlaceholderText(key);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
             row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(line);self.form.addLayout(row)
             if key=='scene':
                 use=QPushButton('현재 검사 Scene 적용');use.clicked.connect(self.use_scene);row.addWidget(use)
             browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));row.addWidget(browse)
-        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('SmolVLA Task Instruction (명시 문장)')
+        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('Language Policy Task Instruction (명시 문장)')
         if stage=='simulation_evaluation':self.form.addWidget(self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
         self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요')
         if stage in ('simulation_evaluation','offline_validation'):self.form.addWidget(self.policy_model)
@@ -45,7 +45,7 @@ class WorkflowPage(QWidget):
         if stage in ('source','datagen'):
             self.dataset_resume=QCheckBox('기존 Dataset 경로에 추가 (Resume)');self.form.addWidget(self.dataset_resume);self.dataset_resume.toggled.connect(self.edit_dataset_resume)
             choose=QPushButton('Dataset 경로 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['scratch','resume'])
+        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['scratch','finetune','resume'])
         if stage in ('annotation','train'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
         self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000)
         if stage=='annotation':
@@ -75,6 +75,9 @@ class WorkflowPage(QWidget):
             from .learning import LossChart,TrainingSettings
             self.training_settings=TrainingSettings(self);box.addWidget(self.training_settings)
             self.loss_chart=LossChart();box.addWidget(self.loss_chart)
+        if stage in ('hub_download','hub_upload'):
+            from .hub import HubSettings
+            self.hub_settings=HubSettings(self);box.addWidget(self.hub_settings)
         self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumBlockCount(1000);box.addWidget(self.log)
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={};self._syncing=False
@@ -105,7 +108,7 @@ class WorkflowPage(QWidget):
             self.invalidate();self.state.setText('현재 선택 Scene과 Recipe가 다릅니다. 검사 Scene을 적용하고 Recipe를 저장·재검사하세요');return False
         return True
     def choose_input(self,key):
-        if key in ('dataset','source_dataset','resume_dataset','policy','checkpoint'):
+        if key in ('dataset','source_dataset','resume_dataset','policy','checkpoint','artifact'):
             value=QFileDialog.getExistingDirectory(self,key+' 선택')
         else:value,_=QFileDialog.getOpenFileName(self,key+' 선택')
         if value:self.inputs[key].setText(value);self.edit_input(key,value)
@@ -148,6 +151,7 @@ class WorkflowPage(QWidget):
             names=[o['placement']['function'] for o in data.get('objects',{}).values()]
             self.placement.setCurrentText('Random' if names and all(n=='placement.random_workspace' for n in names) else 'Fixed')
         finally:self._syncing=False
+        if hasattr(self,'hub_settings'):self.hub_settings.sync(data)
         self.sync_objects(data)
         if 'policy' in data['inputs']:self.show_policy_model(data['inputs']['policy'])
         fn=data.get('functions',{}).get('acceptance',data.get('functions',{}).get('success',{}));self.task_info.setText('Task · '+str(fn.get('function',''))+' · '+str(fn.get('params',{})))

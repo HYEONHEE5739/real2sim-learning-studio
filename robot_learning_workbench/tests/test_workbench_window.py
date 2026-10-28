@@ -28,7 +28,7 @@ from robot_learning_workbench.ui.app import Window
 from pathlib import Path
 import sys
 app=QApplication([]);root=Path(sys.argv[1]);w=Window(sys.argv[2],root/'task_modules.yaml',root/'workspace');w.show();app.processEvents()
-assert w.navigation.count()==8 and w.stack.count()==8
+assert w.navigation.count()==10 and w.stack.count()==10
 assert not w.workflows['datagen'].start_button.isEnabled()
 assert w.source.images.keys()=={'side','wrist'}
 assert not any(n in sys.modules for n in ['torch','mujoco','isaaclab','lerobot'])

@@ -30,3 +30,19 @@ environments. It is unrelated to the model checkpoint Resume option of Training.
 Validate syntax with `python -m robot_learning_workbench.cli validate examples/NAME.yaml`.
 Use `prepare` with the repository's `task_modules.yaml` only after supplying inputs.
 No placeholder is an instruction to connect real hardware or automatically download weights.
+
+`hub/download.yaml` demonstrates an explicitly pinned official cache download.
+The receipt contains the real cache snapshot path to select in Curation/Training;
+no extra bulk Dataset copy is created in the receipt directory. Existing local
+Datasets and local official Policy/processor folders remain selectable directly.
+`hub/upload.yaml` is deliberately unapproved: select an existing Repo, resolve its
+current Commit/visibility, review the artifact and explicitly confirm before use.
+The UI clears saved upload approval when reopening a Recipe. No token belongs in
+these files. Uploading is separate from the offline official Trainer.
+
+Training accepts installed official Policy config types. Select a registered model
+and generate its actual default config in the Training page, then edit official
+fields and save. `mode: finetune` requires both the Recipe `inputs.policy` and an
+absolute matching local `policy.pretrained_path` in the official training JSON.
+`mode: resume` retains the closed Workbench checkpoint/Dataset identity contract.
+Registry membership does not imply SO101 Simulation or hardware compatibility.

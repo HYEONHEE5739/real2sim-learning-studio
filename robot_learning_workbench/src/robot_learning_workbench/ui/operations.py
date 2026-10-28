@@ -5,7 +5,7 @@ import sys
 
 
 def stage_support(stage: str) -> dict:
-    if stage in ('annotation','datagen','simulation_evaluation','train','offline_validation'):
+    if stage in ('annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage=='source':return {'runnable':True,'reason':'명시 recorded target stream으로 실제 Simulation Source 수집. 실물 Leader/Follower는 실행하지 않습니다.'}
     return {'runnable':False,'reason':'이 단계의 실행 Runner는 구현·검증되지 않았습니다. 직접 API 기능과 구분합니다.'}
@@ -57,13 +57,29 @@ def prepared(path: str,modules: str) -> dict:
         from ..learning.policy import checkpoint_record
         path=Path(plan.resolved_inputs['policy']['path'])
         if (path/'workbench-checkpoint.json').is_file():checkpoint_record(path)
-        if plan.input_documents['policy_config'].get('type') not in ('act','smolvla'):raise ValueError('ACT 또는 SmolVLA Policy가 필요합니다')
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies import factory
+        if plan.input_documents['policy_config'].get('type') not in PreTrainedConfig.get_known_choices():raise ValueError('설치된 LeRobot에 등록되지 않은 Policy입니다')
     return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
 
 
 def execute(request: dict) -> dict:
     """Explicit existing function calls, not an extensible operation registry."""
     op=request['operation'];args=request.get('arguments',{})
+    if op=='training_config':
+        from lerobot.policies.factory import make_policy_config
+        from lerobot.configs.train import TrainPipelineConfig
+        from lerobot.configs.default import DatasetConfig
+        cfg=TrainPipelineConfig(dataset=DatasetConfig(repo_id='local/dataset',root=Path(args['dataset'])),policy=make_policy_config(args['policy_type']),output_dir=Path(args['output']),eval_freq=0)
+        cfg.policy.push_to_hub=False
+        if hasattr(cfg.policy,'pretrained_backbone_weights'):cfg.policy.pretrained_backbone_weights=None
+        return {'config':cfg.to_dict()}
+    if op=='policy_catalog':
+        from ..learning.policy import policy_catalog
+        return {'policies':policy_catalog()}
+    if op=='hub_resolve':
+        from ..learning.hub import resolve
+        return resolve(**args)
     if op=='prepare':return prepared(**args)
     if op=='scene':
         from scene_contract.package import load_scene

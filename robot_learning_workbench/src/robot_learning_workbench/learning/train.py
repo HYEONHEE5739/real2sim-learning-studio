@@ -4,14 +4,14 @@ https://github.com/huggingface/lerobot/blob/v0.4.1/src/lerobot/scripts/lerobot_t
 """
 import os,sys,re,time,subprocess,signal
 from pathlib import Path
-from ..data.native import DataError,atomic_json,load_catalog,DatasetIdentity
+from ..data.native import DataError,atomic_json,load_catalog,DatasetIdentity,read_json
 from ..data.lerobot import _pinned,control_contract
 from .policy import checkpoint_record,seal_checkpoint
 
 
 def validate_config(config: dict,*,dataset: Path,output: Path,mode: str) -> None:
     _pinned();p=config.get('policy',{});d=config.get('dataset',{})
-    if p.get('type') not in ('act','smolvla'):raise DataError('POLICY_UNSUPPORTED','policy','Official ACT or pinned SmolVLA required')
+    if not isinstance(p,dict) or not isinstance(p.get('type'),str):raise DataError('TRAIN_CONFIG_INVALID','policy','Explicit official Policy configuration required')
     if p.get('type')=='smolvla':
         if not p.get('vlm_model_name') or not (Path(p['vlm_model_name'])/'config.json').is_file():raise DataError('TRAIN_CONFIG_INVALID','vlm_model_name','Explicit cached local VLM snapshot required; no network fallback')
         if p.get('adapt_to_pi_aloha',False) or p.get('use_delta_joint_actions_aloha',False):raise DataError('TRAIN_CONFIG_INVALID','action','Absolute model-rad contract required')
@@ -19,12 +19,23 @@ def validate_config(config: dict,*,dataset: Path,output: Path,mode: str) -> None
     if not d.get('root') or Path(d['root']).resolve()!=dataset.resolve() or not isinstance(d.get('repo_id'),str):raise DataError('TRAIN_CONFIG_INVALID','dataset','Explicit local Dataset must match Recipe')
     if d.get('episodes') is not None or d.get('streaming') or d.get('revision'):raise DataError('TRAIN_CONFIG_INVALID','dataset','Use exact local materialization; no episodes filter/network revision')
     if p.get('push_to_hub',True) or config.get('wandb',{}).get('enable',False):raise DataError('TRAIN_CONFIG_INVALID','external','Hub and WandB disabled in this runner')
-    if p.get('pretrained_backbone_weights') is not None or (p.get('pretrained_path') and (p.get('type')!='smolvla' or not (Path(p['pretrained_path'])/'model.safetensors').is_file())):raise DataError('TRAIN_CONFIG_INVALID','weights','Scratch explicit no-download backbone required; Resume selects local checkpoint')
+    if p.get('pretrained_backbone_weights') is not None:raise DataError('TRAIN_CONFIG_INVALID','weights','Use provisioned local pretrained Policy; no implicit backbone download')
+    if mode=='scratch' and p.get('pretrained_path'):raise DataError('TRAIN_CONFIG_INVALID','weights','Scratch must not load Policy pretrained_path; select finetune')
+    if mode=='finetune' and not p.get('pretrained_path'):raise DataError('TRAIN_CONFIG_INVALID','weights','Fine-tuning needs explicit local pretrained_path')
+    if p.get('pretrained_path') and not (Path(p['pretrained_path'])/'model.safetensors').is_file():raise DataError('TRAIN_CONFIG_INVALID','weights','Local pretrained Policy weights required')
+    if mode=='finetune':
+        saved=read_json(Path(p['pretrained_path'])/'config.json')
+        adjustable={'device','use_amp','push_to_hub','repo_id','private','tags','license','pretrained_path','pretrained_backbone_weights','load_vlm_weights'}
+        if any(k not in adjustable and saved.get(k)!=v for k,v in p.items()):raise DataError('TRAIN_CONFIG_INVALID','policy.type/config','Fine-tune architecture/features must match pretrained config')
     if config.get('env') is not None or config.get('eval_freq',0)!=0:raise DataError('TRAIN_CONFIG_INVALID','evaluation','No automatic physical/evaluation environment')
     if bool(config.get('resume',False))!=(mode=='resume'):raise DataError('TRAIN_CONFIG_INVALID','resume','Recipe and official config differ')
     if any(type(config.get(k)) is not int or config[k]<1 for k in ('steps','batch_size','save_freq','log_freq')):raise DataError('TRAIN_CONFIG_INVALID','steps','Explicit positive steps/batch/save/log required')
     if config['log_freq']>config['steps']:raise DataError('TRAIN_CONFIG_INVALID','log_freq','At least one official loss logging step required')
     if not config.get('save_checkpoint',True):raise DataError('TRAIN_CONFIG_INVALID','save_checkpoint','Closed checkpoints required')
+
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.policies import factory
+    if p.get('type') not in PreTrainedConfig.get_known_choices():raise DataError('POLICY_UNSUPPORTED','policy','Policy is not registered in installed LeRobot')
 
 
 def training_command(plan) -> tuple[list[str],dict]:
@@ -32,6 +43,7 @@ def training_command(plan) -> tuple[list[str],dict]:
     config=_plain(plan.input_documents['training_config']);dataset=Path(plan.resolved_inputs['dataset']['path']);mode=plan.effective_settings['execution']['mode']
     validate_config(config,dataset=dataset,output=plan.output_path,mode=mode)
     control_contract(load_catalog(dataset))  # Known IO must validate; external official data may have no Workbench provenance.
+    if mode=='finetune' and Path(plan.resolved_inputs.get('policy',{}).get('path','')).resolve()!=Path(config['policy']['pretrained_path']).resolve():raise DataError('TRAIN_CONFIG_INVALID','policy','Recipe policy must pin local fine-tune weights')
     path=Path(plan.resolved_inputs['training_config']['path']);module='robot_learning_workbench.learning.smol_compat' if config['policy']['type']=='smolvla' else 'lerobot.scripts.lerobot_train';args=[sys.executable,'-B','-m',module,'--config_path='+str(path)]
     if mode=='resume':
         if 'checkpoint' not in plan.resolved_inputs:raise DataError('RESUME_INCOMPATIBLE','checkpoint','Explicit closed local checkpoint required')
@@ -96,8 +108,7 @@ def train(plan,*,events,commands):
     dataset_identity=vars(load_catalog(plan.resolved_inputs['dataset']['path']).identity)
     args=freeze_inputs(plan,args,config)
     # Validate through official parser before starting any optimization process.
-    from lerobot.policies.act.configuration_act import ACTConfig
-    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+    from lerobot.policies import factory
     from lerobot.configs.train import TrainPipelineConfig
     parsed=TrainPipelineConfig.from_pretrained(Path(next(a.split('=',1)[1] for a in args if a.startswith('--config_path='))),local_files_only=True)
     parsed.policy.validate_features() if parsed.policy.input_features else None

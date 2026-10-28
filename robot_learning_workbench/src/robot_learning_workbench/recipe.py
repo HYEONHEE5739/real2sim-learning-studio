@@ -76,7 +76,7 @@ _EXEC={
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
  'real_evaluation':({'episodes'},{'timeout_s','enable_motion'}),'train':({'mode'},set()),
  'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),set()),'merge':(set(),set()),
- 'hub_upload':(set(),set()),'hub_download':(set(),set()),'capture':(set(),{'episodes'}),
+ 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes'}),
  'precision_calibration':(set(),set()),'real_sim':(set(),{'headless'})}
 _ROLES={'source':{'signals','metrics'},'annotation':{'signals','acceptance','metrics'},
  'datagen':{'signals','acceptance','metrics'},'simulation_evaluation':{'signals','success','metrics'},'real_sim':{'signals','metrics'}}
@@ -114,16 +114,20 @@ def _validate(data,path):
         where='execution.'+key
         if key in ('episodes','target_successes','max_attempts','env_num','num_envs','num_episodes','batch_size','max_batches','max_episode_steps'):
             if type(value) is not int or value<1:_fail(where,'positive integer required',path)
+        elif key=='repo_type':
+            if value not in ('dataset','model'):_fail(where,'dataset or model required',path)
+        elif key=='parent_commit':
+            if not isinstance(value,str) or len(value)!=40 or any(c not in '0123456789abcdef' for c in value):_fail(where,'resolved parent commit required',path)
         elif key=='seed':
             if type(value) is not int or not 0<=value<2**32:_fail(where,'uint32 integer required',path)
-        elif key in ('headless','enable_motion','resume'):
+        elif key in ('headless','enable_motion','resume','private','confirm_upload'):
             if type(value) is not bool:_fail(where,'boolean required',path)
         elif key in ('timeout_s','episode_time_s','reset_time_s'):
             if type(value) not in (int,float) or not math.isfinite(value) or (value<0 if key=='reset_time_s' else value<=0):_fail(where,'finite valid seconds required',path)
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
-            if value not in (('manual','auto') if stage=='annotation' else ('scratch','resume')):_fail(where,'unsupported stage mode',path)
+            if value not in (('manual','auto') if stage=='annotation' else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -344,7 +348,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if key in ('dataset','datasets'):
                     if spec.stage in ('annotation','datagen') or not path.is_dir() or not (path/'meta/info.json').is_file():
                         _fail('inputs.'+key,'Native recording required for replay; policy inputs require official LeRobot Metadata, with explicit conversion and no retired-format fallback',doc.path,code='INPUT_FORMAT_UNSUPPORTED')
-                entry=_official_dataset(path) if key=='dataset' and spec.stage in ('train','offline_validation') and (path/'meta/tasks.parquet').is_file() else _artifact(path)
+                entry=_official_dataset(path) if (key=='dataset' and spec.stage in ('train','offline_validation') or key=='artifact' and spec.stage=='hub_upload' and spec.execution['repo_type']=='dataset') and (path/'meta/tasks.parquet').is_file() else _artifact(path)
                 if path.is_file() and path.suffix=='.json':
                     data,digest=_json_input(path)
                     if entry['files'][path.name]!=digest:_fail('inputs.'+key,'changed during read',doc.path,code='INPUT_CHANGED')
@@ -424,6 +428,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         code_names += ['generation/mimic.py','data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
+    if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     runtime_execution=_plain(spec.execution)
     if 'env_num' in runtime_execution:runtime_execution['num_envs']=runtime_execution['env_num']

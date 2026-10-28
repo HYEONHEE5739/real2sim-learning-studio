@@ -1,0 +1,13 @@
+schema_version: 1
+stage: hub_upload
+inputs:
+  artifact: /your/finalized/lerobot-dataset
+  repo_id: your-owner/your-existing-repo
+  revision: main
+execution:
+  repo_type: dataset
+  parent_commit: '0000000000000000000000000000000000000000'
+  private: true
+  confirm_upload: false
+output:
+  directory: /your/workspace/dataset/upload-receipt

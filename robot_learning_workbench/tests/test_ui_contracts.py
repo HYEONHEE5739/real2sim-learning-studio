@@ -6,7 +6,8 @@ def test_ui_never_offers_unimplemented_or_hardware_stages():
     assert operations.stage_support('train')['runnable']
     assert operations.stage_support('source')['runnable']
     assert 'Source' in operations.stage_support('source')['reason']
-    for name in ('hub_upload','real_evaluation','capture'):
+    assert operations.stage_support('hub_upload')['runnable']
+    for name in ('real_evaluation','capture'):
         support=operations.stage_support(name)
         assert not support['runnable'] and support['reason']
 

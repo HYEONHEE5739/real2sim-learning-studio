@@ -28,13 +28,24 @@ class LossChart(QWidget):
 class TrainingSettings(QWidget):
     """Edit only the existing official JSON; save a new file before Recipe reuse."""
     def __init__(self,page):
-        from PyQt6.QtWidgets import QHBoxLayout,QPushButton,QSpinBox,QComboBox,QLabel,QCheckBox
-        super().__init__(page);self.page=page;self.config=None;row=QHBoxLayout(self)
+        from PyQt6.QtWidgets import QHBoxLayout,QPushButton,QSpinBox,QComboBox,QLabel,QCheckBox,QVBoxLayout,QPlainTextEdit
+        super().__init__(page);self.page=page;self.config=None;layout=QVBoxLayout(self);row=QHBoxLayout();layout.addLayout(row)
         load=QPushButton('공식 Config 읽기');save=QPushButton('수정 Config 새 파일로 저장')
-        self.steps=QSpinBox();self.steps.setRange(1,10000000);self.batch=QSpinBox();self.batch.setRange(1,65536);self.device=QComboBox();self.device.addItems(['cpu','cuda']);self.model=QComboBox();self.model.addItems(['act','smolvla']);self.pretrained=QCheckBox('SmolVLA 캐시된 VLM 가중치 사용');self.pretrained.setEnabled(False)
+        self.steps=QSpinBox();self.steps.setRange(1,10000000);self.batch=QSpinBox();self.batch.setRange(1,65536);self.device=QComboBox();self.device.addItems(['cpu','cuda']);self.model=QComboBox();self.model.setPlaceholderText('설치된 Registry 조회 중');self.pretrained=QCheckBox('SmolVLA 캐시된 VLM 가중치 사용');self.pretrained.setEnabled(False)
         for widget in (load,QLabel('누적 steps'),self.steps,QLabel('batch'),self.batch,self.device,self.model,self.pretrained,save):row.addWidget(widget)
+        self.policy_json=QPlainTextEdit();self.policy_json.setPlaceholderText('공식 Policy Config JSON · 모델별 실제 필드');self.policy_json.setMaximumHeight(160);layout.addWidget(self.policy_json)
+        self.policy_json.textChanged.connect(self.edited)
+        create=QPushButton('선택 모델의 공식 기본 Config');row.addWidget(create);create.clicked.connect(self.create)
+        from .jobs import BackendJob
+        from PyQt6.QtCore import QTimer
+        self.job=BackendJob(page.backend_python,self);self.job.finished.connect(self.received);self.operation='catalog'
+        self.catalog_started=False
         load.clicked.connect(self.load);save.clicked.connect(self.save)
         self.steps.valueChanged.connect(self.edited);self.batch.valueChanged.connect(self.edited);self.device.currentTextChanged.connect(self.edited);self.model.currentTextChanged.connect(self.edited);self.pretrained.toggled.connect(self.edited)
+    def showEvent(self,event):
+        super().showEvent(event)
+        if not self.catalog_started:
+            self.catalog_started=True;self.operation='catalog';self.job.start('policy_catalog')
     def edited(self,*_):
         self.page.edit_error=True;self.page.invalidate();self.page.state.setText('Config 편집 중 · 새 파일로 저장하세요')
     def load(self):
@@ -42,7 +53,8 @@ class TrainingSettings(QWidget):
         from pathlib import Path
         try:
             data=json.loads(Path(self.page.inputs['training_config'].text()).read_text())
-            if data['policy']['type'] not in ('act','smolvla'):raise ValueError('ACT 또는 SmolVLA 공식 Config가 필요합니다')
+            if self.model.findText(data['policy']['type'])<0:self.model.addItem(data['policy']['type'])
+            self.policy_json.setPlainText(json.dumps(data['policy'],ensure_ascii=False,indent=2))
             self.model.setCurrentText(data['policy']['type']);self.pretrained.setEnabled(data['policy']['type']=='smolvla');self.pretrained.setChecked(data['policy'].get('load_vlm_weights',False))
             self.config=data;self.steps.setValue(data['steps']);self.batch.setValue(data['batch_size']);self.device.setCurrentText(data['policy']['device']);self.page.edit_error=False
         except Exception as error:self.page.state.setText(str(error))
@@ -50,17 +62,36 @@ class TrainingSettings(QWidget):
         import json,copy
         from pathlib import Path
         from PyQt6.QtWidgets import QFileDialog
-        if self.config is None:self.page.state.setText('먼저 ACT Config를 읽으세요');return
-        path,_=QFileDialog.getSaveFileName(self,'새 공식 ACT JSON Config','','JSON (*.json)')
+        if self.config is None:self.page.state.setText('공식 Config를 읽거나 생성하세요');return
+        path,_=QFileDialog.getSaveFileName(self,'새 공식 LeRobot JSON Config','','JSON (*.json)')
         if not path:return
         try:
             target=Path(path).resolve()
             if target.is_relative_to('/home/hyeonhee/soarm_isaaclab') or target.is_relative_to('/home/hyeonhee/miniconda3') or target.is_relative_to('/home/hyeonhee/IsaacLab'):raise ValueError('보존 원본/SDK 안에 저장할 수 없습니다')
             if self.model.currentText()!=self.config['policy']['type']:raise ValueError('선택 모델의 실제 공식 Config를 먼저 읽으세요. 모델별 파라미터를 임의 변환하지 않습니다')
-            data=copy.deepcopy(self.config);data['steps']=self.steps.value();data['batch_size']=self.batch.value();data['policy']['device']=self.device.currentText()
+            data=copy.deepcopy(self.config);data['policy']=json.loads(self.policy_json.toPlainText());data['steps']=self.steps.value();data['batch_size']=self.batch.value();data['policy']['device']=self.device.currentText()
             if data['policy']['type']=='smolvla':data['policy']['load_vlm_weights']=self.pretrained.isChecked()
+            if data['policy'].get('type')!=self.model.currentText():raise ValueError('Policy JSON과 선택 모델이 다릅니다')
+            if self.page.mode.currentText()=='finetune':data['policy']['pretrained_path']=str((self.page.editor.path.parent/self.page.inputs['policy'].text()).resolve())
             base=self.page.editor.path.parent
             data['output_dir']=str((base/self.page.output.text()).resolve());data['dataset']['root']=str((base/self.page.inputs['dataset'].text()).resolve());data['resume']=self.page.mode.currentText()=='resume'
             with target.open('x') as stream:json.dump(data,stream,ensure_ascii=False,indent=2)
             self.page.inputs['training_config'].setText(str(target));self.page.edit_input('training_config',str(target));self.page.edit_error=False;self.page.state.setText('새 Config 저장됨 · Recipe를 저장하고 다시 검사하세요')
         except Exception as error:self.page.state.setText(str(error))
+
+    def create(self):
+        if self.page.editor.path is None:self.page.state.setText('저장 Recipe를 먼저 여세요');return
+        base=self.page.editor.path.parent
+        try:
+            self.job.start('training_config',policy_type=self.model.currentText(),dataset=str((base/self.page.inputs['dataset'].text()).resolve()),output=str((base/self.page.output.text()).resolve()));self.operation='create'
+        except Exception as error:self.page.state.setText(str(error))
+    def received(self,result):
+        import json
+        if not result.get('ok'):self.page.state.setText(result['error']['message']);return
+        if self.operation=='catalog':
+            current=self.model.currentText();self.model.clear()
+            for row in result['result']['policies']:
+                self.model.addItem(row['type']);self.model.setItemData(self.model.count()-1,json.dumps(row,ensure_ascii=False),Qt.ItemDataRole.ToolTipRole)
+            if current:self.model.setCurrentText(current)
+        else:
+            self.config=result['result']['config'];self.policy_json.setPlainText(json.dumps(self.config['policy'],ensure_ascii=False,indent=2));self.steps.setValue(self.config['steps']);self.batch.setValue(self.config['batch_size']);self.device.setCurrentText(self.config['policy']['device']);self.edited()

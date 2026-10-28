@@ -280,8 +280,8 @@ Read-only comparison baseline: Studio8a8210d, original Builderad018a0, SO101875e
 - [x] Phase1a: move engine-neutral recording/command helpers; preserve math/phase.
 - [x] Phase1b: Native publish/Task helpers and Prepared coverage; actual1/4-env regression.
 - [x] Phase2: separate Builder scene/evidence/capture/candidate/scan responsibilities without changing API/exports.
-- [ ] Phase3a: installed official Policy registry/factory + Trainer fine-tune/Resume.
-- [ ] Phase3b: pinned Hub Dataset/Policy download and explicit opt-in upload; UI/Runner; no smoke uploads.
+- [x] Phase3a: installed official Policy registry/factory + Trainer fine-tune/Resume.
+- [x] Phase3b: pinned Hub Dataset/Policy download and explicit opt-in upload; UI/Runner; no smoke uploads.
 - [ ] Phase4: offline/fake device/Capture/Calibration/real-policy contract and truthful stage availability.
 - [ ] Phase5: stage-scoped UI output defaults and input selection; no existing-data relocation.
 - [ ] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.

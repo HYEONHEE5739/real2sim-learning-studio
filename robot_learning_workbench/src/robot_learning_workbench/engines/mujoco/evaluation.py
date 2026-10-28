@@ -67,11 +67,11 @@ def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,
                 ep.add('states/finger_contact',torch.tensor([after['contacts']['left'],after['contacts']['right']],dtype=torch.bool))
                 ep.add('states/grasp_latched',torch.tensor([grasp],dtype=torch.uint8));ep.add('states/placement',torch.tensor([placed],dtype=torch.uint8))
                 ep.add('states/physics_timestamp',torch.tensor(float(data.time),dtype=torch.float64))
-                ep.add('policy/action_queue_remaining',torch.tensor(len(policy._action_queue) if hasattr(policy,'_action_queue') else len(policy._queues['action']) if hasattr(policy,'_queues') else -1,dtype=torch.int64))
+                ep.add('policy/action_queue_remaining',torch.tensor(len(policy._action_queue) if hasattr(policy,'_action_queue') else len(policy._queues['action']) if hasattr(policy,'_queues') and 'action' in policy._queues else -1,dtype=torch.int64))
                 previous=goal;step_completed(controls,events,tick);tick+=1;report['physics_effect']='applied'
                 if placed:report.update(success=True,category='placement_success');break
         if placed or tick>=report_limit(plan):report.update(evaluation_result(placed=placed,grasp=grasp,steps=tick,limit=report_limit(plan)))
-        report.update(steps=tick,inference_mean_s=float(np.mean(latencies)) if latencies else None,inference_calls=len(latencies),policy_chunk_steps=policy.config.n_action_steps,peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
+        report.update(steps=tick,inference_mean_s=float(np.mean(latencies)) if latencies else None,inference_calls=len(latencies),policy_chunk_steps=getattr(policy.config,'n_action_steps',None),peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
         if not tick:return None,{},report
         ep.pre_export()
         if placed:ep.data['obs']['events']['place'][-1]=1

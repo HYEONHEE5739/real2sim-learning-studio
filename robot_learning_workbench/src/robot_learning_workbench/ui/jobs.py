@@ -20,6 +20,10 @@ class BackendJob(QObject):
         if error==QProcess.ProcessError.FailedToStart:self.finished.emit({'ok':False,'error':{'message':message}})
     def start(self,operation,**arguments):
         if self.process.state()!=QProcess.ProcessState.NotRunning:raise RuntimeError('이 작업이 끝난 뒤 다시 실행하세요')
+        from PyQt6.QtCore import QProcessEnvironment
+        env=QProcessEnvironment.systemEnvironment()
+        if operation=='hub_resolve':env.insert('HF_HUB_OFFLINE','0')
+        self.process.setProcessEnvironment(env)
         self.buffer.clear();self.process.start(self.python,['-B','-m','robot_learning_workbench.ui.operations'])
         self.process.write(json.dumps({'operation':operation,'arguments':arguments}).encode());self.process.closeWriteChannel()
     def done(self,*_):
