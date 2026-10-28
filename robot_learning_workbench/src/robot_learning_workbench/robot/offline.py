@@ -4,12 +4,16 @@ Live collection, measured Calibration and real rollout are separate hardware gat
 Reports contain diagnostics/references, not another Capture or Dataset format.
 """
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
 import numpy as np
 from ..data.native import DataError,atomic_json
-from .calibration import JOINTS,load_profile,review_joint,mapper_from_scene
+from .calibration import JOINTS,PrecisionMapper,load_profile,review_joint,mapper_from_scene
+if TYPE_CHECKING:
+    from lerobot.robots.so101_follower.config_so101_follower import SO101FollowerConfig
 
 
-def capture_module():
+def capture_module() -> ModuleType:
     """Builder owns Capture schemas; report the optional dependency explicitly."""
     from importlib import import_module
     try:return import_module('real2sim_builder.capture')
@@ -48,7 +52,7 @@ def capture_binding(manifest,scene,calibration_id):
     return reasons
 
 
-def encoder_preflight(action, *, mapper, model_path, calibration_path, cfg):
+def encoder_preflight(action: np.ndarray, *, mapper: PrecisionMapper, model_path: Path|str, calibration_path: Path|str, cfg: 'SO101FollowerConfig') -> dict:
     """Use official CPU-only normalization and existing Follower checks; never IO.
 
     Feetech's serial constructor is deliberately NOT called. The official base

@@ -235,7 +235,7 @@ def _resolve(doc,value):
     return (doc.base_dir/path).resolve() if not path.is_absolute() else path.resolve()
 
 
-def policy_directory(path):
+def policy_directory(path: Path|str) -> Path:
     """Official model folder; a Workbench root keeps its closed-record ownership."""
     root=Path(path).resolve()
     if (root/'workbench-checkpoint.json').is_file():return root/'pretrained_model'

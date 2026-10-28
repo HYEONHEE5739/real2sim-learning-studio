@@ -1,7 +1,11 @@
 """Native SDK encoding and explicit model/Teleop targets; no engine or bus writes."""
 import math
 import numpy as np
+from collections.abc import Mapping,Sequence
+from typing import TYPE_CHECKING
 from .calibration import JOINTS,values,LEGACY_MAPPER
+if TYPE_CHECKING:
+    from .devices import Follower
 
 
 class TargetRejected(ValueError):
@@ -56,7 +60,7 @@ def command_target(leader_native, *, leader_mapper, follower, model_bounds, engi
     return position_target(np.array([requested[n] for n in JOINTS]),follower=follower,model_bounds=model_bounds,engine_bounds=engine_bounds)
 
 
-def position_target(requested, *, follower, model_bounds, engine_bounds=None, joint_order=JOINTS, units='model_rad'):
+def position_target(requested: np.ndarray|Sequence[float], *, follower: 'Follower', model_bounds: Mapping[str,Sequence[float]], engine_bounds: np.ndarray|None=None, joint_order: Sequence[str]=JOINTS, units: str='model_rad') -> tuple[np.ndarray,dict,dict]:
     """Pure model/motor intersection, Saturation, Precision inverse and SDK encoding.
 
     This preflight sends nothing and cannot approve a physical device or binding.

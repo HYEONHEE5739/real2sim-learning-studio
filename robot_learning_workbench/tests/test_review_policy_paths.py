@@ -47,3 +47,24 @@ def test_leaf_path_does_not_bypass_owned_metadata_or_processor_changes(tmp_path)
     processor=root/'pretrained_model/policy_preprocessor.json';processor.unlink();processor.write_text('{}')
     for path in (root,root/'pretrained_model'):
         with pytest.raises(ValueError,match='changed/missing'):load_policy(path)
+
+
+@pytest.mark.parametrize('leaf',[False,True])
+@pytest.mark.parametrize('damage',['missing','changed'])
+def test_cli_finetune_keeps_owned_processor_integrity(tmp_path,leaf,damage):
+    import shutil,copy
+    from robot_learning_workbench.learning.train import training_command
+    root=tmp_path/'owned';shutil.copytree(CHECKPOINT,root,copy_function=os.link)
+    processor=root/'pretrained_model/policy_preprocessor.json';processor.unlink()
+    if damage=='changed':processor.write_text('{}')
+    config=copy.deepcopy(json.loads((root/'workbench-checkpoint.json').read_text())['config'])
+    config.update(resume=False,output_dir=str(tmp_path/'out'),steps=1)
+    config['policy']['pretrained_path']=str(root/'pretrained_model')
+    cfg=tmp_path/'train.json';cfg.write_text(json.dumps(config))
+    recipe=tmp_path/'fine.yaml';recipe.write_text(yaml.safe_dump(dict(schema_version=1,stage='train',inputs={
+        'policy':str(root/'pretrained_model'if leaf else root),'dataset':config['dataset']['root'],'training_config':str(cfg)},
+        execution={'mode':'finetune'},output={'directory':str(tmp_path/'out')})))
+    plan=prepare_recipe(read_recipe(recipe))
+    with pytest.raises(ValueError)as error:training_command(plan)
+    assert error.value.code=='CHECKPOINT_INTEGRITY_MISMATCH'
+    assert not plan.output_path.exists()
