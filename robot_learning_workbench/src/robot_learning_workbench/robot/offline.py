@@ -9,6 +9,14 @@ from ..data.native import DataError,atomic_json
 from .calibration import JOINTS,load_profile,review_joint,mapper_from_scene
 
 
+def capture_module():
+    """Builder owns Capture schemas; report the optional dependency explicitly."""
+    from importlib import import_module
+    try:return import_module('real2sim_builder.capture')
+    except ImportError as exc:
+        raise DataError('STAGE_DEPENDENCY_MISSING','offline','Install the offline extra in the backend environment; Builder Capture dependency unavailable: '+str(exc)) from exc
+
+
 def sdk_configuration(spec):
     """Validate official constructor config, without constructing a serial SDK bus."""
     role=spec.get('role')
@@ -43,6 +51,7 @@ def capture_binding(manifest,scene,calibration_id):
 def run(plan,*,events,commands):
     opts=plan.effective_settings['execution']
     if opts.get('mode')!='offline' or opts.get('enable_motion'):raise DataError('HARDWARE_NOT_APPROVED','execution','Only explicit offline inspection is enabled; no port, torque or camera access')
+    capture=capture_module() if plan.stage in ('capture','real_sim','real_evaluation') else None
     from ..recipe import verify_prepared_inputs,_plain
     from ..run import StageResult
     verify_prepared_inputs(plan)
@@ -63,8 +72,7 @@ def run(plan,*,events,commands):
     if plan.stage in ('capture','real_sim','real_evaluation'):
         if 'capture_session' not in plan.resolved_inputs:raise DataError('CAPTURE_INPUT_REQUIRED','capture_session','Explicit preserved Capture/Snapshot session required for offline mode')
         # Builder owns portable Capture schemas and measured-time validation.
-        from real2sim_builder.capture import load_session
-        root=Path(plan.resolved_inputs['capture_session']['path']);manifest,samples,_=load_session(root)
+        root=Path(plan.resolved_inputs['capture_session']['path']);manifest,samples,_=capture.load_session(root)
         report['capture']={'samples':len(samples),'clock':manifest['clock'],'joint_names':manifest['joint_names'],
                            'images':sum(len(s['images']) for s in samples),'schema':manifest['schema']}
         if not samples:raise ValueError('No committed measured observations')

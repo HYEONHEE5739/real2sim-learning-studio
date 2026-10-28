@@ -444,7 +444,8 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation'):
-        import real2sim_builder.capture as capture
+        from .robot.offline import capture_module
+        capture=capture_module()
         for name in ('capture.py','files.py','scene.py'):
             p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)
