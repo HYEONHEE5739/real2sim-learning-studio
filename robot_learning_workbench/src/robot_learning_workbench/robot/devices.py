@@ -70,9 +70,12 @@ class Follower:
             if config.cameras or config.max_relative_target is not None or not config.use_degrees or not config.disable_torque_on_disconnect:
                 raise ValueError('Expected degree-mode SO101 without cameras/relative target rewrite')
             device=SO101Follower(config)
+        # Production SDK devices are observation-only. Full-axis activation/send
+        # remains available only to explicit in-memory devices in tests.
+        binding['read_only']=True
         return cls(device,**binding)
     def __init__(self, device, *, profile, calibration_path, identity, model_hash,
-                 source_model=None, execution_model=None):
+                 source_model=None, execution_model=None, read_only=False):
         self.device=device; self.bus=device.bus; self.identity=copy.deepcopy(identity)
         self.calibration_path=Path(calibration_path)
         self.profile=profile_for_model(profile,model_hash,source_model=source_model,execution_model=execution_model)
@@ -81,6 +84,7 @@ class Follower:
         self._closed=False; self._connected=False; self._activated=False; self._sending=False
         self.last_raw=None; self.last_encoded_goal_raw=None; self._last_goal_ns=None
         self.cleanup=None; self.metadata={'native_units':{n:'percent_0_100' if n=='gripper' else 'calibration_relative_degree' for n in JOINTS}}
+        self.read_only=read_only
 
     def _check_identity(self, *, hardware=False):
         if self.identity != self.profile['identity'] or self.identity.get('role') != self.role or self.profile.get('role') != self.role:
@@ -131,6 +135,7 @@ class Follower:
         except BaseException as exc: raise DeviceError('read',str(exc),effect='not_applied') from exc
 
     def activate(self):
+        if self.read_only:raise DeviceError('activate','ARM_MOTION_NOT_APPROVED: real device is observation-only',effect='not_applied')
         if not self._connected: raise DeviceError('activate','Not connected',effect='not_applied')
         try: self._check_identity(hardware=True)
         except BaseException as exc: raise DeviceError('activate',str(exc),effect='not_applied') from exc
@@ -163,6 +168,7 @@ class Follower:
         except BaseException as exc: raise DeviceError('encode_goal',str(exc),effect='not_applied') from exc
 
     def send(self,target):
+        if self.read_only:raise DeviceError('send','ARM_MOTION_NOT_APPROVED: full-axis hardware send is prohibited',effect='not_applied')
         if not self._connected or not self._sending: raise DeviceError('send','Not activated or stopped',effect='not_applied')
         try:
             self._check_identity();target=values(target)
@@ -183,7 +189,7 @@ class Follower:
     def close(self):
         if self._closed: return self.cleanup
         errors=[]; self._sending=False; self._activated=False
-        release=self.role!='calibration'
+        release=self.role!='calibration' and not self.read_only
         try:
             if self.bus.is_connected: self.bus.disconnect(disable_torque=release)
         except BaseException as exc: errors.append(str(exc))
@@ -205,6 +211,9 @@ class Leader(Follower):
 
     def activate(self):
         if not self._connected: raise DeviceError('activate','Not connected',effect='not_applied')
+        if self.read_only:
+            self._check_identity(hardware=True)
+            return  # Preserve Leader torque; no automatic release.
         try:
             self._check_identity(hardware=True); self.bus.disable_torque(); self._activated=True
         except BaseException as exc:
