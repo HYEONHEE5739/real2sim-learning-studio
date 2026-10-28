@@ -87,7 +87,8 @@ class WorkflowPage(QWidget):
 
     def show_policy_model(self,path):
         try:
-            root=(self.editor.path.parent/path).resolve();config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
+            from ..recipe import policy_directory
+            root=policy_directory(self.editor.path.parent/path);config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
         except (OSError,ValueError,KeyError):self.policy_model.setText('Policy 모델: Config 확인 필요')
 
     def select_preview(self,index):
