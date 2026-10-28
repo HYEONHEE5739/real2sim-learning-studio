@@ -13,14 +13,14 @@ class ScenePage(QWidget):
         super().__init__(parent);self.python=python;self.workspace=Path(workspace);self.scene_path=None;self.builder_project=None;self.valid=False
         layout=QVBoxLayout(self);layout.addWidget(QLabel('Scene · 기존 패키지 검사 / 독립 Builder 연결'))
         self.path=QLineEdit();self.path.setReadOnly(True);layout.addWidget(self.path);row=QHBoxLayout();layout.addLayout(row)
-        for text,fn in [('Scene Package 선택',self.choose_scene),('Manifest·Calibration·Model 검사',self.inspect),('Builder Project 선택',self.choose_project),('기존 Builder 열기',self.open_builder),('수평 기준 검사 (선택)',self.horizontal)]:
+        for text,fn in [('Scene Package 선택',self.choose_scene),('Manifest·Calibration·Model 검사',self.inspect),('Builder Project 선택',self.choose_project),('기존 Builder 열기',self.open_builder),('Workspace Builder 열기',self.open_workspace_builder),('수평 기준 검사 (선택)',self.horizontal)]:
             button=QPushButton(text);button.clicked.connect(fn);row.addWidget(button)
         self.state=QLabel('기존 Scene을 선택하세요. v9 생성/실물 Calibration은 자동 실행하지 않습니다.');self.state.setWordWrap(True);layout.addWidget(self.state)
         self.info=QPlainTextEdit();self.info.setReadOnly(True);layout.addWidget(self.info)
         self.job=BackendJob(python,self);self.job.finished.connect(self.finished);self.job.log.connect(self.info.appendPlainText)
         self.builder=QProcess(self);self.builder.readyReadStandardError.connect(lambda:self.info.appendPlainText(bytes(self.builder.readAllStandardError()).decode(errors='replace')))
     def choose_scene(self):
-        path,_=QFileDialog.getOpenFileName(self,'기존 Scene scene.json','','JSON (*.json)')
+        path,_=QFileDialog.getOpenFileName(self,'기존 Scene scene.json',str(self.workspace/'scenes'),'JSON (*.json)')
         if path:self.select_scene(path)
     def select_scene(self,path):
         self.scene_path=str(Path(path).resolve());self.path.setText(self.scene_path);self.valid=False;self.state.setText('선택됨 · 검사를 실행하세요')
@@ -44,19 +44,27 @@ class ScenePage(QWidget):
         if len(ids)<3:self.state.setText('Table/Workspace/Block의 실제 ID를 지정하세요');return
         self.operation='horizontal';self.job.start('horizontal',project=str(self.builder_project),table=ids[0],workspace=ids[1],blocks=ids[2:])
     def choose_project(self):
-        path=QFileDialog.getExistingDirectory(self,'기존 Builder Project 선택')
+        path=QFileDialog.getExistingDirectory(self,'기존 Builder Project 선택',str(self.workspace/'scenes'))
         if path:self.builder_project=Path(path);self.state.setText('Builder Project 선택됨 · '+path)
     def open_builder(self):
         if self.builder.state()!=QProcess.ProcessState.NotRunning:self.state.setText('이미 Builder가 실행 중입니다');return
         if self.builder_project is None:self.state.setText('기존 Builder Project를 선택하세요');return
+        self.start_builder(self.builder_project.parent)
+    def open_workspace_builder(self):
+        if self.builder.state()!=QProcess.ProcessState.NotRunning:self.state.setText('이미 Builder가 실행 중입니다');return
+        self.start_builder(self.workspace/'scenes')
+    def start_builder(self,projects):
         environment=QProcessEnvironment.systemEnvironment();environment.insert('REAL2SIM_WORKER_PYTHON',self.python);self.builder.setProcessEnvironment(environment)
-        self.builder.start(sys.executable,['-B','-m','real2sim_builder.cli','ui','--projects',str(self.builder_project.parent)])
+        self.builder.start(sys.executable,['-B','-m','real2sim_builder.cli','ui','--projects',str(projects)])
         self.state.setText('독립 Builder 실행 요청 · 새 Export 결과를 Scene Package 선택으로 다시 여세요')
 
 
 class Window(QMainWindow):
     def __init__(self,backend_python,modules,workspace):
-        super().__init__();self.setWindowTitle('Robot Learning Workbench');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True);self.closing=False;self.cancelled_on_close=set()
+        super().__init__();self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
+        from .paths import GROUPS
+        for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
+        self.closing=False;self.cancelled_on_close=set()
         central=QWidget();self.setCentralWidget(central);layout=QHBoxLayout(central);self.navigation=QListWidget();layout.addWidget(self.navigation,1);self.stack=QStackedWidget();layout.addWidget(self.stack,5)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
         self.workflows={stage:WorkflowPage(stage,backend_python,modules,self) for stage in ('source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}

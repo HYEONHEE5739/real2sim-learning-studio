@@ -13,11 +13,12 @@ from .operations import stage_support,run_outcome
 
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
-        super().__init__(parent);self.stage=stage;self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
+        super().__init__(parent);self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
         box=QVBoxLayout(self);self.heading=QLabel({'source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation','capture':'Capture 보존 자료 검사','precision_calibration':'Precision 보존 근거 검사','real_evaluation':'Real Policy 오프라인 검사','real_sim':'Real/Sim 보존 입력 검사'}[stage]);box.addWidget(self.heading)
         row=QHBoxLayout();box.addLayout(row)
-        self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사')
-        for button in (self.load_button,self.save_button,self.check_button):row.addWidget(button)
+        self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 기본 출력')
+        for button in (self.load_button,self.save_button,self.check_button,self.new_output_button):row.addWidget(button)
+        self.new_output_button.clicked.connect(self.suggest_output)
         self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe)
         self.editor=RecipeEditor();self.editor.changed.connect(self.invalidate)
         self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
@@ -107,10 +108,22 @@ class WorkflowPage(QWidget):
         if not scene.valid or str(path)!=scene.scene_path:
             self.invalidate();self.state.setText('현재 선택 Scene과 Recipe가 다릅니다. 검사 Scene을 적용하고 Recipe를 저장·재검사하세요');return False
         return True
+    def suggest_output(self):
+        if self.active() or self.editor.path is None:self.state.setText('저장 Recipe를 열고 기존 실행이 끝난 뒤 새 출력을 제안하세요');return
+        if self.dataset_resume is not None and self.dataset_resume.isChecked():self.state.setText('Resume는 명시한 기존 Dataset 경로를 유지합니다');return
+        from .paths import output_path
+        if self.stage in ('hub_download','hub_upload'):
+            group='policy' if self.hub_settings.kind.currentText()=='model' else 'dataset'
+            path=self.workspace/group/(self.stage+'-'+uuid.uuid4().hex[:8])
+        else:path=output_path(self.workspace,self.stage)
+        self.output.setText(str(path));self.edit_output();self.state.setText('새 출력 제안 · Recipe와 공식 Training Config를 저장하고 다시 검사하세요')
     def choose_input(self,key):
+        from .paths import input_directory
+        directory=str(input_directory(self.workspace,self.stage,key))
+        if key=='artifact' and self.hub_settings.kind.currentText()=='model':directory=str(self.workspace/'policy')
         if key in ('dataset','source_dataset','resume_dataset','policy','checkpoint','artifact','capture_session'):
-            value=QFileDialog.getExistingDirectory(self,key+' 선택')
-        else:value,_=QFileDialog.getOpenFileName(self,key+' 선택')
+            value=QFileDialog.getExistingDirectory(self,key+' 선택',directory)
+        else:value,_=QFileDialog.getOpenFileName(self,key+' 선택',directory)
         if value:self.inputs[key].setText(value);self.edit_input(key,value)
 
     def command(self,kind):
@@ -170,9 +183,9 @@ class WorkflowPage(QWidget):
         self.safe_update(update)
         if key=='policy':self.show_policy_model(value)
     def choose_dataset_output(self):
-        folder=QFileDialog.getExistingDirectory(self,'기존 Dataset 또는 새 Dataset의 상위 폴더')
+        folder=QFileDialog.getExistingDirectory(self,'기존 Dataset 또는 새 Dataset의 상위 폴더',str(self.workspace/self.stage))
         if not folder:return
-        target=Path(folder) if self.dataset_resume.isChecked() else Path(folder)/('dataset-'+uuid.uuid4().hex[:8])
+        target=Path(folder) if self.dataset_resume.isChecked() else Path(folder)/(self.stage+'-'+uuid.uuid4().hex[:8])
         self.output.setText(str(target));self.edit_output()
     def edit_dataset_resume(self,value):
         if self._syncing or self.editor.path is None:return
@@ -313,7 +326,7 @@ class WorkflowPage(QWidget):
                 text='Worker '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])
                 if outcome['goal_reached'] is False:text+=' · 목표 미달'
-                if outcome['needs_resume']:text+=' · 새 worker/새 출력 Resume 필요'
+                if outcome['needs_resume']:text+=' · 새 worker에서 기존 Dataset 추가 저장 필요'
                 if outcome['budget_exhausted']:text+=' · Attempt 예산 소진'
                 if outcome['successes'] is not None:text+=' · Task 성공 '+str(outcome['successes'])+' / 실패 '+str(outcome['failures'])
                 if outcome['success_rate'] is not None:text+=' · 성공률 '+str(outcome['success_rate'])
@@ -342,11 +355,18 @@ class WorkflowPage(QWidget):
         if self.handle:QDesktopServices.openUrl(QUrl.fromLocalFile(self.handle['output_path']))
     def continue_run(self):
         if not self.handle or self.stage!='datagen' or self.active():return
-        out=QFileDialog.getExistingDirectory(self,'새 출력의 상위 폴더 선택')
-        if not out:return
-        # The user saves/inspects this new Recipe before preparing; never auto-loop.
-        self.safe_update(lambda d:(d['inputs'].__setitem__('resume_dataset',self.handle['output_path']),d['output'].__setitem__('directory',str(Path(out)/('continued-'+uuid.uuid4().hex[:8])))))
-        self.output.setText(self.editor.data()['output']['directory']);self.state.setText('Resume Recipe 편집 중 · 새 이름으로 저장하고 검사하세요')
+        # Reopened legacy runs still use the current explicit append contract.
+        # Preparation may reject a changed historical identity; never copy/repair it.
+        def append(data):
+            data['inputs'].pop('resume_dataset',None)
+            data['execution'].update(resume=True,num_episodes=self.counts['num_episodes'].value())
+            data['execution'].pop('target_successes',None)
+            data['output']['directory']=self.handle['output_path']
+        if self.safe_update(append):
+            self.output.setText(self.handle['output_path']);self._syncing=True
+            try:self.dataset_resume.setChecked(True)
+            finally:self._syncing=False
+            self.state.setText('기존 Dataset 추가 저장 Recipe 편집 중 · 추가 Episode/Attempt 예산을 확인하고 저장·검사하세요')
     def show_training_result(self):
         path=Path(self.handle['output_path'])/'training-result.json'
         if path.is_file() and getattr(self,'_shown_training',None)!=str(path):

@@ -63,7 +63,7 @@ class TrainingSettings(QWidget):
         from pathlib import Path
         from PyQt6.QtWidgets import QFileDialog
         if self.config is None:self.page.state.setText('공식 Config를 읽거나 생성하세요');return
-        path,_=QFileDialog.getSaveFileName(self,'새 공식 LeRobot JSON Config','','JSON (*.json)')
+        path,_=QFileDialog.getSaveFileName(self,'새 공식 LeRobot JSON Config',str(self.page.workspace/'policy'/'training-config.json'),'JSON (*.json)')
         if not path:return
         try:
             target=Path(path).resolve()

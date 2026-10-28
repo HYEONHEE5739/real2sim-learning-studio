@@ -59,3 +59,11 @@ Phase3 최종 전체 회귀981 PASS/skip0, 기존 torchvision warning2개. 실�
 원래 보존 snapshot/Precision 근거를 새 worker에서 읽었다. Capture는 내부 clock/image/model SHA가 유효하더라도 현재 Scene과 mapping/model/단위가 결합되지 않으면 PARTIAL이다. 이 상태에서 Policy inference/command 변환을 수행하지 않는다. 한계가 다른 역사 모델의 SHA를 같다고 재명명하지 않는다. 실물 command record가 없는 현재 v8을 자동 승인하지 않는다.
 
 Phase4 실제 Qt→기존 R03 worker의 보존 Precision 검사, 실제 저장 Snapshot/Capture 및 Real/Sim 입력 검사를 완료했다. Real Policy 보고서는 과거 Capture 결합 부재 때문에 PARTIAL·inference_performed=false·command_sent=false다. 공식 SDK/Fake 장치·Policy 집중110 PASS. 독립 Spec/Standards 두 축의 identity/단위/실행 코드 누락 지적을 수정하고 High/Medium0 closure를 받았다. Camera/Scene Calibration identity도 명시 결합이 없으면 승격하지 않는다. 전체 회귀의 진행 중 스냅샷과 최종 집중 검사를 구분하고 Phase6에서 다시 고정 코드 전체를 검증한다.
+
+## Phase5 — UI 출력 기본 위치
+
+UI 새 Run의 출력 제안만 source/annotation/datagen/dataset/policy/evaluation/scenes로 정리했다. `ui/paths.py`는 경로를 반환하며 Dataset을 만들거나 옮기지 않는다. 저장 Recipe를 열 때 명시 output을 덮어쓰지 않고, 명시 append 중에는 새 출력 제안을 거부한다. 과거 fresh-worker Run의 계속 실행 버튼도 기존 output+resume=true+추가 Episode 계약을 편집하도록 수정했다. 역사 identity가 다르면 prepare가 명시 거부하며 자동 복사/수정하지 않는다.
+
+Curation/공식 Export/Merge·Training Config 저장 대화상자와 다음 단계 입력 선택은 해당 폴더를 먼저 제안한다. 빈 Workspace Builder를 열 수 있지만 Scene은 사용자 New 동작 전에는 생성하지 않는다. 실제 Qt에서 저장 경로 보존/새 제안/append/계속 실행/Scene 미생성을 확인했다. 기존 run.json/segments/attempts/HDF5/MP4/공식 checkpoint 형식은 변경하지 않았다. 동일 영상·Native segment·Checkpoint를 새 등록 포맷으로 복제하지 않는다.
+
+Phase5 전체987 PASS/skip0 및 최종 UI 집중21 PASS, 두 축 독립 리뷰 High/Medium0. 신규 단계 경로에서 양 엔진1/4의 실제 통합 실행을 진행하며 전체 결과는 Phase6에 집계한다.
