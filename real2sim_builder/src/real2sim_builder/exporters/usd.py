@@ -6,9 +6,9 @@ import json
 import os
 from pathlib import Path
 import numpy as np
-from ..project import validate,world_pose,local_path
+from real2sim_builder.scene import validate, world_pose, local_path
 from ..calibration.geometry import parts,mesh_data
-from ..project import CLIP
+from real2sim_builder.cameras import CLIP
 
 
 def tuple_string(x):return '('+', '.join(format(float(v),'.12g') for v in x)+')'
@@ -77,7 +77,7 @@ def export(scene,root,path):
                 else:lines.extend(['      token visibility = "invisible"','      bool physics:collisionEnabled = true'])
                 lines.append('    }')
         lines.append('  }')
-    from ..project import OPTICAL_TO_RENDER
+    from real2sim_builder.cameras import OPTICAL_TO_RENDER
     conversion=OPTICAL_TO_RENDER
     for camera in scene['cameras']:
         k=np.asarray(camera['K']['value']);w,h=camera['resolution'];focal=10.

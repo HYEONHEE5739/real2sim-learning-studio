@@ -8,9 +8,11 @@ import numpy as np
 from ...generation import mimic
 from ...data.native import load_catalog,open_native,file_sha256
 from .source import resolved_model_config
-from .annotation import validate_recording
+from robot_learning_workbench.data.recording import validate_recording
 from .model import JOINTS,_execution_urdf
 
+
+from ...data.publication import publish_generation
 
 def reset_seeds(seed,count):
     """Original single-worker reset stream: one draw per global attempt."""
@@ -49,7 +51,9 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
     from ...data.native import native_api
     from ...data.video import AsyncVideoWriter
     from ...tasks.pick_place import numpy_corners,v8_placement,release_evidence
-    from .source import initial_arrays,add_initial,record_frame,control_commands,step_completed
+    from robot_learning_workbench.engines.mujoco.source import initial_arrays
+    from robot_learning_workbench.data.recording import add_initial, record_frame
+    from robot_learning_workbench.commands import control_commands, step_completed
     from .state import read_sample,snapshot
     from .control import step,command_target
     eid='datagen-'+str(claim['attempt']);ep=native_api()[0]();ep.seed=claim['seed'];add_initial(ep,initial_arrays(model,data,b));initial=snapshot(model,data,b)
@@ -120,7 +124,7 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
         report.update(status='success',category='success')
         return ep,{k:v.video_path for k,v in videos.items()},report
     finally:
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         try:report['saturation']=command_summary(ep)
         except Exception as error:report['saturation']={'status':'unavailable','reason':str(error)}
         for writer in videos.values():
@@ -133,7 +137,8 @@ def run(plan,*,events,commands):
     from ...data.native import NativeRun,resume_to,history
     from ...run import StageResult
     from ...data.native import collection_settings
-    from .source import execution_contract,reset_placements,publish_event
+    from robot_learning_workbench.engines.mujoco.source import execution_contract, reset_placements
+    from robot_learning_workbench.data.publication import publish_event
     from .model import build_model
     from .state import restore_episode
     verify_prepared_inputs(plan);catalog,pool,cfg,kin=load_inputs(plan)
@@ -184,31 +189,12 @@ def run(plan,*,events,commands):
     finally:owner.close()
 
 
-def publish_generation(owner,segment,claim,ep,media,report,catalog,kin,events):
-    """One Native publisher for single and concurrent MuJoCo attempts."""
-    from ...recipe import _plain
-    from .source import publish_event
-    summary={k:v for k,v in report.items() if k!='ik_diagnostics'}
-    rows=report['ik_diagnostics'];summary['ik_summary']={'applied_steps':len(rows),'native_nonconverged_steps':sum(not r['converged'] for r in rows),'pose_diagnostic_failed_steps':sum(not r['common_pose_passed'] for r in rows)}
-    summary['last_applied_ik']=rows[-1] if rows else None
-    if ep is not None:
-        eid='datagen-'+str(claim['attempt'])
-        lineage=[{'dataset':_plain(catalog.identity),**selection,'source_lineage':catalog.episodes[selection['source_index']].metadata.get('source_lineage')} for selection in report['selected_sources']]
-        segment.write_episode(ep,episode_id=eid,metadata={**summary,'non_tensor_arrays':{'ik/failure_reason':np.asarray([r['failure_reason'].encode() for r in report['ik_diagnostics']],dtype='S64')},'ik_identity':kin.identity,'source_lineage':lineage,'success_source':'stable_grasp_and_placement'},media=media)
-        for p in media.values():Path(p).unlink()
-        segment.record_attempt(claim,status='success',episode_id=eid,diagnostics=summary);segment.commit();publish_event(owner.root,eid,events)
-    else:
-        for p in segment.folder.glob('*.mp4'):p.unlink()
-        status='cancelled' if report['status']=='cancelled' else 'ik_failure' if report['category']=='ik_failure' else 'failure'
-        segment.record_attempt(claim,status=status,diagnostics=summary);segment.commit()
-    return ep is not None
-
-
 def run_parallel(plan,owner,model,b,pool,catalog,kin,opts,*,events,commands):
     """Concurrent native MjData/IK/render loops; only this thread publishes files."""
     import mujoco,time,threading
     from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
-    from .source import command_channels,reset_placements
+    from robot_learning_workbench.commands import command_channels
+    from robot_learning_workbench.engines.mujoco.source import reset_placements
     from .state import restore_episode
     from ...tasks.placement import uses_workspace_random
     from ...tasks.registry import TaskError
@@ -250,3 +236,5 @@ def run_parallel(plan,owner,model,b,pool,catalog,kin,opts,*,events,commands):
         finally:send.stop()
     if fatal is not None:raise fatal
     return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),count,{'env_num':n,'execution_mode':'concurrent_mjdata_threads','existing_episodes':opts.get('previous_episodes',0),'added_episodes':count-opts.get('previous_episodes',0),'attempts':attempt,'target_reached':count>=opts['target_successes'],'budget_exhausted':attempt>=opts['max_attempts'],'history':history(owner.root)})
+
+

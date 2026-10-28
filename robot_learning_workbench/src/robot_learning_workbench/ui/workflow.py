@@ -13,25 +13,26 @@ from .operations import stage_support,run_outcome
 
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
-        super().__init__(parent);self.stage=stage;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
-        box=QVBoxLayout(self);self.heading=QLabel({'source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'ACT / SmolVLA Training','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation'}[stage]);box.addWidget(self.heading)
+        super().__init__(parent);self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
+        box=QVBoxLayout(self);self.heading=QLabel({'source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation','capture':'Capture 보존 자료 검사','precision_calibration':'Precision 보존 근거 검사','real_evaluation':'Real Policy 오프라인 검사','real_sim':'Real/Sim 보존 입력 검사'}[stage]);box.addWidget(self.heading)
         row=QHBoxLayout();box.addLayout(row)
-        self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사')
-        for button in (self.load_button,self.save_button,self.check_button):row.addWidget(button)
+        self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 기본 출력')
+        for button in (self.load_button,self.save_button,self.check_button,self.new_output_button):row.addWidget(button)
+        self.new_output_button.clicked.connect(self.suggest_output)
         self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe)
         self.editor=RecipeEditor();self.editor.changed.connect(self.invalidate)
         self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
         self.inputs={};self.form=QVBoxLayout();box.addLayout(self.form)
-        if stage in ('source','annotation','datagen','simulation_evaluation'):self.form.addWidget(self.engine)
+        if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):self.form.addWidget(self.engine)
         for key in ({'source':['scene','source_dataset','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
-                     'train':['dataset','training_config','checkpoint'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset'],'offline_validation':['dataset','policy']}[stage]):
+                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile']}[stage]):
             line=QLineEdit();line.setPlaceholderText(key);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
             row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(line);self.form.addLayout(row)
             if key=='scene':
                 use=QPushButton('현재 검사 Scene 적용');use.clicked.connect(self.use_scene);row.addWidget(use)
             browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));row.addWidget(browse)
-        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('SmolVLA Task Instruction (명시 문장)')
-        if stage=='simulation_evaluation':self.form.addWidget(self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
+        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('Language Policy Task Instruction (명시 문장)')
+        if stage in ('simulation_evaluation','real_evaluation'):self.form.addWidget(self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
         self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요')
         if stage in ('simulation_evaluation','offline_validation'):self.form.addWidget(self.policy_model)
         self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(lambda:self.edit_output());self.form.addWidget(self.output)
@@ -45,8 +46,8 @@ class WorkflowPage(QWidget):
         if stage in ('source','datagen'):
             self.dataset_resume=QCheckBox('기존 Dataset 경로에 추가 (Resume)');self.form.addWidget(self.dataset_resume);self.dataset_resume.toggled.connect(self.edit_dataset_resume)
             choose=QPushButton('Dataset 경로 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['scratch','resume'])
-        if stage in ('annotation','train'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
+        self.mode=QComboBox();self.mode.addItems(['auto','manual'] if stage=='annotation' else ['offline'] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
+        if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
         self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000)
         if stage=='annotation':
             row=QHBoxLayout();box.addLayout(row);row.addWidget(QLabel('수동 grasp 원본 frame'));row.addWidget(self.mark_frame)
@@ -68,13 +69,16 @@ class WorkflowPage(QWidget):
         if stage in ('source','annotation','datagen','simulation_evaluation'):box.addWidget(QLabel('Preview / Manual 명령 Env'));box.addWidget(self.preview_env)
         preview=QHBoxLayout();box.addLayout(preview);self.previews={n:QLabel(n+' · Live Preview 대기') for n in ('side','wrist')}
         for label in self.previews.values():label.setMinimumSize(320,240);label.setAlignment(Qt.AlignmentFlag.AlignCenter);preview.addWidget(label)
-        if stage in ('train','offline_validation'):
+        if stage not in ('source','annotation','datagen','simulation_evaluation'):
             for label in self.previews.values():label.hide()
         self.loss_chart=None
         if stage=='train':
             from .learning import LossChart,TrainingSettings
             self.training_settings=TrainingSettings(self);box.addWidget(self.training_settings)
             self.loss_chart=LossChart();box.addWidget(self.loss_chart)
+        if stage in ('hub_download','hub_upload'):
+            from .hub import HubSettings
+            self.hub_settings=HubSettings(self);box.addWidget(self.hub_settings)
         self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumBlockCount(1000);box.addWidget(self.log)
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={};self._syncing=False
@@ -83,7 +87,8 @@ class WorkflowPage(QWidget):
 
     def show_policy_model(self,path):
         try:
-            root=(self.editor.path.parent/path).resolve();config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
+            from ..recipe import policy_model_path
+            root=policy_model_path(self.editor.path.parent/path);config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
         except (OSError,ValueError,KeyError):self.policy_model.setText('Policy 모델: Config 확인 필요')
 
     def select_preview(self,index):
@@ -104,10 +109,22 @@ class WorkflowPage(QWidget):
         if not scene.valid or str(path)!=scene.scene_path:
             self.invalidate();self.state.setText('현재 선택 Scene과 Recipe가 다릅니다. 검사 Scene을 적용하고 Recipe를 저장·재검사하세요');return False
         return True
+    def suggest_output(self):
+        if self.active() or self.editor.path is None:self.state.setText('저장 Recipe를 열고 기존 실행이 끝난 뒤 새 출력을 제안하세요');return
+        if self.dataset_resume is not None and self.dataset_resume.isChecked():self.state.setText('Resume는 명시한 기존 Dataset 경로를 유지합니다');return
+        from .paths import output_path
+        if self.stage in ('hub_download','hub_upload'):
+            group='policy' if self.hub_settings.kind.currentText()=='model' else 'dataset'
+            path=self.workspace/group/(self.stage+'-'+uuid.uuid4().hex[:8])
+        else:path=output_path(self.workspace,self.stage)
+        self.output.setText(str(path));self.edit_output();self.state.setText('새 출력 제안 · Recipe와 공식 Training Config를 저장하고 다시 검사하세요')
     def choose_input(self,key):
-        if key in ('dataset','source_dataset','resume_dataset','policy','checkpoint'):
-            value=QFileDialog.getExistingDirectory(self,key+' 선택')
-        else:value,_=QFileDialog.getOpenFileName(self,key+' 선택')
+        from .paths import input_directory
+        directory=str(input_directory(self.workspace,self.stage,key))
+        if key=='artifact' and self.hub_settings.kind.currentText()=='model':directory=str(self.workspace/'policy')
+        if key in ('dataset','source_dataset','resume_dataset','policy','checkpoint','artifact','capture_session'):
+            value=QFileDialog.getExistingDirectory(self,key+' 선택',directory)
+        else:value,_=QFileDialog.getOpenFileName(self,key+' 선택',directory)
         if value:self.inputs[key].setText(value);self.edit_input(key,value)
 
     def command(self,kind):
@@ -148,6 +165,7 @@ class WorkflowPage(QWidget):
             names=[o['placement']['function'] for o in data.get('objects',{}).values()]
             self.placement.setCurrentText('Random' if names and all(n=='placement.random_workspace' for n in names) else 'Fixed')
         finally:self._syncing=False
+        if hasattr(self,'hub_settings'):self.hub_settings.sync(data)
         self.sync_objects(data)
         if 'policy' in data['inputs']:self.show_policy_model(data['inputs']['policy'])
         fn=data.get('functions',{}).get('acceptance',data.get('functions',{}).get('success',{}));self.task_info.setText('Task · '+str(fn.get('function',''))+' · '+str(fn.get('params',{})))
@@ -166,9 +184,9 @@ class WorkflowPage(QWidget):
         self.safe_update(update)
         if key=='policy':self.show_policy_model(value)
     def choose_dataset_output(self):
-        folder=QFileDialog.getExistingDirectory(self,'기존 Dataset 또는 새 Dataset의 상위 폴더')
+        folder=QFileDialog.getExistingDirectory(self,'기존 Dataset 또는 새 Dataset의 상위 폴더',str(self.workspace/self.stage))
         if not folder:return
-        target=Path(folder) if self.dataset_resume.isChecked() else Path(folder)/('dataset-'+uuid.uuid4().hex[:8])
+        target=Path(folder) if self.dataset_resume.isChecked() else Path(folder)/(self.stage+'-'+uuid.uuid4().hex[:8])
         self.output.setText(str(target));self.edit_output()
     def edit_dataset_resume(self,value):
         if self._syncing or self.editor.path is None:return
@@ -309,7 +327,7 @@ class WorkflowPage(QWidget):
                 text='Worker '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])
                 if outcome['goal_reached'] is False:text+=' · 목표 미달'
-                if outcome['needs_resume']:text+=' · 새 worker/새 출력 Resume 필요'
+                if outcome['needs_resume']:text+=' · 새 worker에서 기존 Dataset 추가 저장 필요'
                 if outcome['budget_exhausted']:text+=' · Attempt 예산 소진'
                 if outcome['successes'] is not None:text+=' · Task 성공 '+str(outcome['successes'])+' / 실패 '+str(outcome['failures'])
                 if outcome['success_rate'] is not None:text+=' · 성공률 '+str(outcome['success_rate'])
@@ -338,11 +356,18 @@ class WorkflowPage(QWidget):
         if self.handle:QDesktopServices.openUrl(QUrl.fromLocalFile(self.handle['output_path']))
     def continue_run(self):
         if not self.handle or self.stage!='datagen' or self.active():return
-        out=QFileDialog.getExistingDirectory(self,'새 출력의 상위 폴더 선택')
-        if not out:return
-        # The user saves/inspects this new Recipe before preparing; never auto-loop.
-        self.safe_update(lambda d:(d['inputs'].__setitem__('resume_dataset',self.handle['output_path']),d['output'].__setitem__('directory',str(Path(out)/('continued-'+uuid.uuid4().hex[:8])))))
-        self.output.setText(self.editor.data()['output']['directory']);self.state.setText('Resume Recipe 편집 중 · 새 이름으로 저장하고 검사하세요')
+        # Reopened legacy runs still use the current explicit append contract.
+        # Preparation may reject a changed historical identity; never copy/repair it.
+        def append(data):
+            data['inputs'].pop('resume_dataset',None)
+            data['execution'].update(resume=True,num_episodes=self.counts['num_episodes'].value())
+            data['execution'].pop('target_successes',None)
+            data['output']['directory']=self.handle['output_path']
+        if self.safe_update(append):
+            self.output.setText(self.handle['output_path']);self._syncing=True
+            try:self.dataset_resume.setChecked(True)
+            finally:self._syncing=False
+            self.state.setText('기존 Dataset 추가 저장 Recipe 편집 중 · 추가 Episode/Attempt 예산을 확인하고 저장·검사하세요')
     def show_training_result(self):
         path=Path(self.handle['output_path'])/'training-result.json'
         if path.is_file() and getattr(self,'_shown_training',None)!=str(path):

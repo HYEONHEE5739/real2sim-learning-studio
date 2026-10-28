@@ -9,8 +9,13 @@ from .annotation import task_sample
 from .state import initial_state,restore_episode
 from .mdp import apply_joint_targets,validate_targets
 from .source import settings_for,execution_contract,reset_placements,record_frame
-from ..mujoco.evaluation import (policy_inputs,evaluation_execution,trackers_for,post_evaluation,publish_attempt,report_limit,evaluation_result,execution_failure,abort_videos)
-from ..mujoco.source import add_initial,control_commands,step_completed
+from robot_learning_workbench.learning.policy import policy_inputs
+from robot_learning_workbench.tasks.evaluation import evaluation_execution, trackers_for, post_evaluation, report_limit, evaluation_result
+from robot_learning_workbench.data.publication import publish_attempt
+from robot_learning_workbench.run import execution_failure
+from robot_learning_workbench.run import abort_videos
+from robot_learning_workbench.data.recording import add_initial
+from robot_learning_workbench.commands import control_commands, step_completed
 from ...learning.policy import infer,observation_batch,preflight_action,ActionRejected
 from ...data.native import NativeRun,resume_to,history,load_catalog,native_api,DataError,file_sha256
 from ...data.video import AsyncVideoWriter
@@ -59,11 +64,11 @@ def rollout_steps(plan,env,kin,bundle,segment,claim,*,events,commands,env_index=
             ep.add('states/finger_contact',torch.tensor([after['contacts']['left'],after['contacts']['right']],dtype=torch.bool));ep.add('states/contact_force_w',torch.from_numpy(after['contacts']['force_w'].copy()))
             ep.add('states/grasp_latched',torch.tensor([grasp],dtype=torch.uint8));ep.add('states/placement',torch.tensor([placed],dtype=torch.uint8))
             ep.add('states/physics_timestamp',torch.tensor(float(env.sim.current_time),dtype=torch.float64))
-            ep.add('policy/action_queue_remaining',torch.tensor(len(policy._action_queue) if hasattr(policy,'_action_queue') else len(policy._queues['action']) if hasattr(policy,'_queues') else -1,dtype=torch.int64))
+            ep.add('policy/action_queue_remaining',torch.tensor(len(policy._action_queue) if hasattr(policy,'_action_queue') else len(policy._queues['action']) if hasattr(policy,'_queues') and 'action' in policy._queues else -1,dtype=torch.int64))
             previous=goal;step_completed(controls,events,tick);tick+=1;report['physics_effect']='applied'
             if placed:report.update(success=True,category='placement_success');break
         if placed or tick>=report_limit(plan):report.update(evaluation_result(placed=placed,grasp=grasp,steps=tick,limit=report_limit(plan)))
-        report.update(steps=tick,inference_mean_s=float(np.mean(latencies)) if latencies else None,inference_calls=len(latencies),policy_chunk_steps=policy.config.n_action_steps,peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
+        report.update(steps=tick,inference_mean_s=float(np.mean(latencies)) if latencies else None,inference_calls=len(latencies),policy_chunk_steps=getattr(policy.config,'n_action_steps',None),peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
         if not tick:return None,{},report
         ep.pre_export()
         if placed:ep.data['obs']['events']['place'][-1]=1
@@ -73,7 +78,7 @@ def rollout_steps(plan,env,kin,bundle,segment,claim,*,events,commands,env_index=
         report.update(execution_failure(error,phase=phase,steps=tick,applying=applying))
         return None,{},report
     finally:
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         try:report['saturation']=command_summary(ep)
         except Exception as error:report['saturation']={'status':'unavailable','reason':str(error)}
         abort_videos(videos,report)
@@ -123,7 +128,7 @@ def rollout_vector(plan,owner,env,kin,bundle,execution,*,events,commands):
     from .mdp import advance_streams
     from .source import abort_streams
     from .env_cfg import execution_inputs
-    from ..mujoco.source import command_channels
+    from robot_learning_workbench.commands import command_channels
     from ...generation.mimic import bind_kinematics
     from ...robot.calibration import JOINTS
     from ...run import StageResult

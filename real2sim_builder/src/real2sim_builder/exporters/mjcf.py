@@ -8,7 +8,7 @@ import os
 import json
 import numpy as np
 from scipy.spatial.transform import Rotation
-from ..project import validate, world_pose, local_path
+from real2sim_builder.scene import validate, world_pose, local_path
 from ..calibration.geometry import parts
 
 
@@ -28,7 +28,7 @@ def export(scene,root,path):
     visual=ET.SubElement(model,'visual')
     width=max(c['resolution'][0] for c in scene['cameras']);height=max(c['resolution'][1] for c in scene['cameras'])
     ET.SubElement(visual,'global',offwidth=str(width),offheight=str(height))
-    from ..project import CLIP
+    from real2sim_builder.cameras import CLIP
     ET.SubElement(model,'statistic',extent='1')
     ET.SubElement(visual,'map',znear=str(CLIP[0]),zfar=str(CLIP[1]))
     ET.SubElement(visual,'quality',offsamples='4')
@@ -73,7 +73,7 @@ def export(scene,root,path):
         t=np.asarray(light['pose']['value']);gain=float(light['energy']['value'])/1000
         ET.SubElement(world,'light',name='light_'+light['id'],pos=numbers(t[:3,3]),dir=numbers(-t[:3,2]),
             directional='true' if light['type']=='sun' else 'false',diffuse=numbers(np.asarray(light['color']['value'])*gain))
-    from ..project import OPTICAL_TO_RENDER
+    from real2sim_builder.cameras import OPTICAL_TO_RENDER
     conversion=OPTICAL_TO_RENDER
     for camera in scene['cameras']:
         k=np.asarray(camera['K']['value']);w,h=camera['resolution']

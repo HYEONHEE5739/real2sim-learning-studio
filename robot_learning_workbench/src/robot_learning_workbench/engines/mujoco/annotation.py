@@ -5,18 +5,17 @@ import numpy as np
 from .model import build_model
 from .state import restore_episode,read_sample,snapshot
 from .control import step,command_target
-from .source import (resolved_model_config,initial_arrays,add_initial,record_frame,control_commands,publish_event,step_completed)
+from robot_learning_workbench.engines.mujoco.source import resolved_model_config, initial_arrays
+from robot_learning_workbench.data.recording import add_initial, record_frame
+from robot_learning_workbench.commands import control_commands, step_completed
+from robot_learning_workbench.data.publication import publish_event
 from ...data.native import NativeRun,native_api,load_catalog,open_native
 from ...data.video import AsyncVideoWriter
 
 
-def accept_annotation(physical_passed,frames,mode,marks):
-    if mode not in ('auto','manual'):raise ValueError('Unknown Annotation mode')
-    if not physical_passed:return False,None
-    if mode=='auto':return True,None
-    if len(marks)!=1 or not 0<marks[0]<frames-1:return False,None
-    return True,marks[0]
-
+from ...data.recording import validate_recording, validate_source_ranges
+from ...data.publication import publish_annotation
+from ...tasks.evaluation import accept_annotation
 
 def replay_episode(plan,model,data,b,source,segment,*,events,commands,env_index=0):
     import mujoco
@@ -78,7 +77,7 @@ def replay_episode(plan,model,data,b,source,segment,*,events,commands,env_index=
         if type(passed) is not bool:raise ValueError('Acceptance must return bool')
         accepted,mark=accept_annotation(passed,len(targets),plan.effective_settings['execution']['mode'],controls['marks'])
         report=dict(status='success' if accepted else 'failure',physical_replay_passed=passed,first_grasp_post_tick=first_grasp,frames=len(targets),trace=trace)
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         report['saturation']=command_summary(episode)
         if not accepted:return None,{},report
         episode.pre_export();episode.success=True
@@ -126,31 +125,11 @@ def run(plan,*,events,commands):
     return StageResult('cancelled' if cancelled else 'completed',(str(plan.output_path),),saved,{'attempts':len(reports),'reports':reports})
 
 
-def validate_recording(recording):
-    from .model import JOINTS
-    required=dict(joint_order=list(JOINTS),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480])
-    if any(recording.get(k)!=v for k,v in required.items()):
-        raise ValueError('Source joint order/unit/frame/phase/camera contract missing or incompatible')
-
-
-def publish_annotation(owner,seg,claim,ep,media,report,catalog,original,events):
-    from ...recipe import _plain
-    summary={k:v for k,v in report.items() if k not in ('trace','source_initial_snapshot','replay_initial_snapshot')}
-    if ep is not None:
-        eid='annotation-'+str(claim['attempt']-1)
-        seg.write_episode(ep,episode_id=eid,metadata={**report,'source_lineage':{'dataset':_plain(catalog.identity),'episode_id':original.episode_id,'key':original.key},'source_metadata':original.metadata},media=media)
-        for path in media.values():Path(path).unlink()
-        seg.record_attempt(claim,status='success',episode_id=eid,diagnostics=summary);seg.commit();publish_event(owner.root,eid,events)
-    else:
-        seg.record_attempt(claim,status='cancelled' if report['status']=='cancelled' else 'failure',diagnostics=summary);seg.commit()
-    return ep is not None,{k:v for k,v in report.items() if k not in ('trace','source_initial_snapshot','replay_initial_snapshot')}
-
-
 def replay_parallel(plan,owner,model,b,catalog,*,events,commands):
     """Distinct Source initial/action streams; each native state owns its tracker."""
     import mujoco
     from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
-    from .source import command_channels
+    from robot_learning_workbench.commands import command_channels
     from ...recipe import _plain
     from ...run import StageResult
     n=plan.effective_settings['execution']['num_envs'];states=[mujoco.MjData(model) for _ in range(n)]
@@ -178,6 +157,3 @@ def replay_parallel(plan,owner,model,b,catalog,*,events,commands):
     return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),saved,{'env_num':n,'attempts':len(reports),'reports':reports})
 
 
-def validate_source_ranges(catalog):
-    if any(ep.start!=0 or ep.stop not in (None,ep.num_frames) for ep in catalog.episodes):
-        raise ValueError('Annotation requires complete Source episodes and original initial state; use a numerical Source stream to collect a new episode from a trim')

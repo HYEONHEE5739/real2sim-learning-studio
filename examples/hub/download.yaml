@@ -1,0 +1,9 @@
+schema_version: 1
+stage: hub_download
+inputs:
+  repo_id: lerobot/pusht
+  revision: 7628202a2180972f291ba1bc6723834921e72c19
+execution:
+  repo_type: dataset
+output:
+  directory: /your/workspace/dataset/pusht-download-receipt

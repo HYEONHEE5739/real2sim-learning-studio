@@ -104,13 +104,29 @@ def seal_checkpoint(path: Path|str,*,dataset,config: dict,recipe_sha256: str,exp
     atomic_json(root/'workbench-checkpoint.json',record,exclusive=True);return record
 
 
+def policy_catalog() -> list[dict]:
+    """Installed official config registry, without importing optional model weights."""
+    from dataclasses import fields
+    import draccus
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.policies.factory import make_policy_config
+    rows=[]
+    for name in sorted(PreTrainedConfig.get_known_choices()):
+        try:
+            config=make_policy_config(name)
+            rows.append({'type':name,'config':draccus.encode(config),
+                         'fields':{f.name:str(f.type) for f in fields(config)},'error':None})
+        except Exception as error:
+            rows.append({'type':name,'config':None,'fields':{},'error':str(error)})
+    return rows
+
+
 def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
-    _pinned();root=Path(path).resolve();root=root.parent if root.name=='pretrained_model' else root
+    from ..recipe import policy_model_path
+    _pinned();folder=policy_model_path(path);root=folder.parent if folder.name=='pretrained_model' and (folder.parent/'workbench-checkpoint.json').is_file() else folder
     if (root/'workbench-checkpoint.json').is_file():
         record=checkpoint_record(root,expected=expected);folder=root/'pretrained_model'
     else:
-        folder=Path(path).resolve()
-        if not (folder/'config.json').is_file():folder=folder/'pretrained_model'
         required=['config.json','model.safetensors','policy_preprocessor.json','policy_postprocessor.json']
         if any(not (folder/name).is_file() for name in required):raise DataError('CHECKPOINT_INCOMPLETE','policy','Official local model/config/processors required')
         files={p.name:file_sha256(p) for p in folder.iterdir() if p.is_file()}
@@ -120,20 +136,17 @@ def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
     if config.get('type')=='smolvla' and not record.get('external_official'):
         from .smol_compat import identity
         if record.get('smol_compatibility')!=identity():raise DataError('POLICY_INCOMPATIBLE','smol_compatibility','Pinned loss patch identity differs or missing')
-    if config.get('type') not in ('act','smolvla'):raise DataError('POLICY_UNSUPPORTED','policy','Official ACT/SmolVLA checkpoint required')
-    from lerobot.policies.act.modeling_act import ACTPolicy
     from lerobot.configs.policies import PreTrainedConfig
-    from lerobot.policies.factory import make_pre_post_processors
-    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+    from lerobot.policies.factory import make_pre_post_processors,get_policy_class
     cfg=PreTrainedConfig.from_pretrained(folder,local_files_only=True)
     # Official config argument avoids redundant backbone downloads; all trained
     # parameters are then restored from the local model.safetensors.
     if config['type']=='smolvla':
         from .smol_compat import enable
         enable()
-        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-        policy_class=SmolVLAPolicy;cfg.load_vlm_weights=False
-    else:policy_class=ACTPolicy;cfg.pretrained_backbone_weights=None
+        cfg.load_vlm_weights=False
+    if hasattr(cfg,'pretrained_backbone_weights'):cfg.pretrained_backbone_weights=None
+    policy_class=get_policy_class(config['type'])
     policy=policy_class.from_pretrained(folder,config=cfg,local_files_only=True);policy.to(device).eval();policy.reset()
     contract=record.get('control_contract')
     if contract:
@@ -144,11 +157,37 @@ def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
     return policy,pre,post,record
 
 
-def infer(policy,pre,post,batch: dict,*,contract: dict,limits=None):
+def predict(policy,pre,post,batch: dict):
+    """Official inference without granting any robot command binding."""
     import torch
-    if contract is None:raise ValueError('Explicit Policy control contract required')
-    with torch.inference_mode():
-        normalized=policy.select_action(pre(batch));action=post(normalized)
+    with torch.inference_mode():action=post(policy.select_action(pre(batch)))
     result=action.detach().cpu().numpy()
+    if result.ndim!=2 or result.dtype.kind not in 'fiu' or not np.isfinite(result).all():raise ValueError('Finite batched official Policy output required')
+    return result
+
+
+def infer(policy,pre,post,batch: dict,*,contract: dict,limits=None):
+    if contract is None:raise ValueError('Explicit Policy control contract required')
+    result=predict(policy,pre,post,batch)
     try:return validate_action(result,joint_order=contract['joint_order'],units='model_rad',limits=limits)
     except ValueError as error:raise ActionRejected(str(error),action_diagnostics(result)) from error
+
+
+def policy_inputs(plan,urdf_sha256):
+    """Explicit live IO binding; external official Policies need no owned manifest."""
+    from ..recipe import _plain
+    policy,pre,post,record=load_policy(plan.resolved_inputs['policy']['path'],device='cpu')
+    if (hasattr(policy.config,'tokenizer_max_length') or hasattr(policy.config,'vlm_model_name') or hasattr(policy.config,'tokenizer_assets_repo')) and not plan.effective_settings['execution'].get('task_instruction'):raise DataError('POLICY_INCOMPATIBLE','task_instruction','Language-conditioned Policy needs explicit instruction')
+    contract=record.get('control_contract') or _plain(plan.input_documents.get('policy_contract'))
+    expected=dict(schema_version=1,scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)),robot_model_sha256=urdf_sha256,
+        joint_order=list(JOINTS),pose_frame='robot_base',control_hz=30,policy_tensor_dtype='float32',
+        observation=dict(source='obs/policy/joint_pos',phase='pre_step',meaning='measured_model_joint_position',units=['rad']*6),
+        action=dict(source='joint_targets',phase='command_for_step_t',meaning='absolute_model_joint_position_target',units=['rad']*6),
+        cameras={n:dict(color='rgb',fps=30.,shape=[480,640,3]) for n in ('side','wrist')})
+    if contract and 'command_processing' in contract:expected['command_processing']={'position_target_policy':'saturation_inward_v1','training_target':'applied'}
+    if contract!=expected:raise DataError('POLICY_INCOMPATIBLE','policy','Explicit Scene/model/Calibration/joint/unit/phase/camera contract mismatch')
+    if any(getattr(policy.config,k,False) for k in ('adapt_to_pi_aloha','use_delta_joint_actions_aloha')):raise DataError('POLICY_INCOMPATIBLE','policy.action','Absolute model-radian targets required; Aloha/delta remapping is incompatible')
+    features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
+    if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')
+    return policy,pre,post,record,contract
+

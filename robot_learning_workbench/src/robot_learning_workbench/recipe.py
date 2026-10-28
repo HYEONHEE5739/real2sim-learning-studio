@@ -65,19 +65,19 @@ class RecipeDocument:
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
- 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile'}),
- 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},set()),
+ 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
+ 'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
- 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile'}),
- 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile'})}
+ 'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
+ 'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session'})}
 _EXEC={
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
- 'real_evaluation':({'episodes'},{'timeout_s','enable_motion'}),'train':({'mode'},set()),
+ 'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction'}),'train':({'mode'},set()),
  'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),set()),'merge':(set(),set()),
- 'hub_upload':(set(),set()),'hub_download':(set(),set()),'capture':(set(),{'episodes'}),
- 'precision_calibration':(set(),set()),'real_sim':(set(),{'headless'})}
+ 'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes','mode'}),
+ 'precision_calibration':(set(),{'mode'}),'real_sim':(set(),{'headless','mode'})}
 _ROLES={'source':{'signals','metrics'},'annotation':{'signals','acceptance','metrics'},
  'datagen':{'signals','acceptance','metrics'},'simulation_evaluation':{'signals','success','metrics'},'real_sim':{'signals','metrics'}}
 
@@ -114,16 +114,20 @@ def _validate(data,path):
         where='execution.'+key
         if key in ('episodes','target_successes','max_attempts','env_num','num_envs','num_episodes','batch_size','max_batches','max_episode_steps'):
             if type(value) is not int or value<1:_fail(where,'positive integer required',path)
+        elif key=='repo_type':
+            if value not in ('dataset','model'):_fail(where,'dataset or model required',path)
+        elif key=='parent_commit':
+            if not isinstance(value,str) or len(value)!=40 or any(c not in '0123456789abcdef' for c in value):_fail(where,'resolved parent commit required',path)
         elif key=='seed':
             if type(value) is not int or not 0<=value<2**32:_fail(where,'uint32 integer required',path)
-        elif key in ('headless','enable_motion','resume'):
+        elif key in ('headless','enable_motion','resume','private','confirm_upload'):
             if type(value) is not bool:_fail(where,'boolean required',path)
         elif key in ('timeout_s','episode_time_s','reset_time_s'):
             if type(value) not in (int,float) or not math.isfinite(value) or (value<0 if key=='reset_time_s' else value<=0):_fail(where,'finite valid seconds required',path)
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
-            if value not in (('manual','auto') if stage=='annotation' else ('scratch','resume')):_fail(where,'unsupported stage mode',path)
+            if value not in (('manual','auto') if stage=='annotation' else ('offline',) if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -231,6 +235,15 @@ def _resolve(doc,value):
     return (doc.base_dir/path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def policy_model_path(path: Path|str) -> Path:
+    """Resolve input layout only; official loading and integrity belong to policy.py."""
+    root=Path(path).resolve()
+    if (root/'workbench-checkpoint.json').is_file():return root/'pretrained_model'
+    if (root/'config.json').is_file():return root
+    if (root/'pretrained_model/config.json').is_file():return root/'pretrained_model'
+    raise RecipeError('INPUT_INVALID','inputs.policy','Select an official Model folder with config.json, model.safetensors and processors, a Workbench checkpoint root with workbench-checkpoint.json/pretrained_model/, or its pretrained_model/ folder. Training Resume also requires training_state/.')
+
+
 def _artifact(path):
     from .data.native import file_sha256
     if not path.exists():_fail('inputs',f'missing {path}',code='INPUT_MISSING')
@@ -332,6 +345,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                         or not isinstance(pinned.get('path'),str) or not Path(pinned['path']).is_absolute()):
                     _fail('inputs.'+key,'official resolver must supply a pinned local snapshot; no implicit network/cache write',doc.path,code='INPUT_UNRESOLVED')
             path=Path(pinned['path']).resolve() if pinned is not None else _resolve(doc,item)
+            if key=='policy':
+                folder=policy_model_path(path)
+                if folder.name=='pretrained_model' and (folder.parent/'workbench-checkpoint.json').is_file():path=folder.parent
             if key=='scene':
                 actual=load_scene(path,expected=scene.identity if scene is not None else None);scene=actual
                 identity=_plain(actual.identity);entry={'kind':'scene','path':str(path),'identity':identity}
@@ -344,16 +360,16 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if key in ('dataset','datasets'):
                     if spec.stage in ('annotation','datagen') or not path.is_dir() or not (path/'meta/info.json').is_file():
                         _fail('inputs.'+key,'Native recording required for replay; policy inputs require official LeRobot Metadata, with explicit conversion and no retired-format fallback',doc.path,code='INPUT_FORMAT_UNSUPPORTED')
-                entry=_official_dataset(path) if key=='dataset' and spec.stage in ('train','offline_validation') and (path/'meta/tasks.parquet').is_file() else _artifact(path)
+                entry=_official_dataset(path) if (key=='dataset' and spec.stage in ('train','offline_validation') or key=='artifact' and spec.stage=='hub_upload' and spec.execution['repo_type']=='dataset') and (path/'meta/tasks.parquet').is_file() else _artifact(path)
                 if path.is_file() and path.suffix=='.json':
                     data,digest=_json_input(path)
                     if entry['files'][path.name]!=digest:_fail('inputs.'+key,'changed during read',doc.path,code='INPUT_CHANGED')
                     if key=='training_config' and isinstance(data.get('policy'),dict) and str(data['policy'].get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.training_config','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents[key]=_freeze(data)
                 if key=='policy':
-                    if not path.is_dir() or not (path/'config.json').is_file():_fail('inputs.policy','official policy directory/config required',doc.path)
-                    config,digest=_json_input(path/'config.json')
-                    if entry['files']['config.json']!=digest:_fail('inputs.policy','changed config',doc.path,code='INPUT_CHANGED')
+                    folder=policy_model_path(path);config_path=folder/'config.json'
+                    config,digest=_json_input(config_path)
+                    if entry['files'][config_path.relative_to(path).as_posix()]!=digest:_fail('inputs.policy','changed config',doc.path,code='INPUT_CHANGED')
                     if str(config.get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.policy','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents['policy_config']=_freeze(config)
                 if key=='dataset' and spec.stage in ('train','offline_validation') and (not path.is_dir() or not (path/'meta/info.json').is_file()):
@@ -365,6 +381,10 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if identity!=entry['identity']:_fail('inputs.'+key,'catalog identity differs from saved input',doc.path,code='INPUT_CHANGED')
             items.append(_freeze(entry))
         resolved[key]=tuple(items) if key=='datasets' else items[0]
+    if spec.stage=='real_evaluation' and (calibration:=documents.get('device_profile',{}).get('calibration_path')):
+        path=Path(calibration)
+        if not path.is_absolute():_fail('inputs.device_profile.calibration_path','explicit absolute SDK calibration path required',doc.path)
+        resolved['motor_calibration']=_freeze(_artifact(path.resolve()))
     if scene is not None and 'scene' not in resolved:
         scene=load_scene(scene.root/'scene.json',expected=scene.identity)
         resolved['scene']=_freeze({'kind':'scene','path':str(scene.root/'scene.json'),'identity':_plain(scene.identity)})
@@ -420,11 +440,18 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if engine in ('mujoco','isaac') and spec.stage in ('source','annotation','datagen','simulation_evaluation'):
         code_names += ['engines/'+engine+'/'+name+'.py' for name in ('source','annotation','datagen','model','state','control')]
         if spec.stage=='simulation_evaluation':code_names += ['engines/'+engine+'/evaluation.py']
-        if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py','engines/mujoco/source.py','engines/mujoco/annotation.py','engines/mujoco/datagen.py']
-        code_names += ['generation/mimic.py','data/native.py','data/video.py','robot/calibration.py','robot/devices.py','robot/control.py']
-        if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py','engines/mujoco/evaluation.py']
+        if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py']
+        code_names += ['generation/mimic.py','data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
+        if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
+    if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
+    if spec.stage in ('capture','real_sim','real_evaluation'):
+        from .robot.offline import capture_reader
+        capture=capture_reader()
+        for name in ('capture.py','files.py','scene.py'):
+            p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)
     if 'env_num' in runtime_execution:runtime_execution['num_envs']=runtime_execution['env_num']
     effective={'execution':runtime_execution,'task_modules_sha256':source_files,'code_files':code_files}

@@ -508,3 +508,33 @@ DataGen은 기존 DLS/Best Effort candidate의 별도 유효성/limit/0.5rad jum
 - 기존 경로 append는 Dataset ID·과거 HDF5/영상/segment header를 보존한다. producer execution 이력은 작은 run Metadata에 남는다. state/model/MDP/control/Calibration/IK·Task/recording 불일치는 거부하며, inactive 미완료 attempt는 명시 Resume에서 unknown으로 소비한다. frozen Curation을 갱신 Catalog에 자동 rebase하지 않는다.
 - SmolVLA는 공식0.4.1 Trainer/Policy/processor와 project-owned fixed-source loss patch를 사용한다. patch/upstream/source SHA는 Checkpoint·Resume·Prepared identity에 고정한다. Evaluation `execution.task_instruction`은 명시 문장이다. Action은 공식 postprocessor 뒤 절대 model rad6→기존 Saturation이다.
 - Preview는 실제 AsyncVideoWriter 입력 중 선택 Env의640×480 Side/Wrist, 최대 갱신 약30Hz(34ms Qt timer)다. camera별 two-slot mmap·generation/header 확인, 최신 frame만 제공하며 Native 영상 품질·PTS는 바꾸지 않는다. 실제 FPS·지연은 측정값으로 별도 보고한다.
+
+## Architecture completion — installed Policy/Hub/offline/UI boundary (2026-10-28)
+
+`learning.policy.policy_catalog` reads installed LeRobot Registry/config fields;
+`load_policy` uses official `get_policy_class` and processors. Training uses the
+official CLI. Scratch has no policy pretrained_path; fine-tune pins matching local
+Policy config/weights; Resume retains the owned closed checkpoint and Dataset
+identity gate. `predict` alone grants no robot command approval. Simulation still
+requires explicit Scene/model/Calibration, units/order/phase, camera/state/action
+contracts. Offline external Dataset validation reports unknown units/lineage when
+not supplied rather than inventing SO101 provenance.
+
+Hub stages require `execution.repo_type: dataset|model`. Download uses a saved
+40-character resolved Commit and returns the official cache path in a small
+receipt. Upload requires existing Repo visibility, parent_commit and
+confirm_upload=true; the UI clears old approval when loading. Credentials remain
+in existing Hub auth; no token Recipe field exists. Transfers have bounded owned
+child cancellation; upload cancellation can leave unknown remote effect.
+
+Robot capture/precision_calibration/real_sim/real_evaluation runners accept only
+explicit `execution.mode: offline`. They inspect preserved inputs and official
+SDK Config dataclasses without constructing or connecting hardware. Scene-bound
+Policy input requires Capture model/radian/Mapping and Camera/Scene Calibration
+identity evidence. Missing historical binding remains PARTIAL with no inference.
+Inspection worker completion is not real Calibration or real Policy success.
+
+`ui.paths` supplies new-output suggestions only. Existing output.directory is not
+rewritten on load. Source/DataGen same-path Resume keeps closed Native segments;
+the UI's Continue action edits an append request for the selected existing root.
+All new-run suggestions remain editable; old artifacts are never migrated.

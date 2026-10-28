@@ -438,7 +438,9 @@ def _validate_continuation(catalog,execution,*,allow_producer_update=False):
     def semantic_core(value):
         result=dict(value)
         if allow_producer_update and 'workflow_code' in result:
-            orchestration={'source.py','annotation.py','datagen.py','evaluation.py','run.py','recipe.py','cli.py','native.py'}
+            # These shared producer helpers were moved from the same exempt
+            # concrete loops. Keep their existing class, not physics/IK/Task math.
+            orchestration={'source.py','annotation.py','datagen.py','evaluation.py','run.py','recipe.py','cli.py','native.py','recording.py','publication.py','commands.py','configuration.py'}
             result['workflow_code']={k:v for k,v in result['workflow_code'].items() if Path(k).name not in orchestration}
         return result
     before=semantic_core(old);after=semantic_core(execution)

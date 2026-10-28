@@ -100,7 +100,8 @@ class CurationPage(QWidget):
         self.perform('frame',source=self.source,selection_id=self.rows[i]['selection_id'],frame=self.frame.value(),preview_directory=str(self.preview_directory))
     def save_revision(self):
         if not self.source:return
-        path,_=QFileDialog.getSaveFileName(self,'새 Curation Revision','','JSON (*.json)')
+        from .paths import output_path
+        path,_=QFileDialog.getSaveFileName(self,'새 Curation Revision',str(output_path(self.workspace,'curation').with_suffix('.json')),'JSON (*.json)')
         if not path:return
         try:
             order=[];ranges={};splits={};exclude=[]
@@ -123,11 +124,11 @@ class CurationPage(QWidget):
     def export(self):
         if not self.stable():return
         if not self.task.text().strip():self.state.setText('실제 작업 문장을 입력하세요');return
-        parent=QFileDialog.getExistingDirectory(self,'새 Export 출력 상위 폴더')
+        parent=QFileDialog.getExistingDirectory(self,'새 Export 출력 상위 폴더',str(self.workspace/'dataset'))
         if parent:self.perform('materialize',source=self.source,output=str(Path(parent)/('lerobot-'+uuid.uuid4().hex[:8])),task=self.task.text(),split=None if self.scope.currentIndex()==0 else self.scope.currentText())
     def merge(self):
         if not self.stable():return
         other=QFileDialog.getExistingDirectory(self,'Merge할 다른 canonical Dataset')
         if not other:return
-        parent=QFileDialog.getExistingDirectory(self,'새 Merge 출력 상위 폴더')
+        parent=QFileDialog.getExistingDirectory(self,'새 Merge 출력 상위 폴더',str(self.workspace/'dataset'))
         if parent:self.perform('merge',sources=[self.source,other],output=str(Path(parent)/('merged-'+uuid.uuid4().hex[:8])),task=self.task.text() or None)

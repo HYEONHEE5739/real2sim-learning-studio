@@ -271,3 +271,19 @@ P/B 원본은 읽기 전용이다. 파일 범위는 기존 architecture.md 경�
 - [x] U05: 선택 Env640×480 latest-only mmap Preview·최대 약30Hz 표시 loop·실제 FPS/지연·영상 PTS/정리·Qt 설정.
 - [x] X02 승인 범위: 실제 각 엔진 matrix20 Episode·Native/LeRobot/Curation·새 자료 ACT/Smol smoke/Resume·UI 재열기·취소/강제 종료/보존·전체 회귀/wheel/독립 리뷰.
 - [ ] 유지 OPEN: E01 물체 잔차1.197188790mm, 실물 command binding/motor-range/physical_verified=false, v9/실측 Calibration, 모든 Scene/N>4/장시간/OOM/전원 장애·wall-clock30FPS·production 학습 성능. 실물·Hub·후속 작업은 시작하지 않음.
+
+
+## 2026-10-28 — Architecture completion (current request)
+
+Read-only comparison baseline: Studio8a8210d, original Builderad018a0, SO101875e64f; GitHub main representative blobs match local originals. Work on architecture-completion branch; no automatic push.
+
+- [x] Phase1a: move engine-neutral recording/command helpers; preserve math/phase.
+- [x] Phase1b: Native publish/Task helpers and Prepared coverage; actual1/4-env regression.
+- [x] Phase2: separate Builder scene/evidence/capture/candidate/scan responsibilities without changing API/exports.
+- [x] Phase3a: installed official Policy registry/factory + Trainer fine-tune/Resume.
+- [x] Phase3b: pinned Hub Dataset/Policy download and explicit opt-in upload; UI/Runner; no smoke uploads.
+- [x] Phase4: offline/fake device/Capture/Calibration/real-policy contract and truthful stage availability.
+- [x] Phase5: stage-scoped UI output defaults and input selection; no existing-data relocation.
+- [x] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.
+
+Each Phase precedes the next; isolate thin slices, run focused checks, preserve SDK/original/evidence. Status meanings: VERIFIED(actual), CODE_READY(wired/unexecuted), PARTIAL, UNSUPPORTED, EXCLUDED. Hardware, uploads, newv9/real calibration are not executed by smoke validation.
