@@ -420,9 +420,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if engine in ('mujoco','isaac') and spec.stage in ('source','annotation','datagen','simulation_evaluation'):
         code_names += ['engines/'+engine+'/'+name+'.py' for name in ('source','annotation','datagen','model','state','control')]
         if spec.stage=='simulation_evaluation':code_names += ['engines/'+engine+'/evaluation.py']
-        if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py','engines/mujoco/source.py','engines/mujoco/annotation.py','engines/mujoco/datagen.py']
-        code_names += ['generation/mimic.py','data/native.py','data/video.py','robot/calibration.py','robot/devices.py','robot/control.py']
-        if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py','engines/mujoco/evaluation.py']
+        if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py']
+        code_names += ['generation/mimic.py','data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
+        if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     runtime_execution=_plain(spec.execution)

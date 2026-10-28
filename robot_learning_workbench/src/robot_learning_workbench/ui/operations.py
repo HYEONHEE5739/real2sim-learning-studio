@@ -30,7 +30,7 @@ def prepared(path: str,modules: str) -> dict:
     if plan.stage=='source':
         if 'source_dataset' not in plan.resolved_inputs:return {'runnable':False,'state':'prepared','reason':'이번 UI는 recorded target stream 수집만 지원합니다. 실물 장치 실행은 차단됩니다.','plan':plan.summary()}
         from ..data.native import load_catalog
-        from ..engines.mujoco.annotation import validate_recording
+        from robot_learning_workbench.data.recording import validate_recording
         source=load_catalog(plan.resolved_inputs['source_dataset']['path']);validate_recording(source.execution.get('recording',{}))
         if source.execution.get('stage')!='source' or source.execution.get('engine')!=plan.engine or not source.episodes:raise ValueError('엔진이 일치하는 Source target stream이 필요합니다')
     if plan.stage=='datagen':
@@ -41,9 +41,9 @@ def prepared(path: str,modules: str) -> dict:
             raise ValueError('UI DataGen supports an all-Fixed or all-Random batch')
     elif plan.stage=='annotation':
         from ..data.native import load_catalog
-        from ..engines.mujoco.annotation import validate_recording
+        from robot_learning_workbench.data.recording import validate_recording
         catalog=load_catalog(plan.resolved_inputs['dataset']['path']);validate_recording(catalog.execution.get('recording',{}))
-        from ..engines.mujoco.annotation import validate_source_ranges
+        from robot_learning_workbench.data.recording import validate_source_ranges
         validate_source_ranges(catalog)
         if catalog.execution.get('stage')!='source' or catalog.execution.get('engine')!=plan.engine:raise ValueError('엔진이 같은 원본 Source가 필요합니다')
         if plan.engine=='isaac':

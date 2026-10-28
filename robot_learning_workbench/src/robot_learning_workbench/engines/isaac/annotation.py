@@ -5,8 +5,11 @@ import numpy as np
 from .source import record_frame,settings_for,model_identity
 from .state import initial_state,restore_episode,read_sample
 from .mdp import apply_joint_targets,validate_targets
-from ..mujoco.source import add_initial,control_commands,step_completed,publish_event
-from ..mujoco.annotation import accept_annotation,validate_recording,validate_source_ranges
+from robot_learning_workbench.data.recording import add_initial
+from robot_learning_workbench.commands import control_commands, step_completed
+from robot_learning_workbench.data.publication import publish_event
+from robot_learning_workbench.tasks.evaluation import accept_annotation
+from robot_learning_workbench.data.recording import validate_recording, validate_source_ranges
 from ...data.native import native_api,open_native,load_catalog,NativeRun
 from ...data.video import AsyncVideoWriter
 
@@ -69,7 +72,7 @@ def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
         if type(passed) is not bool:raise ValueError('Task acceptance must return bool')
         accepted,mark=accept_annotation(passed,tick,plan.effective_settings['execution']['mode'],controls['marks'])
         report=dict(env_index=env_index,initial_frame='scene_world',engine_env_origin=env.scene.env_origins[env_index].cpu().numpy().tolist(),status='success' if accepted else 'failure',physical_replay_passed=passed,frames=tick,first_grasp_post_tick=first,trace=trace,initial_state_owner='annotation_replay_start',source_initial_state=original)
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         report['saturation']=command_summary(ep)
         if not accepted:return None,{},report
         ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1
@@ -134,7 +137,7 @@ def run(plan,*,events,commands):
 def replay_vector(plan,owner,env,catalog,*,events,commands):
     from .mdp import advance_streams
     from .source import abort_streams
-    from ..mujoco.source import command_channels
+    from robot_learning_workbench.commands import command_channels
     from ...recipe import _plain
     from ...run import StageResult
     n=env.num_envs;polls,send=command_channels(commands,events,n,vector=True);sources=iter(enumerate(catalog.episodes));streams={};pending={};ready={};saved=0;reports=[];cancelled=False

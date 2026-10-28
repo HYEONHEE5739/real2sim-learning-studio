@@ -15,66 +15,10 @@ from ...data.native import NativeRun,native_api,load_catalog,digest,history,resu
 from ...data.video import AsyncVideoWriter
 
 
-def pose7(matrix):
-    q=Rotation.from_matrix(matrix[:3,:3]).as_quat()
-    return np.r_[matrix[:3,3],q[[3,0,1,2]]]
-
-
-def record_frame(episode,sample,target_pose,target,*,time_s,requested=None,signals=None,base=None,previous_pose=None,command_requested=None,command_limits=None):
-    """Record pre-step arrays in original B02 names/dtypes, never post-step state."""
-    import torch
-    def add(key,value):episode.add(key,torch.from_numpy(np.array(value,copy=True)))
-    previous=sample['eef_pose'] if previous_pose is None else previous_pose
-    action=np.r_[target_pose[:3,3]-previous[:3,3],Rotation.from_matrix(target_pose[:3,:3]@previous[:3,:3].T).as_rotvec(),target[5]]
-    add('actions',action);add('joint_targets',target);add('action_timestamp',np.float64(time_s))
-    if command_requested is not None:
-        from ...robot.control import checked_target
-        info={};payload=checked_target(command_requested,limits=command_limits,applied_dtype=np.asarray(target).dtype,diagnostics=info)
-        if not np.array_equal(payload,target):raise ValueError('Recorded command must equal actual native payload')
-        add('commands/requested_joint_rad',command_requested);add('commands/applied_joint_rad',target)
-        add('commands/saturation_mask',np.asarray(info['saturation_mask'],dtype=np.bool_))
-        add('commands/saturation_delta_rad',np.asarray(info['delta_rad'],dtype=np.float64))
-    add('obs/timestamp',np.array([time_s],dtype=np.float64));add('obs/policy/joint_pos',sample['joint_positions'])
-    add('obs/policy/ee_state',pose7(sample['eef_pose']))
-    add('obs/datagen_info/eef_pose/tool0',sample['eef_pose'].astype(np.float32))
-    add('obs/datagen_info/target_eef_pose/tool0',target_pose.astype(np.float32))
-    for name,pose in sample['object_poses'].items():
-        add('obs/datagen_info/object_pose/'+name,pose.astype(np.float32))
-        if base is not None:add('obs/object_poses/'+name,pose7(base@pose))
-    for camera in ('side','wrist'):add('obs/camera_timestamps/'+camera,np.float64(time_s))
-    if requested is not None:
-        add('collection/requested_action',requested)
-        add('collection/state',collection_coordinates(sample['joint_positions'],measured=True))
-        add('collection/action',collection_coordinates(target))
-    for name,value in (signals or {}).items():
-        add('obs/events/'+name,np.array([value],dtype=np.uint8))
-        if name=='grasp':add('obs/datagen_info/subtask_term_signals/grasp',np.array([value],dtype=np.uint8))
-
-
-def control_commands(rows,state,events,*,tick,episode_id,env_index=0):
-    """Execute already claimed IPC commands once at the current control boundary."""
-    for row in rows:
-        if row.get('episode_id',episode_id)!=episode_id or row.get('env_index',env_index)!=env_index:raise ValueError('Stale command target')
-        kind=row['kind'];payload=row.get('payload',{})
-        if state.get('inactive') and kind!='cancel':
-            events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Episode already closed; only cancel is supported during reset cooldown'}})
-            continue
-        if kind=='cancel':state['cancelled']=True
-        elif kind=='pause':state['paused']=True
-        elif kind=='resume':state['paused']=False
-        elif kind=='step':
-            if state['steps']:raise ValueError('A step command is already in progress')
-            state['steps']=payload['count'];state['paused']=True;state['step_command']=row['command_id']
-            continue
-        elif kind=='skip':state['skipped']=True
-        elif kind=='save':state['save']=True
-        elif kind=='discard':state['discard']=True
-        elif kind=='mark':
-            if payload['event']!='grasp' or not 0<payload['frame']<=tick:raise ValueError('Invalid manual grasp boundary')
-            state['marks'].append(payload['frame'])
-        else:raise ValueError('Unsupported workflow command')
-        events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'completed','applied_tick':tick}})
-
+from ...data.recording import pose7, record_frame, add_initial, collection_coordinates, command_summary, recorded_initial
+from ...commands import control_commands, step_completed, command_channels
+from ...data.publication import publish_event
+from ...robot.configuration import create_leader
 
 def initial_arrays(model,data,b):
     """Measured world state; opaque integration snapshot is recorded separately."""
@@ -87,12 +31,6 @@ def initial_arrays(model,data,b):
         twist=np.empty(6);mujoco.mj_objectVelocity(model,data,mujoco.mjtObj.mjOBJ_BODY,index,twist,0)
         objects[name]={'root_pose':pose7(pose)[None],'root_velocity':np.r_[twist[3:],twist[:3]][None]}
     return {'articulation':{'robot':robot},'rigid_object':objects}
-
-
-def add_initial(episode,initial):
-    import torch
-    def tensors(value):return {k:tensors(v) if isinstance(v,dict) else torch.from_numpy(np.array(v,copy=True)) for k,v in value.items()}
-    episode.data['initial_state']=tensors(initial)
 
 
 def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,events,commands,realtime=False,duration_s=None,env_index=0):
@@ -148,11 +86,6 @@ def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,ev
     finally:
         for writer in videos.values():
             if not writer._closed:writer.abort()
-
-
-def publish_event(output,episode_id,events):
-    catalog=load_catalog(output)
-    events({'kind':'episode_committed','payload':{'episode_id':episode_id,'dataset_path':str(catalog.root),'dataset_identity':asdict(catalog.identity)}})
 
 
 def execution_contract(plan,b,cfg):
@@ -228,22 +161,6 @@ def reset_placements(plan,model,data,b,seed):
         reset_object_poses(model,data,b,[(name,pose)]);occupied[name]=pose
 
 
-def create_leader(plan):
-    """Explicit SDK construction; callers must call connect/activate separately."""
-    from ...robot.calibration import mapper_from_scene
-    from ...robot.devices import Leader
-    from lerobot.teleoperators.so101_leader.config_so101_leader import SO101LeaderConfig
-    spec=plan.input_documents['device_profile']
-    if set(spec)!={'calibration_id','calibration_path','sdk'}:raise ValueError('Leader profile needs calibration_id/calibration_path/sdk')
-    mapper=mapper_from_scene(plan.scene,spec['calibration_id'],role='leader',phase='device_observation')
-    calibration=Path(spec['calibration_path'])
-    if not calibration.is_absolute():raise ValueError('Explicit absolute SDK calibration file required')
-    config=SO101LeaderConfig(**dict(spec['sdk']))
-    if not config.use_degrees:raise ValueError('Precision Leader requires degree-native SDK normalization')
-    return Leader.from_config(config,profile=mapper.profile,
-        calibration_path=calibration,identity=mapper.profile['identity'],model_hash=mapper.profile['urdf_sha256'])
-
-
 def run(plan,*,events,commands,leader=None):
     """Saved Recipe -> real MuJoCo -> sealed Native segments. No Follower commands."""
     import mujoco
@@ -312,25 +229,6 @@ def run(plan,*,events,commands,leader=None):
             if owner is not None:owner.close()
 
 
-def step_completed(state,events,tick):
-    if state['steps']:
-        state['steps']-=1
-        if not state['steps']:
-            events({'kind':'command_ack','payload':{'command_id':state.pop('step_command'),'status':'completed','applied_tick':tick}})
-
-
-def collection_coordinates(model_rad,*,measured=False):
-    from ...robot.calibration import LEGACY_MAPPER
-    q=np.array(model_rad,dtype=np.float64,copy=True)
-    if q.shape!=(6,) or not np.isfinite(q).all():raise ValueError('Six finite model joints required')
-    closed=LEGACY_MAPPER.gripper_zero_offset_rad;opened=closed+100*LEGACY_MAPPER.gripper_rad_per_percent
-    q[5]=(q[5]-closed)/(opened-closed)
-    tolerance=.02 if measured else 1e-6
-    if q[5]<-tolerance or q[5]>1+tolerance:raise ValueError('Gripper outside declared canonical endpoints')
-    q[5]=np.clip(q[5],0,1)
-    return q.astype(np.float32)
-
-
 def source_limits(b):
     """Approved model/canonical Source gripper intersection; no physical approval."""
     lower=b.limits[:,0].copy();upper=b.limits[:,1].copy()
@@ -344,24 +242,12 @@ def source_target(requested,b):
     return command_target(checked_target(requested,limits=source_limits(b),applied_dtype=np.float64),b)
 
 
-def command_summary(episode):
-    """Small executed-command statistics, never a copy of bulk action arrays."""
-    values=episode.data.get('commands',{})
-    if 'saturation_mask' not in values:return {'steps':0,'saturated_steps':0,'joint_events':0,'max_abs_delta_rad':0.}
-    def array(value):return np.stack([v.cpu().numpy() for v in value]) if isinstance(value,list) else value.cpu().numpy()
-    mask=array(values['saturation_mask']);delta=array(values['saturation_delta_rad'])
-    from ...robot.calibration import JOINTS
-    return {'steps':len(mask),'saturated_steps':int(mask.any(axis=1).sum()),'joint_events':int(mask.sum()),
-            'per_joint_counts':dict(zip(JOINTS,mask.sum(axis=0).astype(int).tolist())),
-            'max_abs_delta_rad':float(np.max(np.abs(delta[mask]))) if mask.any() else 0.}
-
-
 def run_recorded(plan,*,events,commands):
     """Collect actual simulation from explicit recorded target streams, no device."""
     import mujoco
     from ...data.native import collection_settings,open_native
     from ...run import StageResult
-    from .annotation import validate_recording
+    from robot_learning_workbench.data.recording import validate_recording
     from ...recipe import _plain
     catalog=load_catalog(plan.resolved_inputs['source_dataset']['path']);validate_recording(catalog.execution.get('recording',{}))
     if catalog.execution.get('stage')!='source' or catalog.execution.get('engine')!='mujoco' or not catalog.episodes:raise ValueError('Matching nonempty Source target streams required')
@@ -392,40 +278,6 @@ def run_recorded(plan,*,events,commands):
                 segment.record_attempt(claim,status='cancelled' if status=='cancelled' else 'failure',diagnostics={'reason':status});segment.commit()
             if status=='cancelled':cancelled=True;break
         return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),count,{'existing_episodes':opts.get('previous_episodes',0),'added_episodes':count-opts.get('previous_episodes',0),'target_reached':count>=opts['episodes'],'attempts':len(history(owner.root))})
-
-
-def command_channels(commands,events,count,*,vector=False):
-    """Route explicit env commands; vector pause/resume applies to the whole scene."""
-    import threading
-    lock=threading.RLock();pending=[[] for _ in range(count)];cancel=None;acked=set();stopping=threading.Event();paused=False
-    def send(event):
-        with lock:
-            if event['kind']=='command_ack':
-                cid=event['payload']['command_id']
-                if cid in acked:return
-                acked.add(cid)
-            events(event)
-    def refresh():
-        nonlocal cancel,paused
-        with lock:
-            for row in commands():
-                if row['kind']=='cancel':cancel={k:v for k,v in row.items() if k not in ('env_index','episode_id')}
-                elif vector and row['kind'] in ('pause','resume'):
-                    paused=row['kind']=='pause';global_row={k:v for k,v in row.items() if k not in ('env_index','episode_id')}
-                    for queue in pending:queue.append(global_row)
-                elif vector and row['kind']=='step':send({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Official vector physics steps the whole scene; per-env single-step is unsupported'}})
-                elif type(row.get('env_index')) is int and 0<=row['env_index']<count:pending[row['env_index']].append(row)
-                else:send({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Explicit active env_index required'}})
-    def poll(index):
-        with lock:
-            if stopping.is_set():raise RuntimeError('Sibling environment failed; cooperative interruption')
-            refresh();rows=pending[index];pending[index]=[]
-            if cancel is not None:rows=[cancel,*rows]
-            return rows
-    send.stop=stopping.set;send.refresh=refresh;send.paused=lambda:paused
-    send.cancelled=lambda:cancel is not None
-    send.ack_cancel=lambda:send({'kind':'command_ack','payload':{'command_id':cancel['command_id'],'status':'completed'}})
-    return [lambda i=i:poll(i) for i in range(count)],send
 
 
 def collect_streams(plan,owner,model,b,catalog,opts,*,events,commands):
@@ -473,7 +325,3 @@ def collect_streams(plan,owner,model,b,catalog,opts,*,events,commands):
     return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),count,{'env_num':n,'existing_episodes':opts.get('previous_episodes',0),'added_episodes':count-opts.get('previous_episodes',0),'target_reached':count>=opts['episodes'],'attempts':len(history(owner.root))})
 
 
-def recorded_initial(episode):
-    """Original Source initial tensors, never Annotation's re-saved initial."""
-    def array(value):return {k:array(v) for k,v in value.items()} if isinstance(value,dict) else value.detach().cpu().numpy().copy()
-    return array(episode.data['initial_state'])

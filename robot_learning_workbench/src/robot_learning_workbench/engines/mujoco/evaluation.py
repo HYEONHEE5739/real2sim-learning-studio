@@ -1,107 +1,21 @@
 """ACT simulation evaluation: Placement termination, no gripper/grasp success gate."""
 
 
-def evaluation_result(*,placed,grasp,steps,limit):
-    return dict(success=bool(placed),category='placement_success' if placed else 'max_steps' if steps>=limit else 'task_failure',
-                steps=steps,grasp_latched=bool(grasp),placement=bool(placed))
-
 from pathlib import Path
 import time,resource
 import numpy as np
 from ...learning.policy import load_policy,infer,observation_batch,preflight_action,ActionRejected
 from ...data.native import NativeRun,load_catalog,history,resume_to,digest,atomic_json,native_api,DataError
-from .source import add_initial,record_frame,control_commands,step_completed,publish_event
+from robot_learning_workbench.data.recording import add_initial, record_frame
+from robot_learning_workbench.commands import control_commands, step_completed
+from robot_learning_workbench.data.publication import publish_event
 
 
-def execution_failure(error,*,phase,steps,applying=False):
-    import traceback
-    from ...run import _error
-    traceback.print_exception(type(error),error,error.__traceback__)
-    effect='unknown' if applying or phase in ('task','reset') else getattr(error,'effect','not_applied')
-    error.effect=effect  # Propagate the observed execution effect with the same error/cause.
-    return dict(success=False,category='engine_error' if phase in ('physics','reset') else 'camera_error' if phase=='camera' else 'policy_error' if phase=='policy' else 'execution_error',
-                error={'phase':phase,**_error(error,effect=effect)},steps=steps,_exception=error)
-
-
-def abort_videos(videos,report):
-    errors=[]
-    for writer in videos.values():
-        if writer._closed:continue
-        try:writer.abort()
-        except Exception as error:errors.append(error)
-    if errors:report.update(execution_failure(ExceptionGroup('Video cleanup failed',errors),phase='recording_cleanup',steps=report.get('steps',0),applying=True))
-
-
-def policy_inputs(plan,urdf_sha256):
-    """Explicit live IO binding; external official Policies need no owned manifest."""
-    from ...recipe import _plain
-    from ...robot.calibration import JOINTS
-    policy,pre,post,record=load_policy(plan.resolved_inputs['policy']['path'],device='cpu')
-    if policy.config.type=='smolvla' and not plan.effective_settings['execution'].get('task_instruction'):raise DataError('POLICY_INCOMPATIBLE','task_instruction','SmolVLA needs explicit language instruction')
-    contract=record.get('control_contract') or _plain(plan.input_documents.get('policy_contract'))
-    expected=dict(schema_version=1,scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)),robot_model_sha256=urdf_sha256,
-        joint_order=list(JOINTS),pose_frame='robot_base',control_hz=30,policy_tensor_dtype='float32',
-        observation=dict(source='obs/policy/joint_pos',phase='pre_step',meaning='measured_model_joint_position',units=['rad']*6),
-        action=dict(source='joint_targets',phase='command_for_step_t',meaning='absolute_model_joint_position_target',units=['rad']*6),
-        cameras={n:dict(color='rgb',fps=30.,shape=[480,640,3]) for n in ('side','wrist')})
-    if contract and 'command_processing' in contract:expected['command_processing']={'position_target_policy':'saturation_inward_v1','training_target':'applied'}
-    if contract!=expected:raise DataError('POLICY_INCOMPATIBLE','policy','Explicit Scene/model/Calibration/joint/unit/phase/camera contract mismatch')
-    features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
-    if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')
-    return policy,pre,post,record,contract
-
-
-def evaluation_execution(plan,execution,record):
-    from ...recipe import _plain
-    if any(b.kind=='placement' and b.name not in ('placement.fixed_xy','placement.random_workspace') for b in plan.function_bindings.values()):raise ValueError('Evaluation supports Fixed or Workspace Random placement')
-    params=plan.function_bindings['success'].params
-    if plan.function_bindings['success'].name!='pick_place.v8_evaluation':raise ValueError('P01 preserves explicit v8 Placement evaluation')
-    for binding in plan.function_bindings.values():
-        if binding.kind=='tracker' and getattr(binding.params,'object',None)!=params.object:raise ValueError('P01 tracker must observe the evaluated object')
-        if binding.kind=='metrics' and (getattr(binding.params,'object',None)!=params.object or getattr(binding.params,'target',None)!=params.target):raise ValueError('P01 metric object/target mismatch')
-    steps=max(1,int(np.ceil(plan.effective_settings['execution'].get('timeout_s',10)*30)))
-    execution.update(policy_identity=digest(record),policy_checkpoint_step=record['step'],policy_files=record['files'],policy_training_dataset=record.get('dataset_identity'),
-        evaluation_contract=digest({'bindings':_plain(plan.function_bindings),'max_steps':steps,'control_policy':'position_saturation_inward_v1','policy_device':'cpu','task_instruction':plan.effective_settings['execution'].get('task_instruction')}),
-        episodes=plan.effective_settings['execution']['episodes'],max_steps=steps,rng_policy='entropy_workspace_poses_no_rng_resume_v1' if any(b.name=='placement.random_workspace' for b in plan.function_bindings.values()) else 'fixed_initial_base_seed_plus_attempt_minus_one')
-    execution['recording'].update(timestamp_clock='episode_control_relative',engine_clock='physics_simulation_seconds',applied_command='commands/applied_joint_rad')
-    return execution
-
-
-def trackers_for(plan,eid,*,env_index=0):
-    return {role.split('.',1)[1]:plan.tasks.functions[b.name].callable(params=b.params,episode={'episode_id':eid,'env_index':env_index,'control_dt_s':1/30}) for role,b in plan.function_bindings.items() if b.kind=='tracker'}
-
-
-def post_evaluation(plan,row,trackers,signals,state,initial_positions,report):
-    from ...tasks.pick_place import object_metrics
-    for name,tracker in trackers.items():signals[name]=tracker.update(row)
-    row['signals']=dict(signals);binding=plan.function_bindings['success'];placed=plan.tasks.functions[binding.name].callable(row,params=binding.params)
-    if type(placed) is not bool:raise ValueError('Evaluation predicate must return bool')
-    grasp=bool(signals.get('grasp') and signals['grasp'].value)
-    for key,value in (('first_grasp_post_tick',grasp),('first_placement_post_tick',placed)):
-        if value and report.get(key) is None:report[key]=row['tick']
-    report['metrics']=object_metrics(plan.object_order,binding.params.object,{n:p[:3,3] for n,p in row['object_poses'].items()},row['eef_pose'][:3,3],state,grasp,placed,initial_positions)
-    for role,b in plan.function_bindings.items():
-        if b.kind=='metrics':report.setdefault('declared_metrics',{})[role]=plan.tasks.functions[b.name].callable(row,params=b.params)
-    return placed,grasp
-
-
-def publish_attempt(owner,segment,claim,ep,media,report,events):
-    eid='evaluation-'+str(claim['attempt']);saved=None
-    if ep is not None:
-        ep.success=report['success'];segment.write_episode(ep,episode_id=eid,metadata={**report,'success_source':'simulation_place_condition'},media=media)
-        for path in media.values():Path(path).unlink()
-        saved=eid
-    status='cancelled' if report['category']=='cancelled' else 'success' if report['success'] else 'failure'
-    summary_report={k:v for k,v in report.items() if k!='initial_snapshot'}
-    segment.record_attempt(claim,status=status,episode_id=saved,diagnostics=summary_report);segment.commit()
-    if saved:publish_event(owner.root,eid,events)
-    rows=history(owner.root);successes=sum(row['status']=='success' for row in rows)
-    summary=dict(attempts=len(rows),successes=successes,failures=sum(row['status']=='failure' for row in rows),cancelled=sum(row['status']=='cancelled' for row in rows),
-        safety_rejections=sum(row.get('diagnostics',{}).get('category')=='action_safety_rejection' for row in rows),success_rate=successes/len(rows) if rows else None,
-        denominator='all recorded attempts, including rejection/errors/cancellation',completed_episodes=len(load_catalog(owner.root).episodes),latest=summary_report)
-    atomic_json(owner.root/'evaluation-summary.json',summary)
-    return summary
-
+from ...data.publication import publish_attempt
+from ...tasks.evaluation import evaluation_result, evaluation_execution, trackers_for, post_evaluation, report_limit
+from ...learning.policy import policy_inputs
+from ...run import execution_failure
+from ...run import abort_videos
 
 def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,env_index=0):
     """Each recorded pre-step row has one real, accepted physics command."""
@@ -167,13 +81,10 @@ def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,
         report.update(execution_failure(error,phase=phase,steps=tick,applying=applying))
         return None,{},report
     finally:
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         try:report['saturation']=command_summary(ep)
         except Exception as error:report['saturation']={'status':'unavailable','reason':str(error)}
         abort_videos(videos,report)
-
-
-def report_limit(plan):return max(1,int(np.ceil(plan.effective_settings['execution'].get('timeout_s',10)*30)))
 
 
 def run(plan,*,events,commands):
@@ -215,7 +126,8 @@ def rollout_parallel(plan,owner,model,b,kin,bundle,execution,*,events,commands):
     """Independent policy queues and MjData, one immutable Native publisher."""
     import copy,mujoco
     from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
-    from .source import command_channels,reset_placements
+    from robot_learning_workbench.commands import command_channels
+    from robot_learning_workbench.engines.mujoco.source import reset_placements
     from .state import restore_episode
     from ...generation.mimic import bind_kinematics
     from .model import _execution_urdf,JOINTS
@@ -245,3 +157,5 @@ def rollout_parallel(plan,owner,model,b,kin,bundle,execution,*,events,commands):
         finally:send.stop()
     if fatal is not None:raise fatal
     return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),len(load_catalog(owner.root).episodes),{**summary,'env_num':n})
+
+

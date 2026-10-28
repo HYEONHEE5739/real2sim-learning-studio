@@ -7,7 +7,7 @@ import numpy as np
 from ...generation import mimic
 from ...data.native import load_catalog,open_native,file_sha256
 from .source import settings_for,model_identity
-from ..mujoco.annotation import validate_recording
+from robot_learning_workbench.data.recording import validate_recording
 from ...robot.calibration import JOINTS
 
 
@@ -45,7 +45,8 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
     from ...tasks.pick_place import v8_placement,release_evidence
     from .source import record_frame
     from .annotation import task_sample
-    from ..mujoco.source import add_initial,control_commands,step_completed
+    from robot_learning_workbench.data.recording import add_initial
+    from robot_learning_workbench.commands import control_commands, step_completed
     from .state import initial_state
     from .mdp import apply_joint_targets,validate_targets
     eid='datagen-'+str(claim['attempt']);ep=native_api()[0]();ep.seed=claim['seed'];initial=initial_state(env,env_index,relative=True);add_initial(ep,initial)
@@ -115,12 +116,11 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
         report.update(status='success',category='success')
         return ep,{k:v.video_path for k,v in videos.items()},report
     finally:
-        from ..mujoco.source import command_summary
+        from robot_learning_workbench.data.recording import command_summary
         try:report['saturation']=command_summary(ep)
         except Exception as error:report['saturation']={'status':'unavailable','reason':str(error)}
         for writer in videos.values():
             if not writer._closed:writer.abort()
-
 
 
 def validate_placements(plan):
@@ -200,8 +200,8 @@ def run_vector(plan,owner,env,pool,catalog,kin,opts,*,events,commands):
     import torch
     from .source import reset_placements
     from .mdp import advance_streams
-    from ..mujoco.source import command_channels
-    from ..mujoco.datagen import publish_generation
+    from robot_learning_workbench.commands import command_channels
+    from robot_learning_workbench.data.publication import publish_generation
     from ...data.native import history
     from ...run import StageResult
     from ...tasks.placement import uses_workspace_random

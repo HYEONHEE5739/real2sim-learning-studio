@@ -75,14 +75,15 @@ def test_applied_role_contract_is_distinct_from_historical_requested(tmp_path):
 
 def test_summary_error_cannot_skip_real_video_cleanup(tmp_path,monkeypatch):
     from test_simulation_evaluation import prepared_evaluation
-    from robot_learning_workbench.engines.mujoco import evaluation,source
+    from robot_learning_workbench.engines.mujoco import evaluation
+    from robot_learning_workbench.data import recording
     from robot_learning_workbench.data.video import AsyncVideoWriter
     from robot_learning_workbench.data.native import load_catalog
     plan=prepared_evaluation(tmp_path);closed=[];close=AsyncVideoWriter.close
     def summarize(ep):raise KeyError('partial diagnostics fixture')
     def track(writer):
         result=close(writer);closed.append(writer.video_path);return result
-    monkeypatch.setattr(source,'command_summary',summarize);monkeypatch.setattr(AsyncVideoWriter,'close',track)
+    monkeypatch.setattr(recording,'command_summary',summarize);monkeypatch.setattr(AsyncVideoWriter,'close',track)
     result=evaluation.run(plan,events=lambda row:None,commands=lambda:())
     assert result.status=='completed' and len(closed)==2
     ep=load_catalog(plan.output_path).episodes[0]

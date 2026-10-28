@@ -152,3 +152,22 @@ def infer(policy,pre,post,batch: dict,*,contract: dict,limits=None):
     result=action.detach().cpu().numpy()
     try:return validate_action(result,joint_order=contract['joint_order'],units='model_rad',limits=limits)
     except ValueError as error:raise ActionRejected(str(error),action_diagnostics(result)) from error
+
+
+def policy_inputs(plan,urdf_sha256):
+    """Explicit live IO binding; external official Policies need no owned manifest."""
+    from ..recipe import _plain
+    policy,pre,post,record=load_policy(plan.resolved_inputs['policy']['path'],device='cpu')
+    if policy.config.type=='smolvla' and not plan.effective_settings['execution'].get('task_instruction'):raise DataError('POLICY_INCOMPATIBLE','task_instruction','SmolVLA needs explicit language instruction')
+    contract=record.get('control_contract') or _plain(plan.input_documents.get('policy_contract'))
+    expected=dict(schema_version=1,scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)),robot_model_sha256=urdf_sha256,
+        joint_order=list(JOINTS),pose_frame='robot_base',control_hz=30,policy_tensor_dtype='float32',
+        observation=dict(source='obs/policy/joint_pos',phase='pre_step',meaning='measured_model_joint_position',units=['rad']*6),
+        action=dict(source='joint_targets',phase='command_for_step_t',meaning='absolute_model_joint_position_target',units=['rad']*6),
+        cameras={n:dict(color='rgb',fps=30.,shape=[480,640,3]) for n in ('side','wrist')})
+    if contract and 'command_processing' in contract:expected['command_processing']={'position_target_policy':'saturation_inward_v1','training_target':'applied'}
+    if contract!=expected:raise DataError('POLICY_INCOMPATIBLE','policy','Explicit Scene/model/Calibration/joint/unit/phase/camera contract mismatch')
+    features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
+    if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')
+    return policy,pre,post,record,contract
+

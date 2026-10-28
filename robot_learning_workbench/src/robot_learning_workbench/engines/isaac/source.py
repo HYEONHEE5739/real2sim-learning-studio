@@ -7,8 +7,10 @@ import time
 import numpy as np
 from .state import initial_state,read_sample
 from .mdp import apply_joint_targets,validate_targets
-from ..mujoco.source import (record_frame as _record_frame,add_initial,control_commands,
-    step_completed,publish_event,create_leader,collection_coordinates,command_summary)
+from robot_learning_workbench.data.recording import record_frame as _record_frame, add_initial, collection_coordinates, command_summary
+from robot_learning_workbench.commands import control_commands, step_completed
+from robot_learning_workbench.data.publication import publish_event
+from robot_learning_workbench.robot.configuration import create_leader
 from ...data.native import native_api,digest
 from ...data.video import AsyncVideoWriter
 
@@ -235,7 +237,7 @@ def run_recorded(plan,*,events,commands):
     from isaaclab.envs import ManagerBasedEnv
     from .env_cfg import build_env_cfg,execution_inputs
     from .state import restore_episode
-    from ..mujoco.annotation import validate_recording
+    from robot_learning_workbench.data.recording import validate_recording
     from ...data.native import NativeRun,load_catalog,open_native,history,collection_settings,file_sha256
     from ...generation.mimic import bind_kinematics
     from ...recipe import _plain
@@ -263,7 +265,7 @@ def run_recorded(plan,*,events,commands):
                 if plan.object_order:
                     restore_episode(env,[0],baseline);reset_placements(plan,env,opts.get('seed',0)+attempt-1)
                 else:
-                    from ..mujoco.source import recorded_initial
+                    from robot_learning_workbench.data.recording import recorded_initial
                     restore_episode(env,[0],recorded_initial(recorded),is_relative=True)
                 segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment);eid='source-'+str(attempt)
                 try:ep,media,initial,status=collect_episode(env,segment,kin,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
@@ -301,7 +303,8 @@ def collect_vector(plan,owner,env,kin,catalog,opts,*,events,commands):
     from .mdp import advance_streams
     from .state import restore_episode
     from .env_cfg import execution_inputs
-    from ..mujoco.source import command_channels,recorded_initial
+    from robot_learning_workbench.commands import command_channels
+    from robot_learning_workbench.data.recording import recorded_initial
     from ...generation.mimic import bind_kinematics
     from ...data.native import load_catalog,history,open_native
     from ...recipe import _plain

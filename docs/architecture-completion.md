@@ -1,0 +1,33 @@
+# Architecture completion — 작업 기록
+
+2026-10-28. **진행 중**. 현재 브랜치는 `architecture-completion`, 기준은 Initial 공개 Commit `8a8210d13e31ea2c777e120f4e8fb0640050fec0`다. 이번 요청의6개 Phase를 순서대로 구현·검증한다. 자동 GitHub Push·실물 장치·새 v9/실측 Calibration은 수행하지 않는다.
+
+## 비교 기준
+
+GitHub와 로컬 원본의 main HEAD를 읽기 전용으로 대조했다.
+
+- 기존 Builder `ad018a018711d03fb51c28242dfc2bd19b6d0b07`: `app/core/project.py` Git blob `e2e8d00f161b93ac3810bdb256a63e88b33cbde2` 일치. 원본 app36개 Python 파일의 함수/class 목록·SHA를 조사했다.
+- 기존 SO101 `875e64fe6673e664f6fa8203d15ab103d488a6ad`: `workflow/adapters.py` blob `ba1ccea47d07dbc26ee1acf1578d2dfce2736bf3` 일치. 원본151개 Python 파일을 조사했다.
+- 현재 설치 LeRobot0.4.1의 factory/config registry에는 ACT/Diffusion/SmolVLA/PI0/PI05/TDMPC/VQBeT/GROOT/SAC/reward_classifier가 등록돼 있다. 등록·config 생성·선택 의존성·학습/실제 Scene 배포 가능성은 각각 별개로 검사한다.
+- 기존 Native C·Saturation·v8 Collision·Task phase·E01 물체 잔차는 기준을 유지한다. 과거966 PASS와 새 실행은 구분한다.
+
+세 저장소의 기존 기능이 모두 동일하다고 가정하지 않는다. 원본의 범용 SimulationAdapter를 새 실행기에 다시 넣지 않으며, 기존 SO101의 SciPy/Strict·과거 명령 clip 정책은 승인된 DLS/Best Effort·Saturation 정책과 구분한다.
+
+## Phase1 — 엔진 보조 함수
+
+기록·IPC·Native 게시·Task/Policy binding의 엔진 무관 함수25개를 이동했다. 구체 MjData/ManagerBasedEnv loop·Step/Reset/Camera/Contact와 Env별 상태 수명은 유지한다. 실제 함수 목록은 로컬 `docs/evidence/architecture-completion/helper-moves.json`에 있다.
+
+최초 경계 RED2개와 리뷰 경계 RED2개를 거쳐 집중74 PASS, 전체970 PASS를 확인했다. 실제 양 엔진1/4-env Source→Annotation→DataGen→Evaluation을 신규 출력에 각각8run/20 Episode로 검증했다. SDK cache write 보호 audit와 기존 Render/종료 warning은 허용/삭제하지 않는다.
+
+독립 검토의 video→run 상위 의존은 정리 함수를 실행 소유자 run으로 옮겨 해소했다. 영상·장치 드라이버 파일은 기준 Commit과 byte-exact이며, Leader 구성만 robot/configuration.py에 있다. 기존 producer 예외였던 보조 함수의 분류만 유지해 기존 append를 보존하고 control/state/device/Mimic/Task 검사는 엄격하게 유지한다. 실제 원본 불변 복제본에서 양 엔진 Source8→9, MuJoCo DataGen6→7과 이동된 cleanup의 실제 평가를 확인했다. 오래된 초기 R01 자료는 기준 Commit 이전 video identity로도 이미 비호환임을 확인했으며 이를 임의로 완화하지 않았다. 두 축 리뷰의 High/Medium 잔여0이다. 후속 Phase의 완료를 이 결과로 주장하지 않는다.
+
+## 남은 순서
+
+1. Phase1 리뷰 지적·동일 경로 Resume·Prepared source coverage 마무리.
+2. Builder Scene/Evidence/Capture/Candidate/Scan의 실제 책임 분리와 CLI/UI/Export 회귀.
+3. 공식 Policy Factory/Trainer·fine-tune/Resume·Hub 경계와 실제 지원 상태/UI.
+4. 장치·Calibration/Capture·real-policy의 오프라인/Fake/공식 SDK 계약; 실제 장치 상태는 미검증 유지.
+5. UI의 신규 출력 기본값만 Stage별 workspace에 정리; 기존 경로 이동/포맷 변경 없음.
+6. 양 엔진 실행·공식 소비자·학습/평가·UI 결과·전체 회귀/wheel·독립 리뷰·보존 종합.
+
+최종 상태는 VERIFIED(actual), CODE_READY(연결됐으나 실제 실행 미검증), PARTIAL, UNSUPPORTED, EXCLUDED로 구분한다. 현재 문서는 완료 보고서가 아니다.

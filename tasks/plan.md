@@ -201,3 +201,19 @@ MuJoCo의 저장 Source→Auto/Manual Annotation→Fixed/Random DataGen/새 출�
 [Resume/Multi-Env/Smol/Preview](../docs/resume-multienv-smolvla-preview.md)는 직전 Saturation을 재사용해 R01(추가 수집)→M01/M02(실제 독립 환경)→L04(고정 Smol patch/공식 학습)→U05(최신 RGB)→X02를 연결한 결과다. 기존 같은 번호 작업의 의미는 보존한다.
 
 Native 추가/producer-history·unknown intent 경계를 먼저 검증하고 MuJoCo native state/thread, Isaac official vector/partial reset, 모델별 queue와 loss/Checkpoint identity를 연결했다. original→curated→official materialization은 기존 함수를 사용하며 bulk 포맷을 추가하지 않았다. 동등한1-env Fixed 수치와Task/phase·Saturation은 유지했다. 실제 matrix의 Placement 성공0은 smoke 학습 결과이며 실행 실패로 왜곡하지 않는다. FPS·메모리/범위 한계는 통합 결과를 따른다. 기존 E01 잔차·실물·v9/장시간 관문을 해제하거나 다음 묶음을 자동 시작하지 않는다.
+
+
+## 2026-10-28 — Architecture completion (current request)
+
+Read-only comparison baseline: Studio8a8210d, original Builderad018a0, SO101875e64f; GitHub main representative blobs match local originals. Work on architecture-completion branch; no automatic push.
+
+- [x] Phase1a: move engine-neutral recording/command helpers; preserve math/phase.
+- [x] Phase1b: Native publish/Task helpers and Prepared coverage; actual1/4-env regression.
+- [ ] Phase2: separate Builder scene/evidence/capture/candidate/scan responsibilities without changing API/exports.
+- [ ] Phase3a: installed official Policy registry/factory + Trainer fine-tune/Resume.
+- [ ] Phase3b: pinned Hub Dataset/Policy download and explicit opt-in upload; UI/Runner; no smoke uploads.
+- [ ] Phase4: offline/fake device/Capture/Calibration/real-policy contract and truthful stage availability.
+- [ ] Phase5: stage-scoped UI output defaults and input selection; no existing-data relocation.
+- [ ] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.
+
+Each Phase precedes the next; isolate thin slices, run focused checks, preserve SDK/original/evidence. Status meanings: VERIFIED(actual), CODE_READY(wired/unexecuted), PARTIAL, UNSUPPORTED, EXCLUDED. Hardware, uploads, newv9/real calibration are not executed by smoke validation.

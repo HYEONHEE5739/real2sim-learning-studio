@@ -581,3 +581,23 @@ def select_preview_env(run_dir,env_index):
     if type(env_index) is not int or env_index<0:raise ValueError('Nonnegative preview env required')
     folder=Path(run_dir)/'preview'
     if folder.is_dir():_atomic(folder/'selection.json',{'env_index':env_index})
+
+
+def execution_failure(error,*,phase,steps,applying=False):
+    import traceback
+    traceback.print_exception(type(error),error,error.__traceback__)
+    effect='unknown' if applying or phase in ('task','reset') else getattr(error,'effect','not_applied')
+    error.effect=effect  # Propagate the observed execution effect with the same error/cause.
+    return dict(success=False,category='engine_error' if phase in ('physics','reset') else 'camera_error' if phase=='camera' else 'policy_error' if phase=='policy' else 'execution_error',
+                error={'phase':phase,**_error(error,effect=effect)},steps=steps,_exception=error)
+
+
+
+def abort_videos(videos,report):
+    errors=[]
+    for writer in videos.values():
+        if writer._closed:continue
+        try:writer.abort()
+        except Exception as error:errors.append(error)
+    if errors:report.update(execution_failure(ExceptionGroup('Video cleanup failed',errors),phase='recording_cleanup',steps=report.get('steps',0),applying=True))
+
