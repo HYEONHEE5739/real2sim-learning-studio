@@ -52,8 +52,16 @@ def command_target(leader_native, *, leader_mapper, follower, model_bounds, engi
     never infer hardware command approval from this pure calculation.
     """
     requested=values(leader_mapper.calibrated_to_observation(leader_native,raw=leader_raw))
+    if leader_mapper.profile['urdf_sha256'] != follower.precision_mapper.profile['urdf_sha256']: raise ValueError('Leader/Follower model mismatch')
+    return position_target(np.array([requested[n] for n in JOINTS]),follower=follower,model_bounds=model_bounds,engine_bounds=engine_bounds)
+
+
+def position_target(requested, *, follower, model_bounds, engine_bounds=None, joint_order=JOINTS, units='model_rad'):
+    """Pure model/motor intersection, Saturation, Precision inverse and SDK encoding.
+
+    This preflight sends nothing and cannot approve a physical device or binding.
+    """
     mapper=follower.precision_mapper
-    if leader_mapper.profile['urdf_sha256'] != mapper.profile['urdf_sha256']: raise ValueError('Leader/Follower model mismatch')
     bounds=np.array([model_bounds[n] for n in JOINTS],dtype=float)
     if bounds.shape!=(6,2) or not np.isfinite(bounds).all(): raise ValueError('Expected finite model bounds')
     if engine_bounds is not None:
@@ -68,12 +76,12 @@ def command_target(leader_native, *, leader_mapper, follower, model_bounds, engi
     if np.any(bounds[:,0]>bounds[:,1]): raise ValueError('No common model/engine/motor range')
     motor_bounds=mapper.command_limits(dict(zip(JOINTS,bounds.tolist())))
     bounds=np.array([motor_bounds[n] for n in JOINTS])
-    saturation={};goal=checked_target(np.array([requested[n] for n in JOINTS]),limits=bounds,applied_dtype=np.float64,diagnostics=saturation)
+    saturation={};goal=checked_target(requested,limits=bounds,applied_dtype=np.float64,joint_order=joint_order,units=units,diagnostics=saturation)
     native=mapper.urdf_to_calibrated(dict(zip(JOINTS,goal.tolist())))
     command,encoded=follower.encode_goal(native)
     actual=values(mapper.calibrated_to_urdf(encoded));q=np.array([actual[n] for n in JOINTS])
     if np.any(q<bounds[:,0]) or np.any(q>bounds[:,1]):raise ValueError('Encoded motor target outside approved bounds')
-    return q,command,{'requested_model_rad':requested,'encoded_model_rad':actual,'bounds_rad':bounds.tolist(),'hardware_measured':False,'saturation':saturation}
+    return q,command,{'requested_model_rad':dict(zip(JOINTS,np.asarray(requested).tolist())),'encoded_model_rad':actual,'bounds_rad':bounds.tolist(),'hardware_measured':False,'saturation':saturation}
 
 def encode_goal(self, target):
     """Read-only SDK encoding preflight, including integer truncation."""

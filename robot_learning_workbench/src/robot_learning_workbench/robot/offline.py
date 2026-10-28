@@ -48,6 +48,44 @@ def capture_binding(manifest,scene,calibration_id):
     return reasons
 
 
+def encoder_preflight(action, *, mapper, model_path, calibration_path, cfg):
+    """Use official CPU-only normalization and existing Follower checks; never IO.
+
+    Feetech's serial constructor is deliberately NOT called. The official base
+    initializer supplies only motor/calibration tables for its pure math methods.
+    """
+    import hashlib,json
+    from types import SimpleNamespace
+    from lerobot.motors import Motor,MotorCalibration,MotorNormMode
+    from lerobot.motors.motors_bus import MotorsBus
+    from lerobot.motors.feetech.feetech import FeetechMotorsBus
+    from .calibration import joint_specs
+    from .devices import Follower
+    from .control import position_target
+    profile=mapper.profile;identity=profile['identity']
+    if hashlib.sha256(Path(model_path).read_bytes()).hexdigest()!=profile['urdf_sha256']:raise ValueError('Command mapping execution model identity differs')
+    raw=Path(calibration_path).read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=identity['calibration_sha256']:raise ValueError('Motor calibration file identity changed')
+    expected={n:{'id':i+1,'model':'sts3215'} for i,n in enumerate(JOINTS)}
+    if identity['motors']!=expected:raise ValueError('Expected official SO101 Follower motor identity')
+    calibration=json.loads(raw)
+    if set(calibration)!=set(JOINTS):raise ValueError('Expected six SDK motor calibration records')
+    for n,c in calibration.items():
+        if set(c)!={'id','drive_mode','homing_offset','range_min','range_max'} or any(type(v)is not int for v in c.values()):raise ValueError('Invalid SDK integer motor calibration')
+        if c['id']!=expected[n]['id'] or c['drive_mode'] not in (0,1) or not 0<=c['range_min']<c['range_max']<4096:raise ValueError('Invalid SDK motor ID/range')
+    motors={n:Motor(i+1,'sts3215',MotorNormMode.RANGE_0_100 if n=='gripper' else MotorNormMode.DEGREES) for i,n in enumerate(JOINTS)}
+    bus=object.__new__(FeetechMotorsBus)
+    MotorsBus.__init__(bus,cfg.port,motors,{n:MotorCalibration(**c) for n,c in calibration.items()})
+    follower=Follower(SimpleNamespace(id=cfg.id,bus=bus),profile=profile,identity=identity,calibration_path=calibration_path,model_hash=profile['urdf_sha256'])
+    follower._check_identity()  # Pure identity/motor-spec checks, no register reads.
+    low=bus._normalize({c.id:c.range_min for c in bus.calibration.values()})
+    high=bus._normalize({c.id:c.range_max for c in bus.calibration.values()})
+    follower.limits={n:sorted((low[m.id],high[m.id])) for n,m in motors.items()}
+    bounds={n:s['limits'] for n,s in joint_specs(model_path).items()}
+    _,native,diagnostics=position_target(action,follower=follower,model_bounds=bounds)
+    return {'native_target':native,'sdk_goal_raw':follower.last_encoded_goal_raw,'command_preflight':diagnostics}
+
+
 def run(plan,*,events,commands):
     opts=plan.effective_settings['execution']
     if opts.get('mode')!='offline' or opts.get('enable_motion'):raise DataError('HARDWARE_NOT_APPROVED','execution','Only explicit offline inspection is enabled; no port, torque or camera access')
@@ -115,8 +153,13 @@ def run(plan,*,events,commands):
                 # Even an offline encoder preflight requires the command-phase record.
                 mapper=mapper_from_scene(plan.scene,command_id,role='follower',phase='device_command')
                 if profile is None or mapper.profile!=profile:raise ValueError('Selected Calibration and Scene command binding identity/model differ')
-                requested=dict(zip(JOINTS,action.tolist()));encoded=mapper.urdf_to_calibrated(requested)
-                report['policy']['native_target']=encoded;report['command_binding']='validated offline; no motor activation/SDK send'
+                if 'motor_calibration' not in plan.resolved_inputs:
+                    report.update(status='PARTIAL',command_binding='missing explicit motor_calibration; SDK encoding not validated')
+                else:
+                    models=[plan.scene.root/f.path for f in plan.scene.files if f.sha256==urdf and f.path.endswith('.urdf')]
+                    if len(models)!=1:raise ValueError('Explicit execution URDF required for model/motor command intersection')
+                    data=encoder_preflight(action,mapper=mapper,model_path=models[0],calibration_path=plan.resolved_inputs['motor_calibration']['path'],cfg=cfg)
+                    report['policy'].update(data);report['command_binding']='validated offline; no motor activation/SDK send; hardware safety unverified'
     if plan.stage=='precision_calibration' and 'joint_reviews' not in report:raise ValueError('Explicit preserved calibration_profile required')
     plan.output_path.mkdir();path=plan.output_path/'offline-inspection.json';atomic_json(path,report)
     return StageResult('completed',(str(path),),0,{'status':report['status'],'hardware_connected':False,'physical_verified':False})

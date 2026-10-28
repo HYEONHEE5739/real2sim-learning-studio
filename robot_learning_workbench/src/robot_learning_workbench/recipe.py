@@ -65,7 +65,7 @@ class RecipeDocument:
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
- 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
+ 'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract','motor_calibration'}),
  'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
  'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session'}),
@@ -441,7 +441,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
-    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
+    if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim'):code_names += ['robot/offline.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation'):
         from .robot.offline import capture_module
