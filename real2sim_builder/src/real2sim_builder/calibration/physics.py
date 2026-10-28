@@ -4,7 +4,7 @@ import copy
 import numpy as np
 from scipy.optimize import least_squares
 from ..exporters.mjcf import export
-from ..project import value
+from real2sim_builder.scene import value
 
 
 def trajectory(scene,root,scratch,motion):

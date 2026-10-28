@@ -35,7 +35,7 @@ def parts(obj, field):
     geom=obj[field];kind=geom['type'];dims=np.asarray(obj['dimensions']['value'],float)
     if field=='collision' and not obj.get('collision_enabled',True):return []
     if kind == 'compound':
-        from ..project import transform
+        from real2sim_builder.scene import transform
         result = []
         for part in geom.get('parts', []):
             size = np.asarray(part['dimensions'], float)
@@ -102,7 +102,7 @@ def obj_data(path):
 
 
 import xml.etree.ElementTree as ET
-from ..project import transform, value
+from real2sim_builder.scene import transform, value
 
 
 def origin(node):
@@ -116,7 +116,7 @@ def origin(node):
 def simulation_offsets(model):
     node=model.get('simulation_joint_offsets_rad')
     if node is None:return np.zeros(len(model['joint_names']))
-    from ..project import checked_value
+    from real2sim_builder.scene import checked_value
     offsets=np.asarray(checked_value(node),float)
     if offsets.shape!=(len(model['joint_names']),) or not np.isfinite(offsets).all() or np.any(abs(offsets)>.35):
         raise ValueError('Finite bounded named simulation joint offsets required')
@@ -288,8 +288,8 @@ def reference_model(path,joints,import_asset,scratch):
 
 import copy
 from scipy.optimize import least_squares
-from ..project import observation_scene
-from ..project import value,cameras_audited,camera_calibration_signature
+from real2sim_builder.capture import observation_scene
+from real2sim_builder.scene import value, cameras_audited, camera_calibration_signature
 from .camera import project_point
 
 
@@ -389,7 +389,7 @@ def bootstrap(project,scene,name,options):
     """
     import cv2
     from .camera import point_world
-    from ..project import frame_world
+    from real2sim_builder.scene import frame_world
     candidate=copy.deepcopy(scene);node=next(c for c in candidate['cameras'] if c['id']==name)
     if node['K']['provenance'] in ('measured','calibrated') or node['pose']['provenance'] in ('measured','calibrated'):
         raise ValueError('Bootstrap requires unknown/estimated K and pose; use scoped fitting for unlocked fields')
@@ -501,7 +501,7 @@ def bootstrap(project,scene,name,options):
 def assess_camera(project,scene,name,options):
     """No fitting: audit full pinhole K + shared extrinsic on fixed metric evidence."""
     from .camera import point_world
-    from ..project import frame_world
+    from real2sim_builder.scene import frame_world
     candidate=copy.deepcopy(scene);node=next(c for c in candidate['cameras'] if c['id']==name)
     images={i['id']:i for i in project.evidence['images'] if i.get('id') and i.get('eligible') and i['camera']==name and i.get('role')!='reference_context'}
     rows=[r for r in project.evidence['landmarks'] if r.get('observation') in images and r.get('visible',True) and r.get('weight',1)>0]
@@ -559,7 +559,7 @@ def assess_camera(project,scene,name,options):
 
 
 from PIL import Image
-from ..project import frame_world, world_pose, local_path, value
+from real2sim_builder.scene import frame_world, world_pose, local_path, value
 
 
 def array(path):
@@ -640,9 +640,9 @@ def fit_depth_geometry(scene, evidence, root):
 
 import cv2
 from PIL import Image, ImageOps
-from ..project import write, sha
-from ..project import local_path, value
-from ..project import copy_input
+from real2sim_builder.files import write, sha
+from real2sim_builder.scene import local_path, value
+from real2sim_builder.evidence import copy_input
 
 
 def undistort_evidence(project):

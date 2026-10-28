@@ -31,3 +31,9 @@ GitHub와 로컬 원본의 main HEAD를 읽기 전용으로 대조했다.
 6. 양 엔진 실행·공식 소비자·학습/평가·UI 결과·전체 회귀/wheel·독립 리뷰·보존 종합.
 
 최종 상태는 VERIFIED(actual), CODE_READY(연결됐으나 실제 실행 미검증), PARTIAL, UNSUPPORTED, EXCLUDED로 구분한다. 현재 문서는 완료 보고서가 아니다.
+
+## Phase2 — Builder 역할별 모듈
+
+`project.py`의 기존 공개 이름은 direct alias로 유지하고 내부 caller는 실제 소유 모듈을 사용한다. 새 scene/files/evidence/capture/editing/cameras/candidate/scan/initialization은 현재 알고리즘을 그대로 가진 목적별 파일이며 새로운 계층/Manager/저장 포맷이 아니다. Project lifecycle은 project.py, bounded review loop는 reconstruction.py가 소유한다.
+
+기준 project.py 약1,900줄→약200줄, reconstruction.py1,036→약400줄이다. 이동64개 함수/class는 import를 제외한 AST exact. 파일 이동 과정의 schema constant 누락은 기존 상대 Geometry 회귀가 재현했고 원 상수를 올바른 소유 모듈로 옮겨 고쳤다. Capture/Project 집중54 PASS, Builder 전체103 PASS, 전체973 PASS, 마지막 import 정리 후 Builder103 PASS다. 실제 보존 v8 Manifest84개/SHA 및 native USD/MJCF/URDF closure를 읽기 전용 검증했다. 원본 프로젝트/Scene/Export를 재작성하지 않았다. 두 축 독립 리뷰의 High/Medium 잔여0.
