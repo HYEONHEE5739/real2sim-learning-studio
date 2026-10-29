@@ -5,7 +5,7 @@ import uuid
 import time
 from PyQt6.QtCore import Qt,QTimer,QUrl
 from PyQt6.QtGui import QImage,QPixmap,QDesktopServices
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog,QGridLayout,QSplitter,QScrollArea,QDialog
 from .recipe_editor import RecipeEditor
 from .jobs import BackendJob
 from .operations import stage_support,run_outcome
@@ -13,102 +13,140 @@ from .operations import stage_support,run_outcome
 
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
-        super().__init__(parent);self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
-        box=QVBoxLayout(self);self.heading=QLabel({'teleoperation':'Teleoperation · Fake 6축 / 실물 읽기 전용','source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation','capture':'Capture · 보존 자료 / 실물 읽기 전용','precision_calibration':'Precision · 읽기 / 기존 근거 검토','real_evaluation':'Real Policy · Observe Only / Gripper 별도 승인','real_sim':'Real/Sim · 보존 입력 / 측정 자세 비교'}[stage]);box.addWidget(self.heading)
-        row=QHBoxLayout();box.addLayout(row)
-        self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 기본 출력')
-        for button in (self.load_button,self.save_button,self.check_button,self.new_output_button):row.addWidget(button)
-        self.new_output_button.clicked.connect(self.suggest_output)
-        self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe)
+        super().__init__(parent)
+        from .theme import STYLE
+        from .view import CameraView
+        self.setStyleSheet(STYLE)
+        self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules)
+        self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set();self._syncing=False
+        titles={'teleoperation':'Teleoperation · Fake / 읽기 전용','source':'Source Demo','annotation':'Annotation','datagen':'Mimic / Datagen','train':'모델 학습','hub_download':'Hub 다운로드','hub_upload':'Hub 업로드','simulation_evaluation':'Sim 평가','offline_validation':'Offline Validation','capture':'Real2Sim Capture','precision_calibration':'Precision Calibration','real_evaluation':'Real Policy · Observe Only','real_sim':'Real / Sim'}
+        self.heading=QLabel(titles[stage]);self.heading.setObjectName('dashboardTitle');self.heading.hide()
+        outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0);outer.setSpacing(12)
+        self.splitter=QSplitter(Qt.Orientation.Horizontal);outer.addWidget(self.splitter,1)
+        self.viewer=QWidget();self.viewer.setObjectName('workspaceCanvas');box=QVBoxLayout(self.viewer);box.setContentsMargins(0,0,0,0);box.setSpacing(12);self.splitter.addWidget(self.viewer)
+        self.settings_scroll=QScrollArea();self.settings_scroll.setObjectName('settingsPanel');self.settings_scroll.setWidgetResizable(True);self.settings_scroll.setMinimumWidth(320)
+        self.settings_content=QWidget();self.settings_content.setObjectName('settingsContent');settings=QVBoxLayout(self.settings_content);settings.setSpacing(10);self.settings_scroll.setWidget(self.settings_content);self.splitter.addWidget(self.settings_scroll)
+        self.splitter.setChildrenCollapsible(False);self.splitter.setStretchFactor(0,1);self.splitter.setStretchFactor(1,0);self.splitter.setSizes([850,390])
+        title=QLabel('실행 설정');title.setObjectName('sectionTitle');settings.addWidget(title)
+        recipe_row=QGridLayout();settings.addLayout(recipe_row)
+        self.load_button=QPushButton('Recipe 불러오기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 출력')
+        for i,button in enumerate((self.load_button,self.save_button,self.check_button,self.new_output_button)):recipe_row.addWidget(button,i//2,i%2)
+        self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe);self.new_output_button.clicked.connect(self.suggest_output)
+        self.form=QVBoxLayout();settings.addLayout(self.form)
+        self.details=QCheckBox('고급 설정 · 입력 계약 / Recipe YAML');self.advanced=QWidget();self.advanced_form=QVBoxLayout(self.advanced);self.advanced_form.setContentsMargins(0,0,0,0)
+        self.details.toggled.connect(self.advanced.setVisible);self.advanced.hide()
         self.editor=RecipeEditor();self.editor.changed.connect(self.invalidate)
+        self.input_rows={};self.inputs={}
+        def field(layout,label,widget):
+            panel=QWidget();row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(label));row.addWidget(widget);layout.addWidget(panel);return panel
         self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
-        self.inputs={};self.form=QVBoxLayout();box.addLayout(self.form)
-        if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):self.form.addWidget(self.engine)
-        for key in ({'teleoperation':['device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','scene','camera_config'],'source':['scene','source_dataset','device_profile','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],
-                     'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile','scene','robot_model'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile','engine_config','robot_model']}[stage]):
-            line=QLineEdit();line.setPlaceholderText(key);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
-            row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(line);self.form.addLayout(row)
-            if key=='scene':
-                use=QPushButton('현재 검사 Scene 적용');use.clicked.connect(self.use_scene);row.addWidget(use)
-            browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));row.addWidget(browse)
-        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('Language Policy Task Instruction (명시 문장)')
-        if stage in ('simulation_evaluation','real_evaluation'):self.form.addWidget(self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
-        self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요')
-        if stage in ('simulation_evaluation','offline_validation'):self.form.addWidget(self.policy_model)
-        if stage in ('teleoperation','real_evaluation'):
-            for key in (('gripper_target_rad','max_gripper_delta_raw') if stage=='teleoperation'else('max_gripper_delta_raw',)):
-                line=QLineEdit();line.setPlaceholderText(key+' (기본 동작 없음)');self.form.addWidget(line)
-                line.editingFinished.connect(lambda k=key,w=line:self.edit_gripper_parameter(k,w.text()))
-        if stage=='precision_calibration':
-            review=QPushButton('기존 각도 근거 재검토 → 새 Profile Revision');self.form.addWidget(review);review.clicked.connect(self.review_precision)
-        if stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):
-            frames=QSpinBox();frames.setRange(1,300);frames.valueChanged.connect(lambda value:self.edit_execution('max_frames',value));self.form.addWidget(QLabel('실물 읽기 최대 frame (팔 구동 없음)'));self.form.addWidget(frames)
-            self.live_frames=frames
-        self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(lambda:self.edit_output());self.form.addWidget(self.output)
-        self.placement=QComboBox();self.placement.addItems(['Fixed','Random'])
-        if stage in ('datagen','simulation_evaluation'):self.form.addWidget(self.placement);self.placement.currentTextChanged.connect(self.change_placement)
-        self.counts={}
-        for key in ({'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[])):
-            spin=QSpinBox();spin.setRange(1,100000);spin.valueChanged.connect(lambda v,k=key:self.edit_execution(k,v));self.counts[key]=spin
-            row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(spin);self.form.addLayout(row)
-        self.dataset_resume=None
-        if stage in ('source','datagen'):
-            self.dataset_resume=QCheckBox('기존 Dataset 경로에 추가 (Resume)');self.form.addWidget(self.dataset_resume);self.dataset_resume.toggled.connect(self.edit_dataset_resume)
-            choose=QPushButton('Dataset 경로 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once'] if stage=='teleoperation' else ['auto','manual'] if stage=='annotation' else {'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all'],'real_sim':['offline','observe_only']}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
-        if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim','teleoperation'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
+        if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):field(self.form,'Simulation backend',self.engine)
         self.source_kind=None
         if stage=='source':
-            self.source_kind=QComboBox();self.source_kind.addItems(['Recorded Target Stream','Live Leader (read only → Simulation)']);self.form.addWidget(self.source_kind)
-            self.source_kind.currentIndexChanged.connect(self.change_source_kind)
-        self.gripper_button=QPushButton('Gripper-Only: 별도 현장 승인 필요 · 팔 5축 구동 금지')
-        self.gripper_button.setEnabled(False);self.gripper_button.clicked.connect(self.approve_gripper)
-        if stage in ('real_evaluation','teleoperation'):self.form.addWidget(self.gripper_button)
-        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000)
-        if stage=='annotation':
-            row=QHBoxLayout();box.addLayout(row);row.addWidget(QLabel('수동 grasp 원본 frame'));row.addWidget(self.mark_frame)
-            for kind,text in [('pause','일시정지'),('resume','재생'),('step','1 step'),('mark','grasp 표시'),('skip','Episode 제외')]:
-                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));row.addWidget(button);self.commands[kind]=button
-        if stage=='source':
-            row=QHBoxLayout();box.addLayout(row)
-            for kind,text in [('save','현재 Episode 저장'),('discard','현재 Episode 폐기')]:
-                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));row.addWidget(button);self.commands[kind]=button
+            self.source_kind=QComboBox();self.source_kind.addItems(['Recorded Target Stream','Live Leader (read only → Simulation)']);field(self.form,'Source 입력',self.source_kind);self.source_kind.currentIndexChanged.connect(self.change_source_kind)
+        labels={'scene':'Scene Package','dataset':'사용할 데이터','source_dataset':'저장된 Target Stream','device_profile':'장치 연결 Profile','engine_config':'엔진 실행 설정','resume_dataset':'기존 결과 · 다른 출력 Resume','training_config':'공식 Training Config','policy':'Policy / Checkpoint','checkpoint':'Resume Checkpoint','repo_id':'Repository ID','revision':'Revision / Commit','artifact':'업로드할 Dataset / Policy','policy_contract':'외부 Policy 의미 계약','camera_config':'Side / Wrist Camera 설정','capture_session':'보존 Capture','calibration_profile':'관절 관측 Profile','robot_model':'Capture용 원본 Robot Model','leader_device_profile':'Fake Leader Profile','leader_calibration_profile':'Fake Leader 관측 Profile'}
+        keys={'teleoperation':['device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','scene','camera_config'],'source':['scene','source_dataset','device_profile','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile','scene','robot_model'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile','engine_config','robot_model']}[stage]
+        primary={'scene','dataset','source_dataset','device_profile','training_config','policy','checkpoint','repo_id','revision','artifact','calibration_profile','camera_config'}
+        for key in keys:
+            line=QLineEdit();line.setPlaceholderText(labels[key]);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
+            panel=QWidget();row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(labels[key]));row.addWidget(line)
+            buttons=QHBoxLayout();row.addLayout(buttons)
+            browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));buttons.addWidget(browse)
+            if key=='scene':
+                use=QPushButton('검사한 Scene 적용');use.clicked.connect(self.use_scene);buttons.addWidget(use)
+            (self.form if key in primary else self.advanced_form).addWidget(panel);self.input_rows[key]=panel
+        self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(self.edit_output);field(self.form,'저장 위치',self.output)
+        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once']if stage=='teleoperation'else['auto','manual']if stage=='annotation'else{'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all'],'real_sim':['offline','observe_only']}[stage]if stage in ('capture','precision_calibration','real_evaluation','real_sim')else['scratch','finetune','resume'])
+        if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim','teleoperation'):field(self.form,'실행 방식',self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
+        self.counts={}
+        for key in {'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[]):
+            spin=QSpinBox();spin.setRange(1,100000);spin.valueChanged.connect(lambda value,k=key:self.edit_execution(k,value));self.counts[key]=spin
+            field(self.form,{'env_num':'환경 수','num_episodes':'누적 Episode 목표','max_attempts':'시도 예산','episodes':'평가 Attempt 목표','timeout_s':'평가 최대 시간 (제어 시각 s)'}[key],spin)
+        self.placement=QComboBox();self.placement.addItems(['Fixed','Random'])
         self.object_table=None
         if stage in ('datagen','simulation_evaluation'):
-            self.object_table=QTableWidget(0,6);self.object_table.setHorizontalHeaderLabels(['배치 Object','Frame','Support','Fixed X (m)','Fixed Y (m)','Random Workspace']);self.object_table.itemChanged.connect(self.edit_objects);box.addWidget(self.object_table)
-        self.task_info=QLabel();self.task_info.setWordWrap(True);box.addWidget(self.task_info)
-        self.details=QCheckBox('고급: 저장 Recipe YAML');self.details.toggled.connect(self.editor.setVisible);box.addWidget(self.details);box.addWidget(self.editor);self.editor.hide()
-        self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True);box.addWidget(self.state)
-        row=QHBoxLayout();box.addLayout(row)
-        self.start_button=QPushButton('실행');self.cancel_button=QPushButton('취소');self.result_button=QPushButton('결과 열기');self.resume_button=QPushButton('새 worker로 계속 실행')
-        for button in (self.start_button,self.cancel_button,self.result_button,self.resume_button):row.addWidget(button)
-        self.start_button.setEnabled(False);self.cancel_button.setEnabled(False);self.resume_button.setVisible(False)
-        self.reopen_button=QPushButton('기존 Run 다시 열기');row.addWidget(self.reopen_button);self.reopen_button.clicked.connect(self.reopen_run)
-        self.start_button.clicked.connect(self.start_run);self.cancel_button.clicked.connect(self.cancel_run);self.result_button.clicked.connect(self.open_result);self.resume_button.clicked.connect(self.continue_run)
-        self.preview_env=QSpinBox();self.preview_env.setRange(0,0);self.preview_env.valueChanged.connect(self.select_preview)
-        if stage in ('source','annotation','datagen','simulation_evaluation'):box.addWidget(QLabel('Preview / Manual 명령 Env'));box.addWidget(self.preview_env)
-        preview=QHBoxLayout();box.addLayout(preview);self.previews={n:QLabel(n+' · Live Preview 대기') for n in ('side','wrist')}
-        for label in self.previews.values():label.setMinimumSize(320,240);label.setAlignment(Qt.AlignmentFlag.AlignCenter);preview.addWidget(label)
-        self.sim_previews={}
-        if stage=='real_sim':
-            row=QHBoxLayout();box.addLayout(row)
-            for n in ('side','wrist'):
-                label=QLabel('Simulation '+n+' · 비교 결과 대기');label.setMinimumSize(320,240);row.addWidget(label);self.sim_previews[n]=label
-        if stage not in ('source','annotation','datagen','simulation_evaluation','capture','real_evaluation','real_sim'):
-            for label in self.previews.values():label.hide()
-        self.loss_chart=None
+            field(self.form,'Object Placement',self.placement);self.placement.currentTextChanged.connect(self.change_placement)
+            self.object_table=QTableWidget(0,6);self.object_table.setHorizontalHeaderLabels(['Object','Frame','Support','Fixed X (m)','Fixed Y (m)','Workspace']);self.object_table.setMaximumHeight(190);self.object_table.setMinimumWidth(0);self.object_table.itemChanged.connect(self.edit_objects);self.form.addWidget(self.object_table)
+        self.dataset_resume=None
+        if stage in ('source','datagen'):
+            self.dataset_resume=QCheckBox('기존 Dataset에 추가 저장 (Resume)');self.dataset_resume.toggled.connect(self.edit_dataset_resume);self.form.addWidget(self.dataset_resume)
+            choose=QPushButton('이어 수집할 Dataset 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
+        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('실제 작업 문장')
+        if stage in ('simulation_evaluation','real_evaluation'):field(self.form,'Task Instruction',self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
+        self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요');self.policy_model.setWordWrap(True)
+        if stage in ('simulation_evaluation','offline_validation'):self.form.addWidget(self.policy_model)
+        if stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):
+            self.live_frames=QSpinBox();self.live_frames.setRange(1,300);self.live_frames.valueChanged.connect(lambda value:self.edit_execution('max_frames',value));field(self.form,'읽기 / Fake 최대 frame · 팔 구동 없음',self.live_frames)
+        self.gripper_fields={}
+        if stage in ('teleoperation','real_evaluation'):
+            for key in (('gripper_target_rad','max_gripper_delta_raw')if stage=='teleoperation'else('max_gripper_delta_raw',)):
+                line=QLineEdit();line.setPlaceholderText('동작 기본값 없음');line.editingFinished.connect(lambda k=key,w=line:self.edit_gripper_parameter(k,w.text()));self.gripper_fields[key]=line
+                field(self.advanced_form,'Gripper 목표 (rad)'if key.endswith('_rad')else'승인된 Gripper 변위 상한 (encoder count)',line)
+        if stage=='precision_calibration':
+            review=QPushButton('기존 근거 재검토 → 새 Profile Revision');review.clicked.connect(self.review_precision);self.form.addWidget(review)
+        self.task_info=QLabel();self.task_info.setWordWrap(True);self.advanced_form.addWidget(self.task_info)
+        self.advanced_form.addWidget(self.editor)
         if stage=='train':
-            from .learning import LossChart,TrainingSettings
-            self.training_settings=TrainingSettings(self);box.addWidget(self.training_settings)
-            self.loss_chart=LossChart();box.addWidget(self.loss_chart)
+            from .learning import TrainingSettings
+            self.training_settings=TrainingSettings(self);self.form.addWidget(self.training_settings)
         if stage in ('hub_download','hub_upload'):
             from .hub import HubSettings
-            self.hub_settings=HubSettings(self);box.addWidget(self.hub_settings)
-        self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumBlockCount(1000);box.addWidget(self.log)
+            self.hub_settings=HubSettings(self);self.form.addWidget(self.hub_settings)
+        settings.addWidget(self.details);settings.addWidget(self.advanced);settings.addStretch()
+        self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True)
+        self.action_card=QWidget();self.action_card.setObjectName('actionCard');actions=QHBoxLayout(self.action_card);actions.addWidget(self.state,1);box.addWidget(self.action_card)
+        self.start_button=QPushButton({'source':'데모 기록 시작','annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','capture':'Capture 실행 · 읽기 전용'}.get(stage,'선택 단계 실행'));self.start_button.setObjectName('primaryAction')
+        self.cancel_button=QPushButton('현재 workflow 중지');self.cancel_button.setObjectName('stopAction');actions.addWidget(self.start_button);actions.addWidget(self.cancel_button)
+        self.start_button.setEnabled(False);self.cancel_button.setEnabled(False);self.start_button.clicked.connect(self.start_run);self.cancel_button.clicked.connect(self.cancel_run)
+        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);controls=QHBoxLayout();box.addLayout(controls)
+        if stage=='annotation':
+            controls.addWidget(QLabel('Grasp Frame'));controls.addWidget(self.mark_frame)
+            for kind,text in [('pause','일시정지'),('resume','재생'),('step','한 스텝'),('mark','Grasp 표시'),('skip','Episode 건너뛰기')]:
+                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button);self.commands[kind]=button
+        if stage=='source':
+            for kind,text in [('save','저장 / 다음 (→)'),('discard','폐기 (←)')]:
+                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button);self.commands[kind]=button
+        self.preview_env=QSpinBox();self.preview_env.setRange(0,0);self.preview_env.valueChanged.connect(self.select_preview)
+        if stage in ('source','annotation','datagen','simulation_evaluation'):controls.addWidget(QLabel('Env'));controls.addWidget(self.preview_env)
+        self.gripper_button=QPushButton('Gripper-Only · 별도 현장 승인 / 팔 5축 금지');self.gripper_button.setEnabled(False);self.gripper_button.clicked.connect(self.approve_gripper)
+        if stage in ('real_evaluation','teleoperation'):box.addWidget(self.gripper_button)
+        self.media_splitter=QSplitter(Qt.Orientation.Vertical);box.addWidget(self.media_splitter,1)
+        self.preview_card=QWidget();self.preview_card.setObjectName('previewCard');grid=QGridLayout(self.preview_card);self.media_splitter.addWidget(self.preview_card)
+        self.previews={};self.sim_previews={}
+        for col,n in enumerate(('side','wrist')):
+            if stage=='real_sim':
+                for column,kind in enumerate(('real','sim')):
+                    grid.addWidget(QLabel(kind.upper()+' '+n.upper()),col*2,column);label=CameraView('No live frame',minimum=(120,90));grid.addWidget(label,col*2+1,column)
+                    (self.previews if kind=='real'else self.sim_previews)[n]=label
+            else:
+                grid.addWidget(QLabel(('REAL 'if stage in ('capture','real_evaluation')else'SIM ')+n.upper()),0,col);label=CameraView(n.upper()+' — 실행 대기',minimum=(120,90));grid.addWidget(label,1,col);self.previews[n]=label
+        for label in (*self.previews.values(),*self.sim_previews.values()):label.setStyleSheet('background: #141b23; border-radius: 14px; color: #8b9aaa;')
+        self.preview_card.setVisible(stage in ('source','annotation','datagen','simulation_evaluation','capture','real_evaluation','real_sim'))
+        self.log_card=QWidget();self.log_card.setObjectName('logCard');log_box=QVBoxLayout(self.log_card);self.media_splitter.addWidget(self.log_card)
+        tools=QGridLayout();log_box.addLayout(tools);tools.addWidget(QLabel('진행 / 오류 로그'),0,0)
+        self.result_button=QPushButton('결과 상세');self.result_button.clicked.connect(self.open_result);tools.addWidget(self.result_button,0,1)
+        self.reopen_button=QPushButton('기존 Run 열기');self.reopen_button.clicked.connect(self.reopen_run);tools.addWidget(self.reopen_button,0,2)
+        self.resume_button=QPushButton('새 worker로 계속 실행');self.resume_button.clicked.connect(self.continue_run);self.resume_button.hide();tools.addWidget(self.resume_button,1,1,1,2)
+        self.loss_chart=None
+        if stage=='train':
+            from .learning import LossChart
+            self.loss_chart=LossChart();self.loss_chart.hide();loss_button=QPushButton('학습 Loss 그래프');loss_button.clicked.connect(self.show_loss);tools.addWidget(loss_button,1,0)
+        self.log=QPlainTextEdit();self.log.setObjectName('console');self.log.setReadOnly(True);self.log.setMaximumBlockCount(1000);log_box.addWidget(self.log)
+        self.media_splitter.setStretchFactor(0,3);self.media_splitter.setStretchFactor(1,1);self.media_splitter.setSizes([500,180])
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
-        self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={};self._syncing=False
+        self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={}
         support=stage_support(stage)
         if not support['runnable']:self.state.setText(support['reason'])
+
+    def show_loss(self):
+        if self.stage!='train':return
+        if not hasattr(self,'loss_dialog'):
+            self.loss_dialog=QDialog(self);self.loss_dialog.setWindowTitle('학습 Loss · 공식 로그');self.loss_dialog.resize(1000,600);QVBoxLayout(self.loss_dialog).addWidget(self.loss_chart)
+        self.loss_chart.show();self.loss_dialog.show();self.loss_dialog.raise_()
+
+    def hideEvent(self,event):
+        if hasattr(self,'loss_dialog'):self.loss_dialog.hide()
+        super().hideEvent(event)
 
     def show_policy_model(self,path):
         try:
