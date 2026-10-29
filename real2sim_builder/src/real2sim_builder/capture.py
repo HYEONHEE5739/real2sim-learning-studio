@@ -11,6 +11,28 @@ import shutil
 CAPTURE_SCHEMA = 'real2sim.capture/1'
 
 
+def register_unbound(project, destination, manifest, samples):
+    """Archive measured input before a base/camera calibration exists.
+
+    Registration is intentionally not robot import or calibration approval.
+    """
+    evidence=project.evidence;observed=[]
+    for sample in samples:
+        for image in sample['images']:
+            relative=(destination/image['path']).relative_to(project.root).as_posix()
+            row=dict(id=manifest['session_id']+'_'+sample['id']+'_'+image['camera'],path=relative,camera=image['camera'],
+                     split=manifest['split'],group_id=manifest['group_id'],session_id=manifest['session_id'],
+                     sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
+                     joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
+                     exclusion_reasons=['unbound_capture_calibration'],capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
+            evidence['images'].append(row);observed.append(row)
+    evidence.setdefault('capture_sessions',[]).append(dict(id=manifest['session_id'],path=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix(),sha256=sha(destination/'capture_manifest.yaml'),
+        status='NEEDS_MORE_DATA',needs=['robot_base','camera_intrinsics','camera_extrinsics'],source_robot_sha256=manifest['source_robot_sha256']))
+    write(project.root/'input/evidence.yaml',evidence);project.invalidate()
+    report=dict(imported=len(observed),eligible=0,status='NEEDS_MORE_DATA',scope='ARCHIVED_OBSERVATIONS_ONLY',physical_verified=False)
+    write(project.root/'working/capture_import.json',report);return report
+
+
 def mapping_contract(manifest):
     """Validate portable mapping evidence without importing SO-101 or motor SDKs."""
     import hashlib, json
@@ -121,10 +143,13 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     if m['group_id'] in known_groups and known_groups[m['group_id']] != m['split']:
         raise ValueError('Train/holdout group leakage')
     destination = project.root / 'input/captures' / m['session_id']
-    if destination.exists():
+    in_place=root.resolve()==destination.resolve()
+    if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(root, destination)
+    if not in_place:shutil.copytree(root, destination)
+    bound=all(m['robot'].get(k)is not None for k in('format','T_world_base'))and all(all(c.get(k)is not None for k in('parent','K','T_parent_camera'))for c in m['cameras'])
+    if not bound:return register_unbound(project,destination,m,samples)
     if not (project.root / 'working/current_scene.yaml').exists():
         project.save_scene(empty(project.info['name']))
     scene = project.scene
@@ -287,10 +312,12 @@ def import_session(project, root, max_skew_ns=100000000, loaded=None):
     'Restore project metadata on failed import; never alter immutable source input.'
     m, _, _ = loaded or load_session(root)
     destination = project.root / 'input/captures' / m['session_id']
-    if destination.exists():
+    in_place=root.resolve()==destination.resolve()
+    if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')
     paths = [project.root / p for p in ('working/current_scene.yaml', 'input/evidence.yaml', 'working/state.json')]
     paths.append(project.root / 'history.jsonl')
+    paths.append(project.root / 'working/capture_import.json')
     previous = {p: p.read_bytes() if p.exists() else None for p in paths}
     try:
         return _import_session(project, root, max_skew_ns, loaded)
@@ -300,7 +327,7 @@ def import_session(project, root, max_skew_ns=100000000, loaded=None):
                 p.unlink(missing_ok=True)
             else:
                 p.write_bytes(data)
-        if destination.exists():
+        if destination.exists()and not in_place:
             shutil.rmtree(destination)
         raise
 
