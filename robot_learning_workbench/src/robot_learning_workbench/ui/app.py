@@ -2,7 +2,7 @@
 import argparse,json,sys
 from pathlib import Path
 from PyQt6.QtCore import QProcess,QProcessEnvironment,QTimer
-from PyQt6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QListWidget,QStackedWidget,QPushButton,QLabel,QFileDialog,QLineEdit,QPlainTextEdit,QInputDialog,QTabWidget
+from PyQt6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QListWidget,QStackedWidget,QPushButton,QLabel,QFileDialog,QLineEdit,QPlainTextEdit,QInputDialog,QTabWidget,QComboBox,QGridLayout
 from .jobs import BackendJob
 from .workflow import WorkflowPage
 from .curation import CurationPage
@@ -12,9 +12,9 @@ class ScenePage(QWidget):
     def __init__(self,python,workspace,parent=None):
         super().__init__(parent);self.python=python;self.workspace=Path(workspace);self.scene_path=None;self.builder_project=None;self.valid=False
         layout=QVBoxLayout(self);layout.addWidget(QLabel('Scene · 기존 패키지 검사 / 독립 Builder 연결'))
-        self.path=QLineEdit();self.path.setReadOnly(True);layout.addWidget(self.path);row=QHBoxLayout();layout.addLayout(row)
-        for text,fn in [('Scene Package 선택',self.choose_scene),('Manifest·Calibration·Model 검사',self.inspect),('Builder Project 선택',self.choose_project),('기존 Builder 열기',self.open_builder),('Workspace Builder 열기',self.open_workspace_builder),('수평 기준 검사 (선택)',self.horizontal)]:
-            button=QPushButton(text);button.clicked.connect(fn);row.addWidget(button)
+        self.path=QLineEdit();self.path.setReadOnly(True);layout.addWidget(self.path);row=QGridLayout();layout.addLayout(row)
+        for i,(text,fn) in enumerate([('Scene Package 선택',self.choose_scene),('Manifest·Calibration·Model 검사',self.inspect),('Builder Project 선택',self.choose_project),('기존 Builder 열기',self.open_builder),('Workspace Builder 열기',self.open_workspace_builder),('수평 기준 검사 (선택)',self.horizontal)]):
+            button=QPushButton(text);button.clicked.connect(fn);row.addWidget(button,i//3,i%3)
         self.state=QLabel('기존 Scene을 선택하세요. v9 생성/실물 Calibration은 자동 실행하지 않습니다.');self.state.setWordWrap(True);layout.addWidget(self.state)
         self.info=QPlainTextEdit();self.info.setReadOnly(True);layout.addWidget(self.info)
         self.job=BackendJob(python,self);self.job.finished.connect(self.finished);self.job.log.connect(self.info.appendPlainText)
@@ -61,18 +61,61 @@ class ScenePage(QWidget):
 
 class Window(QMainWindow):
     def __init__(self,backend_python,modules,workspace):
-        super().__init__();self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
+        super().__init__()
+        from .theme import STYLE
         from .paths import GROUPS
+        self.setStyleSheet(STYLE);self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
         for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
         self.closing=False;self.cancelled_on_close=set()
-        central=QWidget();self.setCentralWidget(central);layout=QHBoxLayout(central);self.navigation=QListWidget();layout.addWidget(self.navigation,1);self.stack=QStackedWidget();layout.addWidget(self.stack,5)
+        central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
+        self.safety=QLabel('실물 팔 Goal/Torque 금지 · 읽기 전용 / Gripper 별도 승인 · 저장 Recipe만 실행');self.safety.setWordWrap(True);layout.addWidget(self.safety)
+        self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
-        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self) for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
+        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
         self.source_tabs=QTabWidget();self.source_tabs.addTab(self.workflows['source'],'Simulation Source 수집');self.source_tabs.addTab(self.source,'저장 Source 검토')
-        pages=[('Scene',self.scene),('Source',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('DataGen',self.workflows['datagen']),('Curation',self.curation),('LeRobot Training',self.workflows['train']),('Evaluation',self.workflows['simulation_evaluation']),('독립 Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture · 실물 읽기/보존',self.workflows['capture']),('Precision · 측정/검토',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real/Sim · 비교',self.workflows['real_sim'])]
-        for name,page in pages:self.navigation.addItem(name);self.stack.addWidget(page)
-        self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex);self.navigation.setCurrentRow(0)
-        self.statusBar().showMessage('공식 LeRobot 학습·Simulation · 모델/Scene 호환성 별도 검사 · 실물 읽기 전용 · 팔 Goal/Torque 금지 · Gripper는 별도 승인 · Hub 쓰기 별도 승인')
+        self.pipeline=QWidget();outer=QVBoxLayout(self.pipeline);outer.setContentsMargins(12,12,12,12);outer.setSpacing(16)
+        header=QWidget();header.setObjectName('dashboardHeader');header_layout=QHBoxLayout(header);title_box=QVBoxLayout();brand=QLabel('SO-101  /  WORKSPACE');brand.setObjectName('eyebrow');title_box.addWidget(brand)
+        self.dashboard_title=QLabel('Source Demo');self.dashboard_title.setObjectName('dashboardTitle');title_box.addWidget(self.dashboard_title);header_layout.addLayout(title_box,1)
+        self.engine_stack=QStackedWidget();self.engine_stack.setMaximumWidth(180);self.engine_stack.setMaximumHeight(50);header_layout.addWidget(self.engine_stack)
+        self.settings_toggle=QPushButton('실행 설정');self.settings_toggle.setCheckable(True);self.settings_toggle.setChecked(True);self.settings_toggle.toggled.connect(self.toggle_settings);header_layout.addWidget(self.settings_toggle);outer.addWidget(header)
+        body=QHBoxLayout();body.setSpacing(16);outer.addLayout(body,1)
+        self.navigation_panel=QWidget();self.navigation_panel.setObjectName('navigationPanel');self.navigation_panel.setFixedWidth(200);nav=QVBoxLayout(self.navigation_panel);label=QLabel('WORKFLOW');label.setObjectName('eyebrow');nav.addWidget(label)
+        self.section=QComboBox();self.section.addItems(['Sim 작업 파이프라인','실물 읽기 / Teleoperation']);nav.addWidget(self.section)
+        self.navigation=QListWidget();self.navigation.setObjectName('stageNavigation');nav.addWidget(self.navigation,1)
+        curate=QPushButton('Data Curation');curate.clicked.connect(lambda:self.navigation.setCurrentRow(5));nav.addWidget(curate)
+        hint=QLabel('단계를 선택하고\n입력을 확인한 뒤 실행하세요.');hint.setObjectName('mutedLabel');hint.setWordWrap(True);nav.addWidget(hint);body.addWidget(self.navigation_panel)
+        self.stack=QStackedWidget();body.addWidget(self.stack,1)
+        self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.workflows['capture']),('Precision Calibration',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.workflows['real_sim'])]
+        self.hardware_tabs={11:0,14:1,12:3};self._last_pipeline_row=1
+        for i,(name,page)in enumerate(self.pages):
+            self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if i in self.hardware_tabs else page)
+            engine=page.engine if isinstance(page,WorkflowPage)else self.workflows['source'].engine if page is self.source_tabs else QWidget()
+            if page is self.source_tabs or isinstance(page,WorkflowPage)and page.stage in ('source','annotation','datagen','simulation_evaluation'):
+                engine.parentWidget().hide()
+            self.engine_stack.addWidget(engine if i not in self.hardware_tabs else QWidget())
+        self.tabs.addTab(self.workflows['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.workflows['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
+        self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(1)
+        self.tabs.setCurrentIndex(0)
+        self.statusBar().showMessage('Scene v8 원본 보존 · 실제 모터 구동 기본 차단 · Hub 쓰기 별도 승인')
+
+    def change_section(self,index):
+        allowed={0,1,3,4,6,7,8,9,10}if index==0 else{2,11,12,13,14}
+        for i in range(self.navigation.count()):self.navigation.item(i).setHidden(i not in allowed)
+        if self.navigation.currentRow()not in allowed:self.navigation.setCurrentRow(min(allowed))
+
+    def select_stage(self,row):
+        if row<0:return
+        if row in self.hardware_tabs:
+            self.tabs.setCurrentIndex(self.hardware_tabs[row]);self.navigation.blockSignals(True);self.navigation.setCurrentRow(self._last_pipeline_row);self.navigation.blockSignals(False);return
+        self._last_pipeline_row=row;self.stack.setCurrentIndex(row);self.tabs.setCurrentIndex(2);name,page=self.pages[row];self.dashboard_title.setText(name)
+        workflow=self.workflows['source']if page is self.source_tabs else page
+        self.settings_toggle.blockSignals(True);self.settings_toggle.setVisible(hasattr(workflow,'settings_scroll'));self.settings_toggle.setChecked(not workflow.settings_scroll.isHidden()if hasattr(workflow,'settings_scroll')else False);self.settings_toggle.blockSignals(False)
+        self.engine_stack.setCurrentIndex(row);self.engine_stack.setVisible(isinstance(workflow,WorkflowPage)and workflow.stage in ('source','annotation','datagen','simulation_evaluation'))
+
+    def toggle_settings(self,visible):
+        page=self.pages[self._last_pipeline_row][1];page=self.workflows['source']if page is self.source_tabs else page
+        if hasattr(page,'settings_scroll'):page.settings_scroll.setVisible(visible)
+
     def closeEvent(self,event):
         active=[page for page in self.workflows.values() if page.active()]
         if active:

@@ -1,6 +1,6 @@
 """Display official ACT loss only; no model, optimizer or custom trainer."""
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPainter,QPen,QPolygonF
+from PyQt6.QtGui import QPainter,QPen,QPolygonF,QColor
 from PyQt6.QtCore import QPointF
 from PyQt6.QtWidgets import QWidget
 
@@ -15,27 +15,30 @@ class LossChart(QWidget):
         self.points=[values[k] for k in sorted(values)];self.update()
     def paintEvent(self,event):
         import math
-        painter=QPainter(self);painter.fillRect(self.rect(),Qt.GlobalColor.white);painter.setPen(Qt.GlobalColor.black);painter.drawText(12,18,'공식 Training Loss')
+        painter=QPainter(self);painter.fillRect(self.rect(),QColor('#17212b'));painter.setPen(QColor('#eeeeee'));painter.drawText(12,18,'공식 Training Loss')
         points=[p for p in self.points if math.isfinite(p['loss'])]
         if not points:painter.drawText(12,48,'공식 loss 로그 대기');return
         minimum=min(p['loss'] for p in points);maximum=max(p['loss'] for p in points);first=points[0]['step'];last=points[-1]['step']
         poly=QPolygonF([QPointF(25+(self.width()-45)*(p['step']-first)/max(1,last-first),30+(self.height()-55)*(maximum-p['loss'])/max(1e-12,maximum-minimum)) for p in points])
-        painter.setPen(QPen(Qt.GlobalColor.blue,2));painter.drawPolyline(poly)
+        painter.setPen(QPen(QColor('#4ed6ba'),2));painter.drawPolyline(poly)
         for point in poly:painter.drawEllipse(point,3,3)
-        painter.setPen(Qt.GlobalColor.black);painter.drawText(12,self.height()-8,f"step {last} · loss {points[-1]['loss']:.6g}")
+        painter.setPen(QColor('#eeeeee'));painter.drawText(12,self.height()-8,f"step {last} · loss {points[-1]['loss']:.6g}")
 
 
 class TrainingSettings(QWidget):
     """Edit only the existing official JSON; save a new file before Recipe reuse."""
     def __init__(self,page):
-        from PyQt6.QtWidgets import QHBoxLayout,QPushButton,QSpinBox,QComboBox,QLabel,QCheckBox,QVBoxLayout,QPlainTextEdit
-        super().__init__(page);self.page=page;self.config=None;layout=QVBoxLayout(self);row=QHBoxLayout();layout.addLayout(row)
-        load=QPushButton('공식 Config 읽기');save=QPushButton('수정 Config 새 파일로 저장')
-        self.steps=QSpinBox();self.steps.setRange(1,10000000);self.batch=QSpinBox();self.batch.setRange(1,65536);self.device=QComboBox();self.device.addItems(['cpu','cuda']);self.model=QComboBox();self.model.setPlaceholderText('설치된 Registry 조회 중');self.pretrained=QCheckBox('SmolVLA 캐시된 VLM 가중치 사용');self.pretrained.setEnabled(False)
-        for widget in (load,QLabel('누적 steps'),self.steps,QLabel('batch'),self.batch,self.device,self.model,self.pretrained,save):row.addWidget(widget)
-        self.policy_json=QPlainTextEdit();self.policy_json.setPlaceholderText('공식 Policy Config JSON · 모델별 실제 필드');self.policy_json.setMaximumHeight(160);layout.addWidget(self.policy_json)
+        from PyQt6.QtWidgets import QFormLayout,QGridLayout,QPushButton,QSpinBox,QComboBox,QLabel,QCheckBox,QVBoxLayout,QPlainTextEdit
+        super().__init__(page);self.page=page;self.config=None;layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
+        load=QPushButton('공식 Config 읽기');save=QPushButton('수정 Config 새 파일로 저장');layout.addWidget(load)
+        form=QFormLayout();form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows);layout.addLayout(form)
+        self.steps=QSpinBox();self.steps.setRange(1,10000000);self.batch=QSpinBox();self.batch.setRange(1,65536);self.device=QComboBox();self.device.addItems(['cpu','cuda']);self.model=QComboBox();self.model.setPlaceholderText('설치 Registry 확인 필요');self.pretrained=QCheckBox('SmolVLA 캐시 VLM 가중치 사용');self.pretrained.setEnabled(False)
+        for label,widget in (('학습 모델',self.model),('누적 Steps',self.steps),('Batch',self.batch),('Device',self.device)):form.addRow(label,widget)
+        self.support_label=QLabel('ACT / SmolVLA / Diffusion: smoke 검증 · 다른 Registry 모델은 별도 입력/의존성 검증 필요');self.support_label.setWordWrap(True);layout.addWidget(self.support_label);layout.addWidget(self.pretrained)
+        config_toggle=QCheckBox('고급: 공식 Policy JSON');layout.addWidget(config_toggle)
+        self.policy_json=QPlainTextEdit();self.policy_json.setPlaceholderText('모델별 실제 공식 Policy Config');self.policy_json.setMaximumHeight(180);self.policy_json.hide();layout.addWidget(self.policy_json);config_toggle.toggled.connect(self.policy_json.setVisible)
         self.policy_json.textChanged.connect(self.edited)
-        create=QPushButton('선택 모델의 공식 기본 Config');row.addWidget(create);create.clicked.connect(self.create)
+        create=QPushButton('선택 모델의 공식 기본 Config');layout.addWidget(create);create.clicked.connect(self.create);layout.addWidget(save)
         from .jobs import BackendJob
         from PyQt6.QtCore import QTimer
         self.job=BackendJob(page.backend_python,self);self.job.finished.connect(self.received);self.operation='catalog'

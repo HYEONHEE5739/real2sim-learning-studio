@@ -38,7 +38,7 @@ class WorkflowPage(QWidget):
         self.editor=RecipeEditor();self.editor.changed.connect(self.invalidate)
         self.input_rows={};self.inputs={}
         def field(layout,label,widget):
-            panel=QWidget();row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(label));row.addWidget(widget);layout.addWidget(panel);return panel
+            panel=QWidget();panel.setObjectName('settingsContent');row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(label));row.addWidget(widget);layout.addWidget(panel);return panel
         self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
         if stage in ('source','annotation','datagen','simulation_evaluation','real_sim'):field(self.form,'Simulation backend',self.engine)
         self.source_kind=None
@@ -49,7 +49,7 @@ class WorkflowPage(QWidget):
         primary={'scene','dataset','source_dataset','device_profile','training_config','policy','checkpoint','repo_id','revision','artifact','calibration_profile','camera_config'}
         for key in keys:
             line=QLineEdit();line.setPlaceholderText(labels[key]);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
-            panel=QWidget();row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(labels[key]));row.addWidget(line)
+            panel=QWidget();panel.setObjectName('settingsContent');row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(labels[key]));row.addWidget(line)
             buttons=QHBoxLayout();row.addLayout(buttons)
             browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));buttons.addWidget(browse)
             if key=='scene':
@@ -93,21 +93,21 @@ class WorkflowPage(QWidget):
             from .hub import HubSettings
             self.hub_settings=HubSettings(self);self.form.addWidget(self.hub_settings)
         settings.addWidget(self.details);settings.addWidget(self.advanced);settings.addStretch()
-        self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True)
+        self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True);self.state.setStyleSheet('background: transparent; padding: 6px;')
         self.action_card=QWidget();self.action_card.setObjectName('actionCard');actions=QHBoxLayout(self.action_card);actions.addWidget(self.state,1);box.addWidget(self.action_card)
         self.start_button=QPushButton({'source':'데모 기록 시작','annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','capture':'Capture 실행 · 읽기 전용'}.get(stage,'선택 단계 실행'));self.start_button.setObjectName('primaryAction')
         self.cancel_button=QPushButton('현재 workflow 중지');self.cancel_button.setObjectName('stopAction');actions.addWidget(self.start_button);actions.addWidget(self.cancel_button)
         self.start_button.setEnabled(False);self.cancel_button.setEnabled(False);self.start_button.clicked.connect(self.start_run);self.cancel_button.clicked.connect(self.cancel_run)
-        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);controls=QHBoxLayout();box.addLayout(controls)
+        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);controls=QGridLayout();box.addLayout(controls)
         if stage=='annotation':
-            controls.addWidget(QLabel('Grasp Frame'));controls.addWidget(self.mark_frame)
-            for kind,text in [('pause','일시정지'),('resume','재생'),('step','한 스텝'),('mark','Grasp 표시'),('skip','Episode 건너뛰기')]:
-                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button);self.commands[kind]=button
+            controls.addWidget(QLabel('Grasp Frame'),1,0);self.mark_frame.setMaximumWidth(110);controls.addWidget(self.mark_frame,1,1)
+            for i,(kind,text) in enumerate([('pause','일시정지'),('resume','재생'),('step','한 스텝'),('mark','Grasp 표시'),('skip','Episode 건너뛰기')]):
+                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button,0,i);self.commands[kind]=button
         if stage=='source':
-            for kind,text in [('save','저장 / 다음 (→)'),('discard','폐기 (←)')]:
-                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button);self.commands[kind]=button
-        self.preview_env=QSpinBox();self.preview_env.setRange(0,0);self.preview_env.valueChanged.connect(self.select_preview)
-        if stage in ('source','annotation','datagen','simulation_evaluation'):controls.addWidget(QLabel('Env'));controls.addWidget(self.preview_env)
+            for i,(kind,text) in enumerate([('save','저장 / 다음 (→)'),('discard','폐기 (←)')]):
+                button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button,0,i);self.commands[kind]=button
+        self.preview_env=QSpinBox();self.preview_env.setMaximumWidth(80);self.preview_env.setRange(0,0);self.preview_env.valueChanged.connect(self.select_preview)
+        if stage in ('source','annotation','datagen','simulation_evaluation'):controls.addWidget(QLabel('Env'),1,3);controls.addWidget(self.preview_env,1,4)
         self.gripper_button=QPushButton('Gripper-Only · 별도 현장 승인 / 팔 5축 금지');self.gripper_button.setEnabled(False);self.gripper_button.clicked.connect(self.approve_gripper)
         if stage in ('real_evaluation','teleoperation'):box.addWidget(self.gripper_button)
         self.media_splitter=QSplitter(Qt.Orientation.Vertical);box.addWidget(self.media_splitter,1)
@@ -120,6 +120,8 @@ class WorkflowPage(QWidget):
                     (self.previews if kind=='real'else self.sim_previews)[n]=label
             else:
                 grid.addWidget(QLabel(('REAL 'if stage in ('capture','real_evaluation')else'SIM ')+n.upper()),0,col);label=CameraView(n.upper()+' — 실행 대기',minimum=(120,90));grid.addWidget(label,1,col);self.previews[n]=label
+        grid.setRowStretch(1,1)
+        if stage=='real_sim':grid.setRowStretch(3,1)
         for label in (*self.previews.values(),*self.sim_previews.values()):label.setStyleSheet('background: #141b23; border-radius: 14px; color: #8b9aaa;')
         self.preview_card.setVisible(stage in ('source','annotation','datagen','simulation_evaluation','capture','real_evaluation','real_sim'))
         self.log_card=QWidget();self.log_card.setObjectName('logCard');log_box=QVBoxLayout(self.log_card);self.media_splitter.addWidget(self.log_card)
@@ -136,6 +138,7 @@ class WorkflowPage(QWidget):
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={}
         support=stage_support(stage)
+        if self.source_kind is not None:self.change_source_kind(self.source_kind.currentIndex())
         if not support['runnable']:self.state.setText(support['reason'])
 
     def show_loss(self):
@@ -227,6 +230,7 @@ class WorkflowPage(QWidget):
             self.task_instruction.setText(data['execution'].get('task_instruction',''))
             self.mode.setCurrentText(data['execution'].get('mode','auto'))
             if hasattr(self,'live_frames'):self.live_frames.setValue(data['execution'].get('max_frames',1))
+            for key,line in self.gripper_fields.items():line.setText(str(data['execution'][key])if key in data['execution']else'')
             names=[o['placement']['function'] for o in data.get('objects',{}).values()]
             self.placement.setCurrentText('Random' if names and all(n=='placement.random_workspace' for n in names) else 'Fixed')
         finally:self._syncing=False
@@ -240,6 +244,7 @@ class WorkflowPage(QWidget):
         except Exception as error:self.edit_error=True;self.invalidate();self.state.setText('Recipe 편집 오류: '+str(error))
     def change_source_kind(self,index):
         live=index==1
+        self.input_rows['source_dataset'].setVisible(not live);self.input_rows['device_profile'].setVisible(live)
         self.inputs['source_dataset'].setEnabled(not live);self.inputs['device_profile'].setEnabled(live)
         if not self._syncing and self.editor.path is not None:
             self.safe_update(lambda data:data['inputs'].pop('source_dataset' if live else 'device_profile',None))

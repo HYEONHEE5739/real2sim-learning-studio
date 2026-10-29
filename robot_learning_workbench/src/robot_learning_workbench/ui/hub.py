@@ -1,11 +1,11 @@
 """Explicit Hub controls on the existing Recipe/Worker page."""
-from PyQt6.QtWidgets import QWidget,QHBoxLayout,QComboBox,QLineEdit,QPushButton,QCheckBox,QLabel,QMessageBox
+from PyQt6.QtWidgets import QWidget,QHBoxLayout,QComboBox,QLineEdit,QPushButton,QCheckBox,QLabel,QMessageBox,QVBoxLayout,QFormLayout
 from .jobs import BackendJob
 
 
 class HubSettings(QWidget):
     def __init__(self,page):
-        super().__init__(page);self.page=page;row=QHBoxLayout(self)
+        super().__init__(page);self.page=page;layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0);row=QVBoxLayout();layout.addLayout(row)
         self.kind=QComboBox();self.kind.addItems(['dataset','model']);self.parent_commit=QLineEdit();self.parent_commit.setPlaceholderText('업로드 대상 parent Commit')
         self.private=QCheckBox('Private Repo');self.confirm=QCheckBox('선택 artifact 업로드 승인');resolve=QPushButton('Revision 명시 Resolve')
         for w in (QLabel('Repo 종류'),self.kind,resolve):row.addWidget(w)
