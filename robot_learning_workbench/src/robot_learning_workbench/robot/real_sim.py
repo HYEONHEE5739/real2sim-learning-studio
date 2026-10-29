@@ -100,11 +100,17 @@ def write_pair(root,manifest,pending,rendered):
     metrics={};sim_files={}
     for image in metadata['images']:
         name=image['camera'];rgb=rendered['images'][name];real=np.asarray(Image.open(shot/image['path']).convert('RGB'));sim='sim_'+name+'.png'
-        Image.fromarray(rgb).save(shot/sim);metadata['files'][sim]=file_sha256(shot/sim);sim_files[name]=sim
+        transport=rendered.get('files',{}).get(name)
+        if transport is not None:
+            if file_sha256(transport['path'])!=transport['sha256']:raise ValueError('Rendered transport bytes changed')
+            if not(shot/sim).exists():os.link(transport['path'],shot/sim)
+            if file_sha256(shot/sim)!=transport['sha256']:raise ValueError('Paired render bytes changed while sharing')
+        else:Image.fromarray(rgb).save(shot/sim)
+        metadata['files'][sim]=file_sha256(shot/sim);sim_files[name]=sim
         # Existing Builder diagnostics emit normalized RGB metrics and visual comparisons.
         metrics[name]={**compare(real,rgb,shot/'comparison'/name,save_inputs=False),'objects':rendered.get('geometry',{}).get(name,[]),'landmark_rmse_px':None,'mask_iou':None,'geometry_status':'UNMEASURED'}
     for path in (shot/'comparison').rglob('*.png'):metadata['files'][path.relative_to(shot).as_posix()]=file_sha256(path)
-    pair={k:v for k,v in rendered.items()if k!='images'};pair.update(schema='real2sim.paired-observation/1',meaning='historical_runtime_baseline_not_ground_truth',
+    pair={k:v for k,v in rendered.items()if k not in('images','files','id','requested_ns','generation','result_latency_ms')};pair.update(schema='real2sim.paired-observation/1',meaning='historical_runtime_baseline_not_ground_truth',
         measurement_basis='follower_feedback',workspace_context=context,sim_q_measured_rad=rendered['applied_sim_joint_rad'],quality={'eligible':not pending['quality'],'warnings':pending['quality'],'physical_verified':False},
         sim_images=sim_files,comparison=metrics,hardware_synchronized=False,source_capture_timestamp_ns=pending['sample']['timestamp_ns'])
     atomic_json(shot/'pair.json',pair);metadata['files']['pair.json']=file_sha256(shot/'pair.json');atomic_json(shot/'metadata.json',metadata)
@@ -154,6 +160,20 @@ class RenderProcess:
                 for n,image in live['images'].items():video._preview_sink('sim_'+n,image,live['generation'],live['sim_timestamp']['monotonic_ns']/1e9,0)
         result=self._read('capture-result.json')if self.capture_id is not None else None
         if result is not None and result['id']==self.capture_id:self.capture_id=None;return result
+
+    def release_capture(self,identifier):
+        # Scratch cleanup cannot turn an already published observation into failure.
+        import shutil
+        from real2sim_builder.scene import identifier as validate_id
+        validate_id(identifier);warnings=[]
+        try:shutil.rmtree(self.root/'captures'/identifier)
+        except FileNotFoundError:pass
+        except OSError as error:warnings.append(str(error))
+        try:
+            path=self.root/'capture-result.json'
+            if path.is_file()and json.loads(path.read_text()).get('id')==identifier:path.unlink()
+        except (OSError,ValueError)as error:warnings.append(str(error))
+        return warnings
 
     def close(self):
         import signal,subprocess
@@ -207,7 +227,7 @@ def rerender(plan,*,events,commands):
             if time.monotonic()>deadline:raise TimeoutError('Candidate render did not finish within180s; measured input preserved')
             result=worker.poll();time.sleep(.05)
         store=SnapshotStore(project,session_id=plan.output_path.name.replace('-','_'),model=model,mapping=mapping)
-        saved=store.finish(pending,rendered=result);atomic_json(plan.output_path/'session-report.json',{'snapshots':[saved],'derived_from':str(source),'hardware_connected':False})
+        saved=store.finish(pending,rendered=result);warnings=worker.release_capture(pending['id']);atomic_json(plan.output_path/'session-report.json',{'snapshots':[saved],'derived_from':str(source),'hardware_connected':False,'cleanup_warnings':warnings})
         events({'kind':'status','payload':{'progress':{'snapshot':saved}}})
         return StageResult('completed',(str(plan.output_path),),0,{'snapshots':1,'hardware_connected':False})
     finally:worker.close()

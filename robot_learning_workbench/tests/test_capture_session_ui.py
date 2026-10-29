@@ -53,3 +53,32 @@ path=p.save(root/'config.yaml');other=DeviceSettings(root);other.load_recipe(pat
 data=other.recipe();assert data['inputs']['device_profile'].endswith('.json')
 assert json.loads(Path(data['inputs']['device_profile']).read_text())['sdk']['port']=='/fixture/port'
 ''',tmp_path)
+
+
+def test_session_identity_controls_and_hidden_pending_activation_are_locked(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication,QInputDialog
+from robot_learning_workbench.ui.app import Window
+app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'workspace');w.show();app.processEvents();p=w.sessions['capture']
+p.client.running=True;p.client.stage='capture_session';p.last_progress={'teleop_active':False};sent=[];p.send=lambda kind,payload=None:sent.append(kind);p.buttons(True)
+assert not p.configuration.isEnabled()and all(not b.isEnabled()for b in p.project_buttons)
+QInputDialog.getText=lambda *a:(_ for _ in()).throw(AssertionError('Must not open Project editor while connected'))
+p.new_project();assert p.project is None
+w.tabs.setCurrentIndex(1);app.processEvents();assert 'teleop_stop'in sent
+p.client.running=False;w.close();app.processEvents()
+''',tmp_path)
+
+
+def test_loaded_configuration_outside_workspace_remains_visible_and_selected(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.app import Window
+app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace');p=w.sessions['capture']
+external=p.settings.save(root/'external'/'selected.yaml');p.settings.load_recipe(external);p.refresh_configurations()
+assert p.configuration.currentData()==str(external)and p.configuration.currentText()=='selected'
+w.close()
+''',tmp_path)

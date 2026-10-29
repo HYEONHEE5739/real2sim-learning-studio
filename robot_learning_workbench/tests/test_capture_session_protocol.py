@@ -24,7 +24,7 @@ def test_session_prepared_identity_pins_project_identity_but_allows_new_evidence
 
 
 def test_session_control_uses_explicit_existing_r03_envelope(tmp_path):
-    for kind,payload in [('session_snapshot',{}),('session_disconnect',{}),('session_finish',{}),('teleop_prepare',{}),('teleop_stop',{}),('session_heartbeat',{'timestamp_ns':1})]:
+    for kind,payload in [('session_snapshot',{}),('session_disconnect',{}),('session_finish',{}),('teleop_prepare',{}),('teleop_stop',{})]:
         assert _command({'command_id':'one','kind':kind,'payload':payload})['kind']==kind
     with pytest.raises(Exception):_command({'command_id':'one','kind':'teleop_start','payload':{'approved':True}})
 

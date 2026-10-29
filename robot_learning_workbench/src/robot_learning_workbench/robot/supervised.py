@@ -18,7 +18,7 @@ class Teleoperation:
             if type(value)not in(int,float)or not np.isfinite(value)or value<=0:raise ValueError('Explicit positive command/follow budgets required')
         self.leader=leader;self.follower=follower;self.bounds=model_bounds;self.session_id=session_id
         self.max_step=max_step_rad;self.max_follow=max_follow_error_rad;self.active=False;self.proposal=None;self.consumed=set()
-        self.last_heartbeat_ns=time.monotonic_ns();self.last_tick_ns=None;self.last_target=None;self.last_raw_goal=None;self.sequence=0
+        self.last_heartbeat_ns=time.monotonic_ns();self.last_tick_ns=None;self.last_target=None;self.last_raw_goal=None;self.sequence=0;self.last_attempt=None
 
     def heartbeat(self):self.last_heartbeat_ns=time.monotonic_ns()
 
@@ -76,7 +76,7 @@ class Teleoperation:
 
     def tick(self):
         if not self.active:raise DeviceError('teleoperation','No approved active Teleoperation',effect='not_applied')
-        send_attempted=False
+        send_attempted=False;attempt=None
         try:
             now=time.monotonic_ns()
             if now-self.last_heartbeat_ns>1_500_000_000 or now-self.last_tick_ns>200_000_000:raise ValueError('Stale session heartbeat/control cycle')
@@ -87,15 +87,19 @@ class Teleoperation:
             begin=time.monotonic_ns()
             if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:raise ValueError('Stale feedback/Leader command')
             raw=dict(self.follower.last_encoded_goal_raw);duplicate=raw==self.last_raw_goal
+            attempt=dict(sequence=self.sequence+1,requested_model_rad=details['requested_model_rad'],target_payload_rad=target.tolist(),sdk_goal_raw=raw,
+                         measured_model_rad=q.tolist(),feedback_interval=feedback,leader_interval=leader_interval,send_begin_ns=begin,command_sent=False,effect='not_applied')
+            self.last_attempt=attempt
             if not duplicate:
                 # Encoding already ran strict model/motor/Precision/SDK checks.
                 send_attempted=True;returned=self.follower.device.send_action({n+'.pos':command[n]for n in JOINTS})
                 if returned!={n+'.pos':command[n]for n in JOINTS}:raise ValueError('SDK changed the preflighted target')
-            end=time.monotonic_ns()
+            end=time.monotonic_ns();attempt.update(send_end_ns=end,send_latency_s=(end-begin)/1e9,command_sent=not duplicate,effect='sdk_returned'if not duplicate else'not_applied')
             if end-now>200_000_000:raise ValueError('Control/send deadline exceeded; no further goals')
             self.last_tick_ns=end;self.sequence+=1;self.last_target=target;self.last_raw_goal=raw
             return dict(sequence=self.sequence,timestamp_ns=feedback['end']['monotonic_ns'],measured_model_rad=q.tolist(),requested_model_rad=details['requested_model_rad'],
                         applied_model_rad=target.tolist(),saturation=details['saturation'],sdk_goal_raw=raw,command_sent=not duplicate,duplicate_suppressed=duplicate,
                         feedback_interval=feedback,leader_interval=leader_interval,send_latency_s=(end-begin)/1e9,follow_error_rad=(q-target).tolist())
         except Exception as error:
+            if attempt is not None:attempt.update(command_sent='unknown'if send_attempted else False,effect='unknown'if send_attempted else'not_applied',error=str(error),send_end_ns=time.monotonic_ns())
             self.stop();raise DeviceError('teleoperation',str(error),effect='unknown'if send_attempted else'not_applied')from error

@@ -17,7 +17,7 @@ class HardwareSession:
         self.plan=plan;self.devices=devices;self.cameras=cameras;self.events=events;self.renderer=renderer
         self.state='DISCONNECTED';self.terminal=False;self.closing=False;self.cancelled=False;self.finished=False;self.snapshots=[];self.pending=None;self.pending_command=None
         self.history=deque(maxlen=180);self.packets={};self.stability=Stability();self.last_heartbeat=time.monotonic_ns();self.capture_error='연결 후 안정된 관측을 기다립니다';self.seen=set()
-        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.acquiring=None;self.acquire_deadline=0
+        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.pending_render=None;self.acquiring=None;self.acquire_deadline=0
         self.project=Project(plan.resolved_inputs['project']['root']);self.session_id=plan.output_path.name.replace('-','_')
         self.store=SnapshotStore(self.project,session_id=self.session_id,model=plan.resolved_inputs['robot_model']['path'],mapping=devices['follower'].precision_mapper.metadata())
         settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,max_step_rad=settings['max_command_step_rad'],max_follow_error_rad=settings['max_follow_error_rad'])
@@ -88,10 +88,7 @@ class HardwareSession:
         self.seen.add(key);kind=command['kind'];payload=command['payload']
         try:
             if self.terminal:self.ack(command,'rejected','Session is disconnected');return
-            if kind=='session_heartbeat':
-                if abs(time.monotonic_ns()-payload['timestamp_ns'])>1_000_000_000:raise ValueError('Stale UI heartbeat')
-                self.last_heartbeat=time.monotonic_ns();self.teleoperation.heartbeat()
-            elif kind in('cancel','session_disconnect','session_finish'):
+            if kind in('cancel','session_disconnect','session_finish'):
                 self.cancelled=kind=='cancel';self.finished=kind=='session_finish';self.close()
             elif kind=='teleop_prepare':
                 from .telemetry import Recorder
@@ -104,14 +101,15 @@ class HardwareSession:
                 self.read_observation();self.acquiring=command;self.acquire_deadline=time.monotonic()+5;self.state='CAPTURING'
                 self.try_capture();self.emit();return
             elif kind=='session_import':
-                if self.saving is not None:raise ValueError('Snapshot save is still running; retry after failure')
+                if self.saving is not None or self.pending_command is not None:raise ValueError('Capture/render/save is still running; retry after failure')
                 if self.pending is None or self.pending['id']!=payload['snapshot_id']:raise ValueError('No recoverable pending capture')
-                self.pending_command=command;self.complete_capture();return
+                self.pending_command=command;self.complete_capture(self.pending_render);return
             else:raise ValueError('Command is not supported by this Session')
             self.ack(command)
         except Exception as error:
             if self.terminal:
                 self.ack(command,'rejected',str(error));raise
+            if isinstance(error,DeviceError):self.teleoperation.stop()
             self.state='TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.ack(command,'rejected',str(error));self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
 
     def try_capture(self):
@@ -126,6 +124,7 @@ class HardwareSession:
             command=self.acquiring;self.acquiring=None;self.state='TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.ack(command,'rejected','정합된 관측을5초 안에 얻지 못했습니다: '+self.capture_error)
 
     def complete_capture(self,rendered=None):
+        if rendered is not None:self.pending_render=rendered
         self.saving=self.writer.submit(self.store.finish,self.pending,rendered=rendered);self.save_phase='finish'
 
     def poll_capture(self):
@@ -141,7 +140,11 @@ class HardwareSession:
                 if self.renderer is None:self.complete_capture()
                 else:self.renderer.capture(self.pending)
             else:
-                self.snapshots.append(result);self.pending=None;self.ack(self.pending_command);self.pending_command=None
+                self.snapshots.append(result)
+                if self.renderer is not None:
+                    warnings=self.renderer.release_capture(self.pending['id'])
+                    if warnings:self.events({'kind':'log','payload':{'level':'warning','message':'Render IPC cleanup: '+str(warnings)}})
+                self.pending=None;self.pending_render=None;self.ack(self.pending_command);self.pending_command=None
                 self.state='DISCONNECTING'if self.closing else'TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.emit(snapshot=result)
         except Exception as error:
             self.ack(self.pending_command,'rejected',str(error));self.pending_command=None;self.state='OBSERVING';self.teleoperation.stop();self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
@@ -201,5 +204,5 @@ def run(plan,*,events,commands):
     finally:
         try:session.close()
         finally:atomic_json(plan.output_path/'session-report.json',dict(state=session.state,error=error,project_id=session.project.info['id'],snapshots=session.snapshots,
-            pending_snapshot=session.pending,device_source=plan.effective_settings['execution']['device_source'],motion_verified=False,stop_policy='preserve_torque_no_new_goal'))
+            pending_snapshot=session.pending,teleoperation_last_attempt=session.teleoperation.last_attempt,device_source=plan.effective_settings['execution']['device_source'],motion_verified=False,stop_policy='preserve_torque_no_new_goal'))
     return StageResult('cancelled'if session.cancelled else'completed',(str(plan.output_path),),0,{'snapshots':len(session.snapshots),'disconnected':True,'task_finished':session.finished})

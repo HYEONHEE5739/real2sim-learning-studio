@@ -292,7 +292,7 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
 
 
 _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
-_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'session_heartbeat':{'timestamp_ns'},'teleop_prepare':set(),'teleop_stop':set(),
+_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':set(),'teleop_stop':set(),
                    'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque'},'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
 
@@ -302,7 +302,6 @@ def _command(command):
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
     if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
-    if kind=='session_heartbeat'and(type(payload['timestamp_ns'])is not int or payload['timestamp_ns']<1):_fail('PROTOCOL_INVALID',kind,'host monotonic timestamp required')
     if kind=='session_import':_identifier(payload['snapshot_id'])
     if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
     if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')

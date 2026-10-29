@@ -92,7 +92,9 @@ def test_delayed_sdk_send_blocks_subsequent_goals_even_after_fresh_heartbeat(tmp
         def slow(packet):time.sleep(.21);return real(packet)
         monkeypatch.setattr(f.device,'send_action',slow)
         with pytest.raises(Exception,match='deadline|delay'):c.tick()
-        assert not c.active;c.heartbeat()
+        assert not c.active
+        assert c.last_attempt['effect']=='unknown'and c.last_attempt['command_sent']=='unknown'and len(c.last_attempt['target_payload_rad'])==6
+        c.heartbeat()
         with pytest.raises(Exception,match='approved'):c.tick()
         assert ft.count('send')==1
     finally:l.close();f.close()

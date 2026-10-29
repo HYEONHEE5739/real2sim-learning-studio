@@ -97,3 +97,19 @@ def test_pair_registration_and_rerender_keep_real_bytes_and_original_identity(tm
         assert load_session(two['path'])[0]['derived_from']['manifest_sha256']==file_sha256(original/'capture_manifest.yaml')
         assert len(project.evidence['capture_sessions'])==2
     finally:f.close()
+
+
+def test_pair_transport_image_is_shared_and_ipc_paths_are_not_published(tmp_path):
+    from robot_learning_workbench.robot.real_sim import write_pair
+    from robot_learning_workbench.data.native import atomic_json,file_sha256
+    from PIL import Image
+    root=tmp_path/'pending';shot=root/'shots/one';shot.mkdir(parents=True);rgb=np.full((480,640,3),90,np.uint8)
+    files={};images=[];transport=tmp_path/'renderer';transport.mkdir()
+    for name in('side','wrist'):
+        Image.fromarray(rgb).save(shot/(name+'.png'));Image.fromarray(rgb).save(transport/(name+'.png'))
+        files[name]={'path':str(transport/(name+'.png')),'sha256':file_sha256(transport/(name+'.png'))};images.append({'camera':name,'path':name+'.png'})
+    atomic_json(shot/'metadata.json',{'images':images,'files':{}});manifest={'project_id':'fixture','snapshots':[{'path':'shots/one'}]};pending={'sample':{'q_measured':[0.]*6,'timestamp_ns':1},'quality':[]}
+    result={'images':dict.fromkeys(('side','wrist'),rgb),'files':files,'measured_q_rad':[0.]*6,'applied_sim_joint_rad':[0.]*6,'candidate_identity':{'candidate_sha256':'a'*64},'engine':'mujoco','sim_timestamp':{'monotonic_ns':2},'sim_cameras':{},'joint_mapping':{}}
+    write_pair(root,manifest,pending,result)
+    assert (shot/'sim_side.png').stat().st_ino==(transport/'side.png').stat().st_ino
+    pair=json.loads((shot/'pair.json').read_text());assert 'files'not in pair

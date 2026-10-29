@@ -13,7 +13,7 @@ from .jobs import BackendJob
 
 class SessionPage(QWidget):
     def __init__(self,kind,python,modules,workspace,parent=None):
-        super().__init__(parent);self.setObjectName('sessionPage');self.setStyleSheet('\nQWidget#sessionPage QLabel { background: transparent; }\nQWidget#sessionPage QLabel#jointCard { background: #242d3a; border-radius: 8px; padding: 8px 4px; }\nQWidget#sessionPage QPushButton { padding: 7px 10px; border-radius: 8px; }\nQWidget#sessionPage QLabel#dashboardTitle { font-size: 23px; padding: 0; }\nQWidget#sessionPage QPushButton#primaryAction:disabled { background: #263b37; color: #7c9690; border-color: #3d5550; }\n');self.kind=kind;self.workspace=Path(workspace);self.project=None;self.rows=[];self.proposal=None;self.last_progress={};self.finishing=False
+        super().__init__(parent);self.setObjectName('sessionPage');self.setStyleSheet('\nQWidget#sessionPage QLabel { background: transparent; }\nQWidget#sessionPage QLabel#jointCard { background: #242d3a; border-radius: 8px; padding: 8px 4px; }\nQWidget#sessionPage QPushButton { padding: 7px 10px; border-radius: 8px; }\nQWidget#sessionPage QLabel#dashboardTitle { font-size: 23px; padding: 0; }\nQWidget#sessionPage QPushButton#primaryAction:disabled { background: #263b37; color: #7c9690; border-color: #3d5550; }\n');self.kind=kind;self.workspace=Path(workspace);self.project=None;self.rows=[];self.proposal=None;self.last_progress={};self.finishing=False;self.approval_dialog=None;self.project_buttons=[]
         self.client=SessionClient(python,modules,self);self.settings=DeviceSettings(workspace,self);self.job=BackendJob(python,self);self.job.finished.connect(self.project_result)
         self.client.progress.connect(self.update_progress);self.client.received.connect(self.event_received);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.terminal.connect(self.ended)
         layout=QVBoxLayout(self);layout.setSpacing(6)
@@ -22,7 +22,7 @@ class SessionPage(QWidget):
         project_row=QHBoxLayout();layout.addLayout(project_row);project_row.addWidget(QLabel('Builder Project'))
         self.project_combo=QComboBox();self.project_combo.setMinimumWidth(220);project_row.addWidget(self.project_combo,1)
         for label,fn in [('열기',self.choose_project),('새 프로젝트',self.new_project)]:
-            button=QPushButton(label);button.clicked.connect(fn);project_row.addWidget(button)
+            button=QPushButton(label);button.clicked.connect(fn);project_row.addWidget(button);self.project_buttons.append(button)
         self.project_path=QLabel('Project를 선택하세요');self.project_path.setObjectName('mutedLabel');project_row.addWidget(self.project_path,1)
         self.project_combo.currentIndexChanged.connect(self.select_project)
         body=QHBoxLayout();layout.addLayout(body,1);left=QVBoxLayout();left.setSpacing(6);body.addLayout(left,4);side=QWidget();side.setObjectName('navigationPanel');side.setMaximumWidth(310);right=QVBoxLayout(side);body.addWidget(side,1)
@@ -57,7 +57,7 @@ class SessionPage(QWidget):
         self.device_state=QLabel('Leader / Follower / Camera\n연결되지 않음');self.device_state.setWordWrap(True);right.addWidget(self.device_state)
         self.candidate_combo=QComboBox();self.engine=QComboBox();self.engine.addItems(['isaaclab','mujoco'])
         if kind=='real_sim':
-            right.addWidget(QLabel('Simulation · 검토 중 Candidate'));right.addWidget(self.candidate_combo);refresh=QPushButton('후보 새로고침');refresh.clicked.connect(self.refresh_project);right.addWidget(refresh);right.addWidget(QLabel('렌더 엔진'));right.addWidget(self.engine)
+            right.addWidget(QLabel('Simulation · 검토 중 Candidate'));right.addWidget(self.candidate_combo);refresh=QPushButton('후보 새로고침');refresh.clicked.connect(self.refresh_project);right.addWidget(refresh);self.project_buttons.append(refresh);right.addWidget(QLabel('렌더 엔진'));right.addWidget(self.engine)
             self.rerender_button=QPushButton('선택 Capture를 현재 후보로 재렌더');self.rerender_button.clicked.connect(self.rerender);right.addWidget(self.rerender_button)
         right.addStretch(1);self.session_label=QLabel('세션 없음');self.session_label.setWordWrap(True);right.addWidget(self.session_label)
         note=QLabel('원본 RGB 640×480 저장\n수신 시각 기준 정합\nScene/물리 Calibration 자동 승인 없음\n\n중지/해제: 새 Goal 차단, Torque 유지\n현장 전원 차단 수단을 확보하세요');note.setWordWrap(True);note.setObjectName('mutedLabel');right.addWidget(note)
@@ -68,12 +68,16 @@ class SessionPage(QWidget):
     def buttons(self,connected):
         self.connect_button.setEnabled(not self.active()and self.project is not None and self.settings.saved_recipe is not None)
         for b in(self.start_teleop_button,self.capture_button,self.stop_teleop_button,self.disconnect_button,self.finish_button):b.setEnabled(connected)
+        for button in self.project_buttons:button.setEnabled(not self.active())
+        self.configuration.setEnabled(not self.active())
         self.settings_button.setEnabled(not self.active());self.project_combo.setEnabled(not self.active());self.engine.setEnabled(not self.active());self.candidate_combo.setEnabled(not self.active())
     def refresh_configurations(self):
         selected=str(self.settings.saved_recipe)if self.settings.saved_recipe else None
         self.configuration.blockSignals(True);self.configuration.clear()
         for p in sorted((self.workspace/'configuration').glob('*.yaml')):self.configuration.addItem(p.stem,str(p))
-        if selected:self.configuration.setCurrentIndex(self.configuration.findData(selected))
+        if selected:
+            if self.configuration.findData(selected)<0:self.configuration.addItem(Path(selected).stem,selected)
+            self.configuration.setCurrentIndex(self.configuration.findData(selected))
         self.configuration.blockSignals(False)
     def select_configuration(self):
         if self.active():return
@@ -88,9 +92,11 @@ class SessionPage(QWidget):
             except Exception as error:self.show_error(str(error))
         self.settings.exec();self.refresh_configurations();self.buttons(False)
     def choose_project(self):
+        if self.active():return
         path=QFileDialog.getExistingDirectory(self,'Builder Project 선택',str(self.workspace/'scenes'))
         if path:self.load_project(path)
     def new_project(self):
+        if self.active():return
         name,ok=QInputDialog.getText(self,'새 Builder Project','Project 이름')
         if ok and name:self.job.start('session_new_project',directory=str(self.workspace/'scenes'),name=name)
     def load_project(self,path):
@@ -100,8 +106,10 @@ class SessionPage(QWidget):
         path=self.project_combo.itemData(index)
         if path and(self.project is None or path!=self.project['project']):self.load_project(path)
     def refresh_project(self):
+        if self.active():return
         if self.project:self.load_project(self.project['project'])
     def project_result(self,response):
+        if self.active():self.show_error('연결 중 Project 변경 결과를 적용하지 않습니다');return
         if not response.get('ok'):self.show_error(response.get('error',{}).get('message','Project error'));return
         data=response['result']
         if 'project'not in data:return
@@ -131,6 +139,9 @@ class SessionPage(QWidget):
         except Exception as error:self.show_error(str(error))
     def finish(self):self.finishing=True;self.send('session_finish')
     def update_progress(self,progress):
+        if getattr(self.client,'stage',None)=='paired_rerender':
+            if 'snapshot'in progress:self.add_snapshot(progress['snapshot'])
+            self.state.setText('Candidate 재렌더 · 장치 연결 없음');self.buttons(False);return
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText(state)
         self.start_teleop_button.setEnabled(connected and not p.get('teleop_active',False));self.stop_teleop_button.setEnabled(connected and p.get('teleop_active',False));self.capture_button.setEnabled(connected and p.get('capture_ready',False));self.capture_hint.setText(p.get('capture_reason',''))
         q=p.get('q_measured')
@@ -147,7 +158,8 @@ class SessionPage(QWidget):
         if 'teleop_proposal'in progress:self.approve(progress['teleop_proposal'])
         if progress.get('error'):self.show_error(progress['error'])
     def approve(self,proposal):
-        self.proposal=proposal;dialog=QDialog(self);dialog.setWindowTitle('현장 감독 Teleoperation 승인');box=QVBoxLayout(dialog)
+        if not self.isVisible():self.send('teleop_stop');return
+        self.proposal=proposal;dialog=QDialog(self);self.approval_dialog=dialog;dialog.setWindowTitle('현장 감독 Teleoperation 승인');box=QVBoxLayout(dialog)
         label=QLabel('6축 구동 권한을 현재 연결에만 부여합니다. 중지/해제는 새 Goal을 차단하고 Torque를 유지합니다.\n현재 자세·Goal·방향·범위 및 전원 차단 수단을 현장에서 확인하세요.');label.setWordWrap(True);box.addWidget(label)
         detail=QPlainTextEdit(json.dumps(proposal,ensure_ascii=False,indent=2));detail.setReadOnly(True);box.addWidget(detail);checks={}
         for key,text in [('supervised','현장에서 직접 감독합니다'),('clear','충돌 위험과 주변 장애물을 확인했습니다'),('stop_ready','즉시 전원 차단 수단이 준비됐습니다'),('direction_checked','Leader/Follower 명령 방향을 확인했습니다'),('ranges_checked','현재 관절과 승인 이동 범위를 확인했습니다'),('preserve_torque','중지 시 Torque 유지 정책을 확인했습니다')]:
@@ -155,7 +167,8 @@ class SessionPage(QWidget):
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False);box.addWidget(buttons)
         for c in checks.values():c.toggled.connect(lambda:buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(all(c.isChecked()for c in checks.values())))
         buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject)
-        if dialog.exec()==QDialog.DialogCode.Accepted:self.send('teleop_start',{'proposal_sha256':proposal['sha256'],**{k:c.isChecked()for k,c in checks.items()}})
+        if dialog.exec()==QDialog.DialogCode.Accepted and self.isVisible():self.send('teleop_start',{'proposal_sha256':proposal['sha256'],**{k:c.isChecked()for k,c in checks.items()}})
+        self.approval_dialog=None
     def event_received(self,event):
         if event['kind']in('error','log')or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':self.show_error(json.dumps(event['payload'],ensure_ascii=False))
     def show_preview(self,camera,raw):
@@ -189,5 +202,6 @@ class SessionPage(QWidget):
         data={'schema_version':1,'stage':'paired_rerender','engine':self.engine.currentText(),'inputs':{'project':self.project['project'],'candidate':self.candidate_combo.currentData(),'capture_session':source},'execution':{},'output':{'directory':str(root/key)}}
         path.write_text(yaml.safe_dump(data,sort_keys=False));self.client.connect_session(path);self.buttons(False);self.state.setText('Candidate 재렌더 · 장치 연결 없음')
     def hideEvent(self,event):
-        if self.client.running and self.last_progress.get('teleop_active'):self.send('teleop_stop')
+        if self.approval_dialog is not None:self.approval_dialog.reject()
+        if self.client.running and self.client.stage in ('capture_session','paired_session'):self.send('teleop_stop')
         super().hideEvent(event)
