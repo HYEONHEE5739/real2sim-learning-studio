@@ -23,6 +23,11 @@ class Teleoperation:
 
     def heartbeat(self):self.last_heartbeat_ns=time.monotonic_ns()
 
+    def configuration_issue(self):
+        if self.max_step is None or self.max_follow is None:
+            return 'Teleoperation: 명령 변화·추종 오차 제한 미설정 — 장치 설정의 고급 구성에서 max_command_step_rad(rad/주기), max_follow_error_rad(rad)를 검토·저장한 뒤 다시 연결하세요. 관측/Capture에는 필요하지 않습니다.'
+        return ''
+
     def feedback(self):
         native,interval=self.follower.read();q=observed_positions(self.follower.precision_mapper,native,raw=self.follower.last_raw,motor_specs=self.follower.motor_specs)
         return native,interval,np.array([q[n]for n in JOINTS])
@@ -47,7 +52,7 @@ class Teleoperation:
                     follower_identity=self.follower.identity,leader_identity=self.leader.identity,follower_mapping=self.follower.precision_mapper.metadata()['sha256'],leader_mapping=self.leader.precision_mapper.metadata()['sha256'])
 
     def propose(self):
-        if self.max_step is None or self.max_follow is None:raise ValueError('Explicit reviewed command/follow budget required before motion; observation needs none')
+        if self.configuration_issue():raise ValueError('Explicit reviewed command/follow budget required before motion; observation needs none')
         if self.active:raise ValueError('Teleoperation already active')
         state=self._start_state();now=time.monotonic_ns()
         self.proposal={'session_id':self.session_id,'nonce':uuid.uuid4().hex,'state':state,'expires_ns':now+30_000_000_000,

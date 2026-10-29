@@ -109,7 +109,8 @@ def run(plan,*,events,commands):
     from ..data import video
     verify_prepared_inputs(plan);devices,cameras=construct(plan);project=Project(plan.resolved_inputs['project']['root']);plan.output_path.mkdir()
     last_heartbeat=time.monotonic_ns();rows=[];sequences={};pending=None;cancelled=False;error=None
-    def emit(**p):events({'kind':'status','payload':{'progress':{'session_state':'OBSERVING','teleop_active':False,'device_source':'hardware','teleoperation_available':False,**p}}})
+    def emit(**p):events({'kind':'status','payload':{'progress':{'session_state':'OBSERVING','teleop_active':False,'device_source':'hardware','teleoperation_available':False,
+        'teleoperation_reason':'관측 전용 구성 · Teleoperation에는 검증된 Model/Precision 결합과 명령 제한이 필요합니다.','capture_request_allowed':pending is None,'capture_pending':pending is not None,**p}}})
     def ack(c,status='completed',reason=None):events({'kind':'command_ack','payload':{'command_id':c['command_id'],'status':status,**({'reason':reason}if reason else{})}})
     try:
         for d in devices.values():d.connect()

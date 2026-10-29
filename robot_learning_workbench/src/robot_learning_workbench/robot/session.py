@@ -23,7 +23,11 @@ class HardwareSession:
         settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,max_step_rad=settings.get('max_command_step_rad'),max_follow_error_rad=settings.get('max_follow_error_rad'))
 
     def emit(self,**progress):
-        self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'teleop_active':self.teleoperation.active,'snapshots':len(self.snapshots),**progress}}})
+        pending=self.acquiring is not None or self.pending is not None or self.saving is not None
+        reason=self.teleoperation.configuration_issue()
+        allowed=not self.terminal and not self.closing and self.state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE')and not pending
+        self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'teleop_active':self.teleoperation.active,
+            'teleoperation_available':not reason,'teleoperation_reason':reason,'capture_request_allowed':allowed,'capture_pending':pending,'snapshots':len(self.snapshots),**progress}}})
 
     def ack(self,command,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':status,**({'reason':reason}if reason else{})}})
@@ -59,13 +63,25 @@ class HardwareSession:
     def capture_ready(self):
         self.capture_error=''
         if self.pending is not None or self.saving is not None:self.capture_error='Pair 렌더/저장 중';return False
-        if not self.history or not self.stability.assess().get('stable'):self.capture_error='안정된 Follower 관측을 기다립니다';return False
+        stability=self.stability.assess()
+        if not self.history or not stability.get('stable'):
+            if stability.get('reason')in('insufficient_history','warming_up'):
+                self.capture_error='Follower 자세 안정 확인 중 · 최소0.6초의 연속 관측이 필요합니다'
+            else:
+                limits=stability.get('thresholds',{})
+                self.capture_error=f"Follower 자세 안정 대기 · 관절 변화 {stability.get('arm_span_deg',0):.2f}°/{limits.get('arm_span_deg',1.):.2f}°, 그리퍼 {stability.get('gripper_span_percentage_points',0):.2f}/{limits.get('gripper_span',2.):.2f}%p, 측정 간격 {stability.get('max_gap_ms',0):.0f}ms/100ms"
+            return False
         t=self.history[-1]['timestamp_ns'];now=time.monotonic_ns()
-        window=[r['timestamp_ns']for r in self.history if r['timestamp_ns']>=self.stability.assess()['window_start_ns']]
-        if any(b-a>100_000_000 for a,b in zip(window,window[1:])):self.capture_error='측정 간격100ms 초과 · 연속 feedback 대기';return False
+        window=[r['timestamp_ns']for r in self.history if r['timestamp_ns']>=stability['window_start_ns']]
+        gap=max((b-a for a,b in zip(window,window[1:])),default=0)
+        if gap>100_000_000:self.capture_error=f'관절 측정 간격 {gap/1e6:.0f}ms >100ms · 연속 Follower 관측 대기';return False
         for name,p in self.packets.items():
-            if p is None or now-p['read_end']['monotonic_ns']>200_000_000 or abs(t-p['read_end']['monotonic_ns'])>100_000_000:self.capture_error=name+': stale/skew, 재촬영 필요';return False
-            if p['sequence']<=self.store.last_sequences.get(name,-1):self.capture_error=name+': 새 frame 대기';return False
+            label=name.title()
+            if p is None:self.capture_error=label+' 영상 수신 대기';return False
+            age=now-p['read_end']['monotonic_ns'];skew=abs(t-p['read_end']['monotonic_ns'])
+            if age>200_000_000:self.capture_error=f'{label} 영상 age {age/1e6:.0f}ms >200ms · 새 프레임 대기';return False
+            if skew>100_000_000:self.capture_error=f'{label} 영상↔관절 시간차 {skew/1e6:.0f}ms >100ms · 새 프레임 대기';return False
+            if p['sequence']<=self.store.last_sequences.get(name,-1):self.capture_error=label+': 새 프레임 대기';return False
         return True
 
     def dispatch(self,commands):
@@ -91,9 +107,10 @@ class HardwareSession:
             if kind in('cancel','session_disconnect','session_finish'):
                 self.cancelled=kind=='cancel';self.finished=kind=='session_finish';self.close()
             elif kind=='teleop_prepare':
+                proposal=self.teleoperation.propose()
                 from .telemetry import Recorder
                 if not hasattr(self,'recorder'):self.recorder=Recorder(self.plan,self.devices['follower'])
-                proposal=self.teleoperation.propose();self.state='TELEOP_READY';self.emit(teleop_proposal=proposal)
+                self.state='TELEOP_READY';self.emit(teleop_proposal=proposal)
             elif kind=='teleop_start':self.teleoperation.start(payload);self.state='TELEOP_ACTIVE';self.emit()
             elif kind=='teleop_stop':self.teleoperation.stop();self.state='OBSERVING';self.emit()
             elif kind=='session_snapshot':

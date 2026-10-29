@@ -47,6 +47,8 @@ class SessionPage(QWidget):
         for i,b in enumerate((self.connect_button,self.start_teleop_button,self.stop_teleop_button,self.capture_button)):actions.addWidget(b,0,i)
         actions.addWidget(self.disconnect_button,1,0,1,2);actions.addWidget(self.finish_button,1,2,1,2)
         self.capture_hint=QLabel('저장된 장치 설정과 Project가 필요합니다');self.capture_hint.setWordWrap(True);left.addWidget(self.capture_hint)
+        self.teleop_hint=QLabel();self.teleop_hint.setWordWrap(True);self.teleop_hint.setObjectName('mutedLabel');left.addWidget(self.teleop_hint);self.teleop_hint.hide()
+        self.operation_message=QLabel();self.operation_message.setWordWrap(True);left.addWidget(self.operation_message);self.operation_message.hide()
         left.addWidget(QLabel('Snapshot 목록 · 더블 클릭하면 원본/비교 상세를 엽니다'if kind=='capture'else'Paired Capture 목록 · 원본 Real은 유지됩니다'))
         headers=['#','시간','Side','Wrist','관절 상태 (rad)','품질','상태']if kind=='capture'else['#','시간','Real Side','Sim Side','Real Wrist','Sim Wrist','관절 상태 (rad)','품질','상태']
         self.q_column=4 if kind=='capture'else 6;self.thumbnail_columns={2:'side',3:'wrist'}if kind=='capture'else{2:'side',3:'sim_side',4:'wrist',5:'sim_wrist'}
@@ -72,7 +74,12 @@ class SessionPage(QWidget):
         from PyQt6.QtCore import QProcess
         idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
         self.connect_button.setEnabled(idle and self.project is not None and self.settings.saved_recipe is not None)
-        for b in(self.start_teleop_button,self.capture_button,self.stop_teleop_button,self.disconnect_button,self.finish_button):b.setEnabled(connected)
+        progress=self.last_progress
+        self.start_teleop_button.setEnabled(connected and progress.get('teleoperation_available',False)and not progress.get('teleop_active',False))
+        self.stop_teleop_button.setEnabled(connected and progress.get('teleop_active',False))
+        self.capture_button.setEnabled(connected and progress.get('capture_request_allowed',False))
+        self.capture_button.setText('촬영 처리 중…'if connected and progress.get('capture_pending',False)else'현재 자세 Capture'if self.kind=='capture'else'Real / Sim Capture')
+        for b in(self.disconnect_button,self.finish_button):b.setEnabled(connected)
         for button in self.project_buttons:button.setEnabled(idle)
         self.settings.configuration.setEnabled(idle);self.materials.setEnabled(idle)
         self.settings_button.setEnabled(idle);self.project_combo.setEnabled(idle);self.engine.setEnabled(idle);self.candidate_combo.setEnabled(idle)
@@ -138,11 +145,14 @@ class SessionPage(QWidget):
                 if not self.candidate_combo.currentData():raise ValueError('검토할 Scene Candidate를 선택하세요')
                 data['inputs']['candidate']=self.candidate_combo.currentData();data['engine']=self.engine.currentText()
             else:data.pop('engine',None);data['inputs'].pop('candidate',None)
+            self.last_progress={};self.operation_message.clear();self.operation_message.hide();self.teleop_hint.hide()
             key='session_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/('capture'if self.kind=='capture'else'real_sim');root.mkdir(exist_ok=True)
             data['output']={'directory':str(root/key)};path=root/(key+'.yaml');path.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True));self.session_label.setText(key);self.client.connect_session(path);self.buttons(False);self.state.setText('입력 검사 / CONNECTING')
         except Exception as error:self.show_error(str(error))
     def send(self,kind,payload=None):
-        try:return self.client.send(kind,payload)
+        try:
+            if kind in('teleop_prepare','session_snapshot'):self.operation_message.clear();self.operation_message.hide()
+            return self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
     def finish(self):self.finishing=True;self.send('session_finish')
     def update_progress(self,progress):
@@ -150,7 +160,9 @@ class SessionPage(QWidget):
             if 'snapshot'in progress:self.add_snapshot(progress['snapshot'])
             self.state.setText('Candidate 재렌더 · 장치 연결 없음');self.buttons(False);return
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText(state)
-        self.start_teleop_button.setEnabled(connected and p.get('teleoperation_available',True)and not p.get('teleop_active',False));self.stop_teleop_button.setEnabled(connected and p.get('teleop_active',False));self.capture_button.setEnabled(connected and p.get('capture_ready',False));self.capture_hint.setText(p.get('capture_reason',''))
+        reason=p.get('capture_reason','')
+        self.capture_hint.setText(reason+' · 촬영을 요청하면 최대5초 동안 정합을 기다립니다'if reason and not p.get('capture_pending',False)else reason or'촬영 요청 시 최신 영상·관절 정합을 다시 확인합니다')
+        teleop_reason=p.get('teleoperation_reason','');self.teleop_hint.setText(teleop_reason);self.teleop_hint.setVisible(connected and bool(teleop_reason));self.start_teleop_button.setToolTip(teleop_reason)
         q=p.get('q_measured')
         if q:
             for label,value in zip(self.joint_labels,q):label.setText(label.text().split('\n')[0]+f'\n{value:.4f} rad\n{math.degrees(value):.2f}°')
@@ -159,7 +171,7 @@ class SessionPage(QWidget):
         if p.get('sdk_feedback'):
             feedback=p['sdk_feedback']
             for label,(name,value)in zip(self.joint_labels,feedback['native'].items()):label.setText(label.text().split('\n')[0]+f'\n{value:.2f} SDK'+(' %'if name=='gripper'else' °')+'\nmodel rad 미결합')
-        source=p.get('device_source',self.settings.recipe()['execution']['device_source']);self.device_state.setText(('MEMORY · 합성 시험'if source=='memory'else'HARDWARE · 실측')+'\n'+state)
+        source=p.get('device_source');self.device_state.setText(('MEMORY · 합성 시험'if source=='memory'else'HARDWARE · 실측')+'\n'+state)
         for n,timing in p.get('camera_timing',{}).items():
             if timing:
                 skew=timing.get('joint_skew_ms');suffix=f' · Δt {skew:.0f}ms'if skew is not None else' · camera receipt'
@@ -184,14 +196,16 @@ class SessionPage(QWidget):
         if dialog.exec()==QDialog.DialogCode.Accepted and self.isVisible():self.send('teleop_start',{'proposal_sha256':proposal['sha256'],**{k:c.isChecked()for k,c in checks.items()}})
         self.approval_dialog=None
     def event_received(self,event):
-        if event['kind']in('error','log')or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':self.show_error(json.dumps(event['payload'],ensure_ascii=False))
+        if event['kind']in('error','log')or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':
+            payload=event['payload'];self.show_error(payload.get('reason')or payload.get('message')or json.dumps(payload,ensure_ascii=False))
     def show_preview(self,camera,raw):
         if camera in self.previews:
             image=QImage.fromData(raw,b'PPM')
             if not image.isNull():self.previews[camera].setPixmap(QPixmap.fromImage(image))
-    def show_error(self,message):self.log.appendPlainText(message);self.capture_hint.setText(message)
+    def show_error(self,message):self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
         self.state.setText('DISCONNECTED · Worker '+status);self.last_progress={};self.proposal=None;self.buttons(False)
+        self.teleop_hint.hide();self.capture_hint.setText('연결 종료 · 저장된 Capture는 보존됩니다')
         for name,view in self.previews.items():view.clear();view.setText(name+' · 연결 종료')
         if self.finishing:self.session_label.setText('작업 종료 · '+str(len(self.rows))+' Snapshot 보존');self.finishing=False
     def add_snapshot(self,row):

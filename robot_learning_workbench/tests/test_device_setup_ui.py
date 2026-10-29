@@ -59,7 +59,7 @@ p.job.start=lambda *args,**kwargs:None
 p.load_project(root/'B');assert not p.connect_button.isEnabled()and p.project is None
 p.project_result({'ok':False,'error':{'message':'Bound B configuration changed'}})
 assert p.project is None and p.settings.saved_recipe is None and not p.connect_button.isEnabled()
-assert 'changed'in p.capture_hint.text()
+assert 'changed'in p.operation_message.text()
 w.close();app.processEvents()
 ''',tmp_path)
 
