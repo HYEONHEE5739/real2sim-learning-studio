@@ -132,7 +132,8 @@ class Window(QMainWindow):
             self.scene.builder.terminate();event.ignore();QTimer.singleShot(500,self.close);return
         for page in self.workflows.values():page.timer.stop()
         import shutil
-        for page in (self.source,self.curation):shutil.rmtree(page.preview_directory,ignore_errors=True)
+        for page in (self.source,self.curation):
+            page.stop_playback();shutil.rmtree(page.preview_directory,ignore_errors=True)
         event.accept()
 
 

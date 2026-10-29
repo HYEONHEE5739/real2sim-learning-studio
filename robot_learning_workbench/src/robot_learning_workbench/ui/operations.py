@@ -100,9 +100,53 @@ def prepared(path: str,modules: str) -> dict:
     return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
 
 
+def episode_plot(source: str, selection_id: str) -> dict:
+    """Bounded read-only plot projection of existing selected numeric rows."""
+    import numpy as np
+    from ..data import curation
+    catalog=curation._catalog(source);ep=curation._episode(catalog,selection_id)
+    total=(ep.stop if ep.stop is not None else ep.num_frames)-ep.start
+    indices=np.unique(np.r_[np.arange(0,total,max(1,int(np.ceil(total/511)))),total-1]).astype(int)
+    def samples(name):
+        selected=[];offset=0
+        for block in curation._chunks((ep,),name,2048,{}):
+            take=indices[(indices>=offset)&(indices<offset+len(block))]-offset
+            if len(take):selected.append(block[take])
+            offset+=len(block)
+        return np.concatenate(selected)
+    target='action'if ep.format=='lerobot'else'joint_targets'
+    values=curation._numeric(samples(target),target)
+    semantics=curation._field_semantics(catalog,target)
+    clock='timestamp'if ep.format=='lerobot'else'obs/timestamp'
+    times=samples(clock).reshape(-1)
+    eef=None;events={};event_times={}
+    if ep.format=='isaac_hdf5':
+        import h5py
+        with h5py.File(ep.file,'r')as file:
+            group=file['data/'+ep.key]
+            name='obs/datagen_info/eef_pose/tool0'
+            if name in group:eef=samples(name)[:,:3,3].tolist()
+            name='obs/datagen_info/subtask_term_signals/grasp'
+            if name in group:
+                offset=0
+                for block in curation._chunks((ep,),name,2048,{}):
+                    first=np.flatnonzero(curation._numeric(block,name).any(1))
+                    if len(first):
+                        events['grasp']=int(offset+first[0]);event_times['grasp']=float(np.asarray(group['obs/timestamp'][ep.start+events['grasp']]).reshape(-1)[0]-np.asarray(group['obs/timestamp'][ep.start]).reshape(-1)[0]);break
+                    offset+=len(block)
+    return dict(selection_id=selection_id,frames=total,original_range=[ep.start,ep.start+total],indices=indices.tolist(),
+                targets=values.tolist(),timestamps=times.tolist(),target_unit=semantics['unit'],joint_order=semantics['joint_order'],
+                eef=eef,eef_frame=catalog.execution.get('recording',{}).get('pose_frame','unknown'),eef_unit='m'if catalog.execution.get('recording',{}).get('units')=='m_rad_s'else'unknown',events=events,event_times_s=event_times,event_phase='recorded pre-step latch; not new Task evaluation',sampled=len(indices)<total)
+
+
 def execute(request: dict) -> dict:
     """Explicit existing function calls, not an extensible operation registry."""
     op=request['operation'];args=request.get('arguments',{})
+    if op=='episode_plot':return episode_plot(**args)
+    if op=='positions':
+        from scene_contract.package import load_scene
+        from ..data.curation import position_distribution
+        return position_distribution(args['source'],args['object_id'],scene=load_scene(args['scene']),frame=args['frame'],split=args.get('split'))
     if op=='training_config':
         from lerobot.policies.factory import make_policy_config
         from lerobot.configs.train import TrainPipelineConfig
