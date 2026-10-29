@@ -68,10 +68,12 @@ class Window(QMainWindow):
         for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
         self.closing=False;self.cancelled_on_close=set()
         central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
-        self.safety=QLabel('실물 팔 Goal/Torque 금지 · 읽기 전용 / Gripper 별도 승인 · 저장 Recipe만 실행');self.safety.setWordWrap(True);layout.addWidget(self.safety)
+        self.safety=QLabel('실물 연결은 관측으로 시작 · 6축 Teleoperation은 현장 확인·개별 승인 후 활성화');self.safety.setWordWrap(True);layout.addWidget(self.safety)
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
-        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
+        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','precision_calibration','real_evaluation')}
+        from .session_page import SessionPage
+        self.sessions={kind:SessionPage(kind,backend_python,modules,self.workspace,self)for kind in ('capture','real_sim')}
         self.source_tabs=QWidget();source_layout=QVBoxLayout(self.source_tabs);source_layout.setContentsMargins(0,0,0,0);source_layout.addWidget(self.workflows['source'])
         self.source_dialog=QDialog(self);self.source_dialog.setWindowTitle('저장 Source 검토');self.source_dialog.resize(1400,920);QVBoxLayout(self.source_dialog).addWidget(self.source)
         source_review=QPushButton('저장 Source 검토');source_review.clicked.connect(self.source_dialog.show);self.workflows['source'].form.insertWidget(1,source_review)
@@ -87,7 +89,7 @@ class Window(QMainWindow):
         curate=QPushButton('Data Curation');curate.clicked.connect(lambda:self.navigation.setCurrentRow(5));nav.addWidget(curate)
         hint=QLabel('단계를 선택하고\n입력을 확인한 뒤 실행하세요.');hint.setObjectName('mutedLabel');hint.setWordWrap(True);nav.addWidget(hint);body.addWidget(self.navigation_panel)
         self.stack=QStackedWidget();body.addWidget(self.stack,1)
-        self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.workflows['capture']),('Precision Calibration',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.workflows['real_sim'])]
+        self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.sessions['capture']),('Precision Calibration',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.sessions['real_sim'])]
         self.hardware_tabs={11:0,14:1,12:3};self._last_pipeline_row=1
         for i,(name,page)in enumerate(self.pages):
             self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if i in self.hardware_tabs or i==5 else page)
@@ -96,7 +98,7 @@ class Window(QMainWindow):
                 engine.parentWidget().hide()
             self.engine_stack.addWidget(engine if i not in self.hardware_tabs else QWidget())
         self.curation_dialog=QDialog(self);self.curation_dialog.setWindowTitle('Data Curation · Episode 검토');self.curation_dialog.resize(1400,920);self.curation_dialog.setWindowModality(Qt.WindowModality.WindowModal);QVBoxLayout(self.curation_dialog).addWidget(self.curation)
-        self.tabs.addTab(self.workflows['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.workflows['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
+        self.tabs.addTab(self.sessions['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.sessions['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
         self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(1)
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage('Scene v8 원본 보존 · 실제 모터 구동 기본 차단 · Hub 쓰기 별도 승인')
@@ -122,10 +124,12 @@ class Window(QMainWindow):
         if hasattr(page,'settings_scroll'):page.settings_scroll.setVisible(visible)
 
     def closeEvent(self,event):
-        active=[page for page in self.workflows.values() if page.active()]
+        active=[page for page in [*self.workflows.values(),*self.sessions.values()] if page.active()]
         if active:
             self.closing=True
             for page in active:
+                if page in self.sessions.values():
+                    page.cancel_run();continue
                 if page.handle and page.handle['run_id'] not in self.cancelled_on_close:
                     page.cancel_run();self.cancelled_on_close.add(page.handle['run_id'])
             self.statusBar().showMessage('취소와 실제 worker/Preview 정리를 기다립니다…');event.ignore();QTimer.singleShot(500,self.close);return
@@ -136,6 +140,7 @@ class Window(QMainWindow):
         if self.scene.builder.state()!=QProcess.ProcessState.NotRunning:
             self.scene.builder.terminate();event.ignore();QTimer.singleShot(500,self.close);return
         for page in self.workflows.values():page.timer.stop()
+        for page in self.sessions.values():page.client.timer.stop()
         import shutil
         for page in (self.source,self.curation):
             page.stop_playback();shutil.rmtree(page.preview_directory,ignore_errors=True)

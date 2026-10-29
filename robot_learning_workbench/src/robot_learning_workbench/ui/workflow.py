@@ -14,12 +14,13 @@ from .operations import stage_support,run_outcome
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
         super().__init__(parent)
+        if stage in ('capture','real_sim'):raise ValueError('Use the dedicated SessionPage for Capture / Real-Sim')
         from .theme import STYLE
         from .view import CameraView
         self.setStyleSheet(STYLE)
         self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules)
         self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set();self._syncing=False
-        titles={'teleoperation':'Teleoperation · Fake / 읽기 전용','source':'Source Demo','annotation':'Annotation','datagen':'Mimic / Datagen','train':'모델 학습','hub_download':'Hub 다운로드','hub_upload':'Hub 업로드','simulation_evaluation':'Sim 평가','offline_validation':'Offline Validation','capture':'Real2Sim Capture','precision_calibration':'Precision Calibration','real_evaluation':'Real Policy · Observe Only','real_sim':'Real / Sim'}
+        titles={'teleoperation':'Teleoperation · Fake / 읽기 전용','source':'Source Demo','annotation':'Annotation','datagen':'Mimic / Datagen','train':'모델 학습','hub_download':'Hub 다운로드','hub_upload':'Hub 업로드','simulation_evaluation':'Sim 평가','offline_validation':'Offline Validation','precision_calibration':'Precision Calibration','real_evaluation':'Real Policy · Observe Only'}
         self.heading=QLabel(titles[stage]);self.heading.setObjectName('dashboardTitle');self.heading.hide()
         outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0);outer.setSpacing(12)
         self.splitter=QSplitter(Qt.Orientation.Horizontal);outer.addWidget(self.splitter,1)
@@ -46,7 +47,7 @@ class WorkflowPage(QWidget):
         if stage=='source':
             self.source_kind=QComboBox();self.source_kind.addItems(['Recorded Target Stream','Live Leader (read only → Simulation)']);field(self.form,'Source 입력',self.source_kind);self.source_kind.currentIndexChanged.connect(self.change_source_kind)
         labels={'scene':'Scene Package','dataset':'사용할 데이터','source_dataset':'저장된 Target Stream','device_profile':'장치 연결 Profile','engine_config':'엔진 실행 설정','resume_dataset':'기존 결과 · 다른 출력 Resume','training_config':'공식 Training Config','policy':'Policy / Checkpoint','checkpoint':'Resume Checkpoint','repo_id':'Repository ID','revision':'Revision / Commit','artifact':'업로드할 Dataset / Policy','policy_contract':'외부 Policy 의미 계약','camera_config':'Side / Wrist Camera 설정','capture_session':'보존 Capture','calibration_profile':'관절 관측 Profile','robot_model':'Capture용 원본 Robot Model','leader_device_profile':'Fake Leader Profile','leader_calibration_profile':'Fake Leader 관측 Profile'}
-        keys={'teleoperation':['device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','scene','camera_config'],'source':['scene','source_dataset','device_profile','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'capture':['device_profile','camera_config','capture_session','calibration_profile','scene','robot_model'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile'],'real_sim':['scene','device_profile','camera_config','capture_session','calibration_profile','engine_config','robot_model']}[stage]
+        keys={'teleoperation':['device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','scene','camera_config'],'source':['scene','source_dataset','device_profile','engine_config'],'annotation':['dataset','scene'],'datagen':['scene','dataset','resume_dataset'],'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'precision_calibration':['device_profile','calibration_profile'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile']}[stage]
         primary={'scene','dataset','source_dataset','device_profile','training_config','policy','checkpoint','repo_id','revision','artifact','calibration_profile','camera_config'}
         for key in keys:
             line=QLineEdit();line.setPlaceholderText(labels[key]);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
@@ -57,7 +58,7 @@ class WorkflowPage(QWidget):
                 use=QPushButton('검사한 Scene 적용');use.clicked.connect(self.use_scene);buttons.addWidget(use)
             (self.form if key in primary else self.advanced_form).addWidget(panel);self.input_rows[key]=panel
         self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(self.edit_output);field(self.form,'저장 위치',self.output)
-        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once']if stage=='teleoperation'else['auto','manual']if stage=='annotation'else{'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all'],'real_sim':['offline','observe_only']}[stage]if stage in ('capture','precision_calibration','real_evaluation','real_sim')else['scratch','finetune','resume'])
+        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once']if stage=='teleoperation'else['auto','manual']if stage=='annotation'else{'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all']}[stage]if stage in ('precision_calibration','real_evaluation')else['scratch','finetune','resume'])
         if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim','teleoperation'):field(self.form,'실행 방식',self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
         self.counts={};self.count_labels={}
         for key in {'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[]):
@@ -77,7 +78,7 @@ class WorkflowPage(QWidget):
         if stage in ('simulation_evaluation','real_evaluation'):field(self.form,'Task Instruction',self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
         self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요');self.policy_model.setWordWrap(True)
         if stage in ('simulation_evaluation','offline_validation'):self.form.addWidget(self.policy_model)
-        if stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):
+        if stage in ('precision_calibration','real_evaluation','teleoperation'):
             self.live_frames=QSpinBox();self.live_frames.setRange(1,300);self.live_frames.valueChanged.connect(lambda value:self.edit_execution('max_frames',value));field(self.form,'읽기 / Fake 최대 frame · 팔 구동 없음',self.live_frames)
         self.gripper_fields={}
         if stage in ('teleoperation','real_evaluation'):
@@ -99,7 +100,7 @@ class WorkflowPage(QWidget):
         settings.addWidget(self.details);settings.addWidget(self.advanced);settings.addStretch()
         self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True);self.state.setStyleSheet('background: transparent; padding: 6px;')
         self.action_card=QWidget();self.action_card.setObjectName('actionCard');actions=QHBoxLayout(self.action_card);actions.addWidget(self.state,1);box.addWidget(self.action_card)
-        self.start_button=QPushButton({'source':'데모 기록 시작','annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','capture':'Capture 실행 · 읽기 전용'}.get(stage,'선택 단계 실행'));self.start_button.setObjectName('primaryAction')
+        self.start_button=QPushButton({'source':'데모 기록 시작','annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','precision_calibration':'Precision 검사'}.get(stage,'선택 단계 실행'));self.start_button.setObjectName('primaryAction')
         self.cancel_button=QPushButton('현재 workflow 중지');self.cancel_button.setObjectName('stopAction');actions.addWidget(self.start_button);actions.addWidget(self.cancel_button)
         self.start_button.setEnabled(False);self.cancel_button.setEnabled(False);self.start_button.clicked.connect(self.start_run);self.cancel_button.clicked.connect(self.cancel_run)
         self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);controls=QGridLayout();box.addLayout(controls)
@@ -121,16 +122,10 @@ class WorkflowPage(QWidget):
         self.preview_card=QWidget();self.preview_card.setObjectName('previewCard');grid=QGridLayout(self.preview_card);self.media_splitter.addWidget(self.preview_card)
         self.previews={};self.sim_previews={}
         for col,n in enumerate(('side','wrist')):
-            if stage=='real_sim':
-                for column,kind in enumerate(('real','sim')):
-                    grid.addWidget(QLabel(kind.upper()+' '+n.upper()),col*2,column);label=CameraView('No live frame',minimum=(120,90));grid.addWidget(label,col*2+1,column)
-                    (self.previews if kind=='real'else self.sim_previews)[n]=label
-            else:
-                grid.addWidget(QLabel(('REAL 'if stage in ('capture','real_evaluation')else'SIM ')+n.upper()),0,col);label=CameraView(n.upper()+' — 실행 대기',minimum=(120,90));grid.addWidget(label,1,col);self.previews[n]=label
+            grid.addWidget(QLabel(('REAL 'if stage=='real_evaluation'else'SIM ')+n.upper()),0,col);label=CameraView(n.upper()+' — 실행 대기',minimum=(120,90));grid.addWidget(label,1,col);self.previews[n]=label
         grid.setRowStretch(1,1)
-        if stage=='real_sim':grid.setRowStretch(3,1)
         for label in (*self.previews.values(),*self.sim_previews.values()):label.setStyleSheet('background: #141b23; border-radius: 14px; color: #8b9aaa;')
-        self.preview_card.setVisible(stage in ('source','annotation','datagen','simulation_evaluation','capture','real_evaluation','real_sim'))
+        self.preview_card.setVisible(stage in ('source','annotation','datagen','simulation_evaluation','real_evaluation'))
         self.log_card=QWidget();self.log_card.setObjectName('logCard');log_box=QVBoxLayout(self.log_card);self.media_splitter.addWidget(self.log_card)
         tools=QGridLayout();log_box.addLayout(tools);tools.addWidget(QLabel('진행 / 오류 로그'),0,0)
         self.result_button=QPushButton('결과 상세');self.result_button.clicked.connect(self.open_result);tools.addWidget(self.result_button,0,1)
@@ -149,7 +144,7 @@ class WorkflowPage(QWidget):
             self.viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus);self.shortcuts=[]
             for key,kind in [('Right','save'),('Left','discard')]:
                 shortcut=QShortcut(QKeySequence(key),self.viewer);shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut);shortcut.setAutoRepeat(False);shortcut.activated.connect(lambda k=kind:self.commands[k].click()if self.commands[k].isEnabled()else None);self.shortcuts.append(shortcut)
-        if stage in ('capture','real_sim','precision_calibration'):self.build_observation_view(box,outer)
+        if stage=='precision_calibration':self.build_observation_view(box,outer)
         support=stage_support(stage)
         self.mode.currentTextChanged.connect(self.sync_input_visibility);self.sync_input_visibility()
         if self.source_kind is not None:self.change_source_kind(self.source_kind.currentIndex())
@@ -166,14 +161,6 @@ class WorkflowPage(QWidget):
         box.removeWidget(self.action_card);box.addWidget(self.action_card)
         self.readiness=QLabel('최근 완료 관측 없음 · 실물 팔 Goal/Torque 금지');self.readiness.setWordWrap(True);box.addWidget(self.readiness)
         self.log_card.setMaximumHeight(140);outer.addWidget(self.log_card)
-        if self.stage in ('capture','real_sim'):
-            self.preview_card.setObjectName('')
-            for label in (*self.previews.values(),*self.sim_previews.values()):label.setStyleSheet('');label.setText('No live frame')
-        if self.stage=='capture':
-            self.capture_results=QListWidget();self.capture_results.setMaximumHeight(130);box.addWidget(self.capture_results)
-            self.start_button.setText('정지 상태 Capture 시작 · 읽기 전용')
-            self.capture_session_label=QLabel('세션: 저장 Recipe의 새 출력에 관측을 저장합니다.');self.capture_session_label.setWordWrap(True);box.insertWidget(box.count()-1,self.capture_session_label)
-            self.capture_quality=QLabel('모터 명령 없는 측정 기록 · 학습 Action 자동 생성 없음\nHost 수신 시각이며 노출 시각 동기화가 아닙니다.');self.capture_quality.setWordWrap(True);box.addWidget(self.capture_quality)
         if self.stage=='precision_calibration':
             from ..robot.calibration import JOINTS
             self.precision_names=JOINTS;self.precision_joint=QComboBox();self.precision_joint.addItems(JOINTS);box.insertWidget(0,self.precision_joint)
@@ -197,19 +184,12 @@ class WorkflowPage(QWidget):
     def display_hardware_result(self,data):
         if hasattr(self,'readiness'):
             self.readiness.setText('최근 Run '+str(data.get('status'))+' · 측정 '+str(data.get('frames',0))+' frame · command_sent='+str(data.get('command_sent',False)))
-        if self.stage=='capture' and data.get('verified_capture_frames')is not None:
-            self.capture_results.addItem('저장 관측 '+str(data['verified_capture_frames'])+' sample · '+self.handle['output_path']);self.capture_session_label.setText('세션: '+self.handle['output_path'])
-            quality=data.get('snapshot_quality',{});self.capture_quality.setText('Calibration 부적격: '+str(quality.get('warnings',quality.get('reason','독립 물리 보정 미검증'))))
         if self.stage=='precision_calibration':
             last=data.get('last_observation',{});names=last.get('joint_order',[]);q=last.get('q_measured',[])
             for row,name in enumerate(self.precision_names):
                 values=[last.get('raw',{}).get(name,'—'),last.get('native',{}).get(name,'—'),q[names.index(name)]if name in names and len(q)==len(names)else'—']
                 for col,value in enumerate(values,1):self.precision_table.setItem(row,col,QTableWidgetItem(str(value)))
             self.show_measured_joint()
-        if self.stage=='real_sim' and data.get('real_sim'):
-            comparison=data['real_sim'];lines=['측정 q → '+comparison['engine']+' 상태 렌더 · Physics Step '+str(comparison['physics_steps'])]
-            lines.extend(name+' · RGB MAE '+str(row['photometric_mae_rgb_0_255'])+' / Landmark: '+row['landmark_error']for name,row in comparison['cameras'].items())
-            self.readiness.setText('\n'.join(lines)+'\nCalibration 승인 아님')
 
     def show_loss(self):
         if self.stage!='train':return
@@ -447,7 +427,7 @@ class WorkflowPage(QWidget):
     def start_run(self):
         if not self.ready or self.editor.dirty or self.edit_error or self.active():return
         if not self.scene_matches():return
-        if any(page is not self and page.active() for page in getattr(self.window(),'workflows',{}).values()):
+        if any(page is not self and page.active() for page in [*getattr(self.window(),'workflows',{}).values(),*getattr(self.window(),'sessions',{}).values()]):
             self.state.setText('현재 실행 중인 worker를 종료한 뒤 시작하세요');return
         for name,label in self.previews.items():label.clear();label.setText(name+' · 새 Run 대기')
         self.request_id=uuid.uuid4().hex;self.operation='start';self.busy=True;self.start_button.setEnabled(False);self.state.setText('worker 시작 준비 중…')
@@ -523,7 +503,7 @@ class WorkflowPage(QWidget):
                     shutil.rmtree(Path(self.handle['run_dir'])/'preview',ignore_errors=True)
                 if (self.stage in ('source','annotation','datagen','simulation_evaluation') or self.stage in ('teleoperation','real_evaluation') and (Path(self.handle['output_path'])/'run.json').is_file()) and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy:
                     self._verified_terminal=self.handle['run_id'];self.operation='terminal_catalog';self.busy=True;self.job.start('catalog',path=self.handle['output_path'])
-                if self.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation') and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy and any((Path(self.handle['output_path'])/name).is_file()for name in ('hardware-report.json','gripper-report.json')):
+                if self.stage in ('precision_calibration','real_evaluation','teleoperation') and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy and any((Path(self.handle['output_path'])/name).is_file()for name in ('hardware-report.json','gripper-report.json')):
                     self._verified_terminal=self.handle['run_id'];self.operation='terminal_hardware';self.busy=True;self.job.start('hardware_result',path=self.handle['output_path'])
                 if getattr(self,'_preview_terminal_cleared',None)!=self.handle['run_id']:
                     for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')

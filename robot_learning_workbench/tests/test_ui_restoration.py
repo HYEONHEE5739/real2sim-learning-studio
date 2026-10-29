@@ -163,18 +163,19 @@ p.close();app.processEvents()
     assert n.file_sha256(n.load_catalog(owner.root).episodes[0].file)==before
 
 
-def test_hardware_tabs_reuse_original_view_layout_and_never_offer_arm_controls(tmp_path):
+def test_dedicated_hardware_tabs_preserve_precision_and_require_explicit_motion_approval(tmp_path):
     qt('''
 from pathlib import Path
 import sys
 from PyQt6.QtWidgets import QApplication,QPushButton
 from robot_learning_workbench.ui.app import Window
 app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'space');w.show();app.processEvents()
-c=w.workflows['capture'];r=w.workflows['real_sim'];p=w.workflows['precision_calibration']
-assert hasattr(c,'capture_results') and hasattr(c,'readiness')
-assert r.previews.keys()==r.sim_previews.keys()=={'side','wrist'}
+c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.workflows['precision_calibration']
+assert hasattr(c,'snapshot_table')and hasattr(c,'client')
+assert set(r.previews)=={'side','wrist','sim_side','sim_wrist'}
+assert not c.start_teleop_button.isEnabled()and not r.start_teleop_button.isEnabled()
 assert p.reference_table.columnCount()==6 and p.precision_table.rowCount()==6
-for page in (c,r,p,w.workflows['real_evaluation']):
+for page in (p,w.workflows['real_evaluation']):
     assert not page.gripper_button.isEnabled()
     assert not any(b.isEnabled() and any(word in b.text()for word in ('힘 풀기','Home','Start Teleop','Torque Enable'))for b in page.findChildren(QPushButton))
 w.navigation.setCurrentRow(5);app.processEvents();assert w.curation_dialog.isVisible()
