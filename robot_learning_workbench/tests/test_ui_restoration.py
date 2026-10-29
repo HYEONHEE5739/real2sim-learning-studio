@@ -259,3 +259,30 @@ assert p.preview_env.isVisible() and p.preview_env.maximum()==3
 p.counts['env_num'].setValue(1);app.processEvents();assert not p.preview_env.isVisible()
 p.timer.stop();p.close()
 ''',tmp_path)
+
+
+def test_saved_episode_training_and_fractional_time_settings_are_displayed_truthfully(tmp_path):
+    qt('''
+import json,sys
+from pathlib import Path
+from PyQt6.QtWidgets import QApplication,QLabel
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);root=Path(sys.argv[1]);p=WorkflowPage('datagen','/no/worker','modules')
+r=root/'r.yaml';r.write_text('schema_version: 1\\nstage: datagen\\nengine: mujoco\\ninputs: {}\\nexecution: {num_episodes: 2, resume: true}\\noutput: {directory: data}\\n')
+p.load_recipe(r);assert any(l.text()=='추가 Episode 수'for l in p.findChildren(QLabel))
+r.write_text(r.read_text().replace('num_episodes: 2','target_successes: 3'));p.load_recipe(r)
+assert any('누적 Episode 목표'in l.text()for l in p.findChildren(QLabel))
+p.counts['num_episodes'].setValue(4);assert p.editor.data()['execution']['num_episodes']==4
+assert any(l.text()=='추가 Episode 수'for l in p.findChildren(QLabel))
+p.timer.stop();p.close()
+t=WorkflowPage('train','/no/worker','modules');cfg=root/'config.json';cfg.write_text(json.dumps({'policy':{'type':'act','device':'cuda'},'steps':7,'batch_size':3}))
+r.write_text('schema_version: 1\\nstage: train\\ninputs: {training_config: config.json, dataset: data}\\nexecution: {mode: scratch}\\noutput: {directory: model}\\n')
+t.load_recipe(r);assert t.training_settings.steps.value()==7 and t.training_settings.batch.value()==3 and t.training_settings.device.currentText()=='cuda'
+assert not t.editor.dirty and not t.edit_error
+t.training_settings.operation='catalog';t.training_settings.received({'ok':True,'result':{'policies':[{'type':'act','error':None},{'type':'diffusion','error':None}]}})
+assert not t.edit_error and t.training_settings.model.currentText()=='act'
+t.timer.stop();t.close()
+e=WorkflowPage('simulation_evaluation','/no/worker','modules');r.write_text('schema_version: 1\\nstage: simulation_evaluation\\nengine: mujoco\\ninputs: {}\\nexecution: {episodes: 1, timeout_s: 0.2}\\noutput: {directory: evaluation}\\n')
+e.load_recipe(r);assert e.counts['timeout_s'].value()==0.2 and not e.editor.dirty
+e.timer.stop();e.close()
+''',tmp_path)

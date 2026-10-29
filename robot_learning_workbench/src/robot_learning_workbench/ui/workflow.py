@@ -5,7 +5,7 @@ import uuid
 import time
 from PyQt6.QtCore import Qt,QTimer,QUrl
 from PyQt6.QtGui import QImage,QPixmap,QDesktopServices,QShortcut,QKeySequence
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog,QGridLayout,QSplitter,QScrollArea,QDialog,QListWidget,QProgressBar
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog,QGridLayout,QSplitter,QScrollArea,QDialog,QListWidget,QProgressBar
 from .recipe_editor import RecipeEditor
 from .jobs import BackendJob
 from .operations import stage_support,run_outcome
@@ -59,10 +59,11 @@ class WorkflowPage(QWidget):
         self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(self.edit_output);field(self.form,'저장 위치',self.output)
         self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once']if stage=='teleoperation'else['auto','manual']if stage=='annotation'else{'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all'],'real_sim':['offline','observe_only']}[stage]if stage in ('capture','precision_calibration','real_evaluation','real_sim')else['scratch','finetune','resume'])
         if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim','teleoperation'):field(self.form,'실행 방식',self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
-        self.counts={}
+        self.counts={};self.count_labels={}
         for key in {'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[]):
-            spin=QSpinBox();spin.setRange(1,100000);spin.valueChanged.connect(lambda value,k=key:self.edit_execution(k,value));self.counts[key]=spin
-            field(self.form,{'env_num':'환경 수','num_episodes':'누적 Episode 목표','max_attempts':'시도 예산','episodes':'평가 Attempt 목표','timeout_s':'평가 최대 시간 (제어 시각 s)'}[key],spin)
+            spin=QDoubleSpinBox()if key=='timeout_s'else QSpinBox();spin.setRange(.001 if key=='timeout_s'else 1,100000);spin.valueChanged.connect(lambda value,k=key:self.edit_execution(k,value));self.counts[key]=spin
+            if key=='timeout_s':spin.setDecimals(3);spin.setSingleStep(.1)
+            panel=field(self.form,{'env_num':'환경 수','num_episodes':'추가 Episode 수','max_attempts':'시도 예산','episodes':'평가 Attempt 목표','timeout_s':'평가 최대 시간 (제어 시각 s)'}[key],spin);self.count_labels[key]=panel.findChild(QLabel)
         self.placement=QComboBox();self.placement.addItems(['Fixed','Random'])
         self.object_table=None
         if stage in ('datagen','simulation_evaluation'):
@@ -294,7 +295,9 @@ class WorkflowPage(QWidget):
             self.engine.setCurrentText(data.get('engine','mujoco'));self.output.setText(data['output']['directory'])
             if self.source_kind is not None:self.source_kind.setCurrentIndex(1 if 'device_profile'in data['inputs'] else 0)
             for key,line in self.inputs.items():line.setText(data['inputs'].get(key,''))
-            for key,spin in self.counts.items():spin.setValue(int(data['execution'].get(key,data['execution'].get('episodes',data['execution'].get('target_successes',1)) if key=='num_episodes' else 1)))
+            for key,spin in self.counts.items():
+                value=data['execution'].get(key,data['execution'].get('episodes',data['execution'].get('target_successes',1))if key=='num_episodes'else 1);spin.setValue(float(value)if key=='timeout_s'else int(value))
+            if 'num_episodes'in self.count_labels:self.count_labels['num_episodes'].setText('추가 Episode 수'if'num_episodes'in data['execution']else'누적 Episode 목표 · 기존 Recipe')
             self.preview_env.setRange(0,max(0,int(data['execution'].get('env_num',data['execution'].get('num_envs',1)))-1))
             if self.dataset_resume is not None:self.dataset_resume.setChecked(data['execution'].get('resume',False))
             self.task_instruction.setText(data['execution'].get('task_instruction',''))
@@ -310,6 +313,7 @@ class WorkflowPage(QWidget):
         if 'policy' in data['inputs']:self.show_policy_model(data['inputs']['policy'])
         fn=data.get('functions',{}).get('acceptance',data.get('functions',{}).get('success',{}));self.task_info.setText('Task · '+str(fn.get('function',''))+' · '+str(fn.get('params',{})))
         self.invalidate();self.recipe_status.setText('저장됨 · '+Path(path).name);self.state.setText('저장됨 — 입력 검사를 실행하세요')
+        if hasattr(self,'training_settings'):self.training_settings.load()
     def safe_update(self,fn):
         try:self.editor.update(fn);return True
         except Exception as error:self.edit_error=True;self.invalidate();self.state.setText('Recipe 편집 오류: '+str(error))
@@ -339,6 +343,7 @@ class WorkflowPage(QWidget):
         def edit(data):
             data['execution']['resume']=value;data['execution']['num_episodes']=self.counts['num_episodes'].value();data['execution'].pop('episodes',None);data['execution'].pop('target_successes',None);data['inputs'].pop('resume_dataset',None)
         self.safe_update(edit)
+        self.count_labels['num_episodes'].setText('추가 Episode 수')
     def edit_execution(self,key,value):
         if self._syncing or self.editor.path is None:return
         def edit(data):
@@ -347,6 +352,7 @@ class WorkflowPage(QWidget):
             if key=='num_episodes':data['execution'].pop('episodes',None);data['execution'].pop('target_successes',None)
         self.safe_update(edit)
         if key=='env_num':self.preview_env.setRange(0,value-1);self.sync_input_visibility()
+        if key=='num_episodes':self.count_labels[key].setText('추가 Episode 수')
     def edit_output(self):
         if self._syncing or self.editor.path is None:return
         self.safe_update(lambda data:data['output'].__setitem__('directory',self.output.text()))
@@ -563,6 +569,7 @@ class WorkflowPage(QWidget):
             data['execution'].pop('target_successes',None)
             data['output']['directory']=self.handle['output_path']
         if self.safe_update(append):
+            self.count_labels['num_episodes'].setText('추가 Episode 수')
             self.output.setText(self.handle['output_path']);self._syncing=True
             try:self.dataset_resume.setChecked(True)
             finally:self._syncing=False
