@@ -142,6 +142,15 @@ def episode_plot(source: str, selection_id: str) -> dict:
 def execute(request: dict) -> dict:
     """Explicit existing function calls, not an extensible operation registry."""
     op=request['operation'];args=request.get('arguments',{})
+    if op=='precision_profile':
+        from ..robot.calibration import load_profile,JOINTS
+        from ..data.native import file_sha256
+        profile=load_profile(args['path']);joints=[];references=[]
+        for name in JOINTS:
+            entry=profile['joints'][name]
+            joints.append({'joint':name,'anchor_raw':entry['anchor_raw'],'rad_per_count':entry['rad_per_count'],'reference_angle_rad':entry['reference_angle_rad'],'max_error_deg':entry.get('review',{}).get('max_error_deg'),'status':entry['status']})
+            references.extend({'joint':name,'raw':ref['raw'],'angle_rad':ref.get('angle_rad'),'split':ref.get('split'),'evidence':ref.get('evidence'),'reference_id':ref.get('reference_id')}for ref in entry.get('references',[]))
+        return {'path':str(Path(args['path']).resolve()),'source_sha256':file_sha256(args['path']),'role':profile['role'],'urdf_sha256':profile['urdf_sha256'],'physical_verified':profile.get('physical_verified',False),'joints':joints,'references':references}
     if op=='episode_plot':return episode_plot(**args)
     if op=='positions':
         from scene_contract.package import load_scene
@@ -165,6 +174,9 @@ def execute(request: dict) -> dict:
         root=Path(args['path']);file=root/'hardware-report.json'if(root/'hardware-report.json').is_file()else root/'gripper-report.json'
         result=json.loads(file.read_text())
         small={k:result[k]for k in ('status','frames','command_sent','physical_verified','snapshot_quality','policy','precision','real_sim','motion','arm_commands','torque_commands','effect','error','proposal')if k in result}
+        observations=result.get('observations',[])
+        if observations:
+            row=observations[-1];small['last_observation']={k:row[k]for k in ('timestamp_ns','q_measured','raw','native')if k in row};small['last_observation']['joint_order']=result.get('mapping',{}).get('joint_order',[])
         if (root/'COMPLETE').is_file() and (root/'capture_manifest.yaml').is_file():
             from real2sim_builder.capture import load_session
             manifest,samples,_=load_session(root);small['verified_capture_frames']=len(samples)

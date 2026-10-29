@@ -1,8 +1,8 @@
 """Workbench stage pages; Builder remains an independent application."""
 import argparse,json,sys
 from pathlib import Path
-from PyQt6.QtCore import QProcess,QProcessEnvironment,QTimer
-from PyQt6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QListWidget,QStackedWidget,QPushButton,QLabel,QFileDialog,QLineEdit,QPlainTextEdit,QInputDialog,QTabWidget,QComboBox,QGridLayout
+from PyQt6.QtCore import QProcess,QProcessEnvironment,QTimer,Qt
+from PyQt6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QListWidget,QStackedWidget,QPushButton,QLabel,QFileDialog,QLineEdit,QPlainTextEdit,QInputDialog,QTabWidget,QComboBox,QGridLayout,QDialog
 from .jobs import BackendJob
 from .workflow import WorkflowPage
 from .curation import CurationPage
@@ -88,11 +88,12 @@ class Window(QMainWindow):
         self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.workflows['capture']),('Precision Calibration',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.workflows['real_sim'])]
         self.hardware_tabs={11:0,14:1,12:3};self._last_pipeline_row=1
         for i,(name,page)in enumerate(self.pages):
-            self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if i in self.hardware_tabs else page)
+            self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if i in self.hardware_tabs or i==5 else page)
             engine=page.engine if isinstance(page,WorkflowPage)else self.workflows['source'].engine if page is self.source_tabs else QWidget()
             if page is self.source_tabs or isinstance(page,WorkflowPage)and page.stage in ('source','annotation','datagen','simulation_evaluation'):
                 engine.parentWidget().hide()
             self.engine_stack.addWidget(engine if i not in self.hardware_tabs else QWidget())
+        self.curation_dialog=QDialog(self);self.curation_dialog.setWindowTitle('Data Curation · Episode 검토');self.curation_dialog.resize(1400,920);self.curation_dialog.setWindowModality(Qt.WindowModality.WindowModal);QVBoxLayout(self.curation_dialog).addWidget(self.curation)
         self.tabs.addTab(self.workflows['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.workflows['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
         self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(1)
         self.tabs.setCurrentIndex(0)
@@ -105,6 +106,8 @@ class Window(QMainWindow):
 
     def select_stage(self,row):
         if row<0:return
+        if row==5:
+            self.curation_dialog.show();self.curation_dialog.raise_();self.navigation.blockSignals(True);self.navigation.setCurrentRow(self._last_pipeline_row);self.navigation.blockSignals(False);return
         if row in self.hardware_tabs:
             self.tabs.setCurrentIndex(self.hardware_tabs[row]);self.navigation.blockSignals(True);self.navigation.setCurrentRow(self._last_pipeline_row);self.navigation.blockSignals(False);return
         self._last_pipeline_row=row;self.stack.setCurrentIndex(row);self.tabs.setCurrentIndex(2);name,page=self.pages[row];self.dashboard_title.setText(name)

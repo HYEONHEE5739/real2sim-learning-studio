@@ -96,7 +96,7 @@ class TrainingSettings(QWidget):
         if self.operation=='catalog':
             current=self.model.currentText();self.model.clear()
             for row in result['result']['policies']:
-                self.model.addItem(row['type']);self.model.setItemData(self.model.count()-1,json.dumps(row,ensure_ascii=False),Qt.ItemDataRole.ToolTipRole)
+                self.model.addItem(row['type']);self.model.model().item(self.model.count()-1).setEnabled(row.get('error')is None);self.model.setItemData(self.model.count()-1,json.dumps(row,ensure_ascii=False),Qt.ItemDataRole.ToolTipRole)
             if current:self.model.setCurrentText(current)
         else:
             self.config=result['result']['config'];self.policy_json.setPlainText(json.dumps(self.config['policy'],ensure_ascii=False,indent=2));self.steps.setValue(self.config['steps']);self.batch.setValue(self.config['batch_size']);self.device.setCurrentText(self.config['policy']['device']);self.edited()

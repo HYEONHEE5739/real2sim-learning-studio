@@ -155,7 +155,9 @@ class CurationPage(QWidget):
 
     def positions(self):
         if not self.stable():return
-        scene=getattr(self.window(),'scene',None)
+        owner=self.parentWidget()
+        while owner is not None and not hasattr(owner,'scene'):owner=owner.parentWidget()
+        scene=getattr(owner,'scene',None)
         if scene is None or not scene.valid:self.state.setText('정확한 기록 Scene을 먼저 검사하세요');return
         self.perform('positions',source=self.source,object_id=self.position_object.text().strip(),scene=scene.scene_path,frame=self.position_frame.currentText(),split=None if self.scope.currentIndex()==0 else self.scope.currentText())
 

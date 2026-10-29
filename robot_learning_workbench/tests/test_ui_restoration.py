@@ -149,3 +149,71 @@ p.preview_tabs.setCurrentIndex(1);app.processEvents()
 p.close();app.processEvents()
 '''.replace('BACKEND_PYTHON',sys.executable),tmp_path)
     assert n.file_sha256(n.load_catalog(owner.root).episodes[0].file)==before
+
+
+def test_hardware_tabs_reuse_original_view_layout_and_never_offer_arm_controls(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication,QPushButton
+from robot_learning_workbench.ui.app import Window
+app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'space');w.show();app.processEvents()
+c=w.workflows['capture'];r=w.workflows['real_sim'];p=w.workflows['precision_calibration']
+assert hasattr(c,'capture_results') and hasattr(c,'readiness')
+assert r.previews.keys()==r.sim_previews.keys()=={'side','wrist'}
+assert p.reference_table.columnCount()==6 and p.precision_table.rowCount()==6
+for page in (c,r,p,w.workflows['real_evaluation']):
+    assert not page.gripper_button.isEnabled()
+    assert not any(b.isEnabled() and any(word in b.text()for word in ('힘 풀기','Home','Start Teleop','Torque Enable'))for b in page.findChildren(QPushButton))
+w.navigation.setCurrentRow(5);app.processEvents();assert w.curation_dialog.isVisible()
+w.curation_dialog.close();w.close();app.processEvents()
+''',tmp_path)
+
+
+def test_precision_presentation_is_a_read_only_projection_of_existing_profile(tmp_path):
+    from test_precision_calibration import INV
+    from robot_learning_workbench.ui.operations import execute
+    from robot_learning_workbench.data.native import file_sha256
+    path=INV['roles']['follower']['profile_path'];before=file_sha256(path)
+    result=execute({'operation':'precision_profile','arguments':{'path':path}})
+    assert result['role']=='follower' and len(result['joints'])==6
+    assert result['physical_verified'] is False and result['source_sha256']==before
+    assert result['references'] and all('joint'in row and 'raw'in row for row in result['references'])
+    assert file_sha256(path)==before
+
+
+def test_source_shortcuts_target_existing_r03_commands_and_keep_recipe_dirty(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtTest import QTest
+from PyQt6.QtCore import Qt
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);root=Path(sys.argv[1]);p=WorkflowPage('source','/no/worker','modules');p.show();app.processEvents()
+seen=[];p.command=lambda kind:seen.append(kind)
+p.commands['save'].setEnabled(True);p.commands['discard'].setEnabled(True)
+p.viewer.setFocus();QTest.keyClick(p.viewer,Qt.Key.Key_Right);QTest.keyClick(p.viewer,Qt.Key.Key_Left)
+assert seen==['save','discard']
+r=root/'source.yaml';r.write_text('schema_version: 1\\nstage: source\\nengine: mujoco\\ninputs: {source_dataset: recorded}\\nexecution: {num_episodes: 1}\\noutput: {directory: data}\\n')
+p.load_recipe(r);assert p.input_rows['device_profile'].isHidden()
+p.source_kind.setCurrentIndex(1)
+assert p.editor.dirty and 'source_dataset'not in p.editor.data()['inputs'] and not p.input_rows['device_profile'].isHidden()
+assert '편집'in p.recipe_status.text() and not p.start_button.isEnabled()
+p.timer.stop();p.close()
+''',tmp_path)
+
+
+def test_prepare_response_cannot_override_edits_made_during_check(tmp_path):
+    qt('''
+from pathlib import Path
+import sys,hashlib
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);root=Path(sys.argv[1]);r=root/'r.yaml';r.write_text('schema_version: 1\\nstage: datagen\\nengine: mujoco\\ninputs: {}\\nexecution: {num_episodes: 1}\\noutput: {directory: data}\\n')
+p=WorkflowPage('datagen','/no/worker','modules');p.load_recipe(r);p.operation='prepare';p.busy=True
+sha=hashlib.sha256(r.read_bytes()).hexdigest();p.counts['env_num'].setValue(2)
+p.job_finished({'ok':True,'result':{'runnable':True,'state':'runtime_ready','reason':'ready','recipe_sha256':sha,'prepared_sha256':'old-check'}})
+assert p.ready is None and not p.start_button.isEnabled() and p.editor.dirty
+p.timer.stop();p.close()
+''',tmp_path)

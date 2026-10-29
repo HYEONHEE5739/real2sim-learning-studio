@@ -4,8 +4,8 @@ from pathlib import Path
 import uuid
 import time
 from PyQt6.QtCore import Qt,QTimer,QUrl
-from PyQt6.QtGui import QImage,QPixmap,QDesktopServices
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog,QGridLayout,QSplitter,QScrollArea,QDialog
+from PyQt6.QtGui import QImage,QPixmap,QDesktopServices,QShortcut,QKeySequence
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QMessageBox,QInputDialog,QGridLayout,QSplitter,QScrollArea,QDialog,QListWidget,QProgressBar
 from .recipe_editor import RecipeEditor
 from .jobs import BackendJob
 from .operations import stage_support,run_outcome
@@ -31,6 +31,7 @@ class WorkflowPage(QWidget):
         recipe_row=QGridLayout();settings.addLayout(recipe_row)
         self.load_button=QPushButton('Recipe 불러오기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 출력')
         for i,button in enumerate((self.load_button,self.save_button,self.check_button,self.new_output_button)):recipe_row.addWidget(button,i//2,i%2)
+        self.recipe_status=QLabel('저장 Recipe를 선택하세요');self.recipe_status.setWordWrap(True);settings.addWidget(self.recipe_status)
         self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe);self.new_output_button.clicked.connect(self.suggest_output)
         self.form=QVBoxLayout();settings.addLayout(self.form)
         self.details=QCheckBox('고급 설정 · 입력 계약 / Recipe YAML');self.advanced=QWidget();self.advanced_form=QVBoxLayout(self.advanced);self.advanced_form.setContentsMargins(0,0,0,0)
@@ -110,6 +111,8 @@ class WorkflowPage(QWidget):
         if stage in ('source','annotation','datagen','simulation_evaluation'):controls.addWidget(QLabel('Env'),1,3);controls.addWidget(self.preview_env,1,4)
         self.gripper_button=QPushButton('Gripper-Only · 별도 현장 승인 / 팔 5축 금지');self.gripper_button.setEnabled(False);self.gripper_button.clicked.connect(self.approve_gripper)
         if stage in ('real_evaluation','teleoperation'):box.addWidget(self.gripper_button)
+        self.progress_bar=QProgressBar();self.progress_bar.setRange(0,1);self.progress_bar.setValue(0);self.progress_bar.setFormat('Worker 대기');self.progress_text=QLabel('');self.progress_text.setWordWrap(True)
+        if stage in ('source','annotation','datagen','train','simulation_evaluation'):box.addWidget(self.progress_bar);box.addWidget(self.progress_text)
         self.media_splitter=QSplitter(Qt.Orientation.Vertical);box.addWidget(self.media_splitter,1)
         self.preview_card=QWidget();self.preview_card.setObjectName('previewCard');grid=QGridLayout(self.preview_card);self.media_splitter.addWidget(self.preview_card)
         self.previews={};self.sim_previews={}
@@ -137,9 +140,58 @@ class WorkflowPage(QWidget):
         self.media_splitter.setStretchFactor(0,3);self.media_splitter.setStretchFactor(1,1);self.media_splitter.setSizes([500,180])
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={}
+        if stage=='source':
+            self.viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus);self.shortcuts=[]
+            for key,kind in [('Right','save'),('Left','discard')]:
+                shortcut=QShortcut(QKeySequence(key),self.viewer);shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut);shortcut.setAutoRepeat(False);shortcut.activated.connect(lambda k=kind:self.commands[k].click()if self.commands[k].isEnabled()else None);self.shortcuts.append(shortcut)
+        if stage in ('capture','real_sim','precision_calibration'):self.build_observation_view(box,outer)
         support=stage_support(stage)
         if self.source_kind is not None:self.change_source_kind(self.source_kind.currentIndex())
         if not support['runnable']:self.state.setText(support['reason'])
+
+    def build_observation_view(self,box,outer):
+        # Original real2sim.ui: cameras above actions, shared bottom log.
+        box.removeWidget(self.action_card);box.addWidget(self.action_card)
+        self.readiness=QLabel('최근 완료 관측 없음 · 실물 팔 Goal/Torque 금지');self.readiness.setWordWrap(True);box.addWidget(self.readiness)
+        self.log_card.setMaximumHeight(140);outer.addWidget(self.log_card)
+        if self.stage=='capture':
+            self.capture_results=QListWidget();self.capture_results.setMaximumHeight(130);box.addWidget(self.capture_results)
+            self.start_button.setText('정지 상태 Capture 시작 · 읽기 전용')
+        if self.stage=='precision_calibration':
+            from ..robot.calibration import JOINTS
+            self.precision_names=JOINTS;self.precision_joint=QComboBox();self.precision_joint.addItems(JOINTS);box.insertWidget(0,self.precision_joint)
+            self.applied_angle=QLabel('최근 완료 측정 없음');self.applied_angle.setWordWrap(True);self.applied_angle.setStyleSheet('font-size:22px; font-weight:bold; padding:8px;');box.insertWidget(1,self.applied_angle)
+            self.precision_table=QTableWidget(6,4);self.precision_table.setHorizontalHeaderLabels(['관절','Raw','Native','Model rad']);self.precision_table.setMaximumHeight(210);self.precision_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers);box.insertWidget(2,self.precision_table)
+            for row,name in enumerate(JOINTS):
+                for col,value in enumerate((name,'—','—','—')):self.precision_table.setItem(row,col,QTableWidgetItem(value))
+            self.reference_table=QTableWidget(0,6);self.reference_table.setHorizontalHeaderLabels(['관절','Raw','기준각 rad','Split','근거','Reference ID']);self.reference_table.setMaximumHeight(180);self.reference_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers);box.insertWidget(3,self.reference_table)
+            inspect=QPushButton('기존 Profile 근거 보기 · 새 물리 보정 아님');inspect.clicked.connect(self.inspect_precision_profile);box.insertWidget(4,inspect)
+            self.precision_joint.currentTextChanged.connect(self.show_measured_joint)
+
+    def inspect_precision_profile(self):
+        if self.editor.path is None or self.busy:return
+        path=self.editor.path.parent/self.inputs['calibration_profile'].text()
+        self.operation='precision_profile';self.busy=True;self.job.start('precision_profile',path=str(path.resolve()))
+
+    def show_measured_joint(self,*_):
+        row=self.precision_joint.currentIndex()
+        value=self.precision_table.item(row,3).text();self.applied_angle.setText(self.precision_joint.currentText()+' · '+value+' model rad · 최근 완료 측정')
+
+    def display_hardware_result(self,data):
+        if hasattr(self,'readiness'):
+            self.readiness.setText('최근 Run '+str(data.get('status'))+' · 측정 '+str(data.get('frames',0))+' frame · command_sent='+str(data.get('command_sent',False)))
+        if self.stage=='capture' and data.get('verified_capture_frames')is not None:
+            self.capture_results.addItem('저장 관측 '+str(data['verified_capture_frames'])+' sample · '+self.handle['output_path'])
+        if self.stage=='precision_calibration':
+            last=data.get('last_observation',{});names=last.get('joint_order',[]);q=last.get('q_measured',[])
+            for row,name in enumerate(self.precision_names):
+                values=[last.get('raw',{}).get(name,'—'),last.get('native',{}).get(name,'—'),q[names.index(name)]if name in names and len(q)==len(names)else'—']
+                for col,value in enumerate(values,1):self.precision_table.setItem(row,col,QTableWidgetItem(str(value)))
+            self.show_measured_joint()
+        if self.stage=='real_sim' and data.get('real_sim'):
+            comparison=data['real_sim'];lines=['측정 q → '+comparison['engine']+' 상태 렌더 · Physics Step '+str(comparison['physics_steps'])]
+            lines.extend(name+' · RGB MAE '+str(row['photometric_mae_rgb_0_255'])+' / Landmark: '+row['landmark_error']for name,row in comparison['cameras'].items())
+            self.readiness.setText('\n'.join(lines)+'\nCalibration 승인 아님')
 
     def show_loss(self):
         if self.stage!='train':return
@@ -208,6 +260,7 @@ class WorkflowPage(QWidget):
 
     def invalidate(self):
         self.ready=None;self.start_button.setEnabled(False)
+        if hasattr(self,'recipe_status')and self.editor.dirty:self.recipe_status.setText('편집 중 · 저장하고 다시 검사하세요')
     def choose_recipe(self):
         path,_=QFileDialog.getOpenFileName(self,'저장 Recipe','','YAML (*.yaml *.yml)')
         if path:
@@ -238,7 +291,7 @@ class WorkflowPage(QWidget):
         self.sync_objects(data)
         if 'policy' in data['inputs']:self.show_policy_model(data['inputs']['policy'])
         fn=data.get('functions',{}).get('acceptance',data.get('functions',{}).get('success',{}));self.task_info.setText('Task · '+str(fn.get('function',''))+' · '+str(fn.get('params',{})))
-        self.invalidate();self.state.setText('저장됨 — 입력 검사를 실행하세요')
+        self.invalidate();self.recipe_status.setText('저장됨 · '+Path(path).name);self.state.setText('저장됨 — 입력 검사를 실행하세요')
     def safe_update(self,fn):
         try:self.editor.update(fn);return True
         except Exception as error:self.edit_error=True;self.invalidate();self.state.setText('Recipe 편집 오류: '+str(error))
@@ -354,6 +407,7 @@ class WorkflowPage(QWidget):
         if output:
             self.operation='precision_revision';self.busy=True;self.job.start('precision_revision',source=str(source),output=output)
     def check_recipe(self):
+        if self.busy:self.state.setText('현재 입력 작업 종료를 기다리세요');return
         if self.edit_error:self.state.setText('화면 편집 오류를 수정하거나 저장 Recipe를 다시 여세요');return
         if self.editor.path is None or self.editor.dirty:self.state.setText('먼저 Recipe를 저장하세요');return
         try:
@@ -381,13 +435,23 @@ class WorkflowPage(QWidget):
             self.ready=None;self.state.setText(response.get('error',{}).get('message','Backend 오류'));return
         data=response['result']
         if self.operation=='prepare':
+            import hashlib
+            if self.editor.dirty or self.editor.path is None or hashlib.sha256(self.editor.path.read_bytes()).hexdigest()!=data['recipe_sha256']:
+                self.ready=None;self.start_button.setEnabled(False);self.recipe_status.setText('검사 중 편집됨 · 저장하고 다시 검사하세요');return
             self.ready=data if data['runnable'] and data['state']=='runtime_ready' else None
-            self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None)
+            self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None);self.recipe_status.setText('저장 입력 검사 통과'if self.ready else'검사 완료 · 실행 차단')
         elif self.operation=='precision_revision':
             self.state.setText('새 검토 Revision · '+data['path']+' · physical_verified=false');self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
+        elif self.operation=='precision_profile':
+            if hasattr(self,'reference_table'):
+                self.reference_table.setRowCount(len(data['references']))
+                for row,reference in enumerate(data['references']):
+                    for col,key in enumerate(('joint','raw','angle_rad','split','evidence','reference_id')):self.reference_table.setItem(row,col,QTableWidgetItem(str(reference.get(key))))
+                self.readiness.setText('보존 '+data['role']+' Profile · '+data['source_sha256'][:12]+' · physical_verified='+str(data['physical_verified'])+' · 독립 각도 측정 미수행')
         elif self.operation=='terminal_hardware':
             self.dataset_state='실물 결과 재개방 확인 · 측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)));self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
-            self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
+            self.display_hardware_result(data)
+            self.log.appendPlainText('결과: '+str(data.get('status'))+' · 측정 '+str(data.get('frames',0))+' frame · command_sent='+str(data.get('command_sent',False)))
             for kind,labels in (('real',self.previews),('sim',self.sim_previews)):
                 for n,path in data.get('images',{}).get(kind,{}).items():
                     if n in labels:labels[n].setPixmap(QPixmap(path).scaled(640,480,Qt.AspectRatioMode.KeepAspectRatio))
@@ -422,6 +486,8 @@ class WorkflowPage(QWidget):
                 if event['kind']=='command_ack':self.log.appendPlainText('실제 명령 ACK · '+json.dumps(payload,ensure_ascii=False))
                 if event['kind']=='error':self.log.appendPlainText(json.dumps(payload,ensure_ascii=False))
             outcome=run_outcome({**record,'status':status.status});self.outcome=outcome
+            terminal=outcome['worker_finished']or status.status=='unknown';self.progress_bar.setRange(0,1 if terminal else 0);self.progress_bar.setValue(1 if status.status=='completed'else 0);self.progress_bar.setFormat('Worker '+status.status)
+            self.progress_text.setText('Episode '+str(outcome['completed_episodes'])+' · Attempt '+str(outcome['attempts']if outcome['attempts']is not None else'미집계')+' · Env '+str(self.context.get('env_index','—'))+' / tick '+str(self.context.get('tick','—'))+(' · 목표 미달'if outcome['goal_reached']is False else''))
             for kind,button in self.commands.items():button.setEnabled(not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.engine.currentText()!='isaaclab' or self.counts.get('env_num').value()==1) and (kind!='mark' or (self.mode.currentText()=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
             if outcome['worker_finished'] or status.status=='unknown':
                 self.cancel_button.setEnabled(False);self.gripper_button.setEnabled(False)
