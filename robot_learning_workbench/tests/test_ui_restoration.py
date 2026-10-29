@@ -136,7 +136,10 @@ assert p.episode_list.count()==1 and p.table.currentRow()==0
 from PyQt6.QtCore import Qt
 assert not(p.table.item(0,2).flags() & Qt.ItemFlag.ItemIsEditable)
 assert not(p.table.item(0,3).flags() & Qt.ItemFlag.ItemIsEditable)
-p.trim_start.setValue(2);p.trim_stop.setValue(5);p.seek(1)
+p.trim_start.setValue(2);p.trim_stop.setValue(5)
+wait(lambda:not p.busy and getattr(p,'last_review',{}).get('original_frame')==2)
+assert p.clock_label.text().startswith('0 / 2')
+p.seek(1)
 wait(lambda:not p.busy and getattr(p,'last_review',{}).get('original_frame')==3)
 assert p.dirty and p.frame.value()==1 and p.timeline.value()==1
 assert p.timeline.markers[0]['frame']==1
@@ -147,6 +150,7 @@ p.save_revision();wait(lambda:p.source==str(root/'revision.json')and not p.busy 
 assert not p.dirty and p.rows[0]['selection_range']==[2,5]
 assert p.trim_start.value()==2 and p.trim_stop.value()==5
 assert p.plot_data['original_range']==[2,5]
+assert p.clock_label.text().startswith('0 / 2') and p.last_review['original_frame']==2
 p.seek(0);wait(lambda:not p.busy)
 assert p.actions.frame==0 and p.actions.sample_frame==0
 p.analyze();wait(lambda:not p.busy)

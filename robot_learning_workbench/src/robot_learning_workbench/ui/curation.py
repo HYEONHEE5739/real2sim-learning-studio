@@ -121,7 +121,7 @@ class CurationPage(QWidget):
         if index<0:return
         self.table.item(index,2).setText(str(self.trim_start.value()));self.table.item(index,3).setText(str(self.trim_stop.value()))
         self.frame.setMaximum(max(0,self.trim_stop.value()-self.trim_start.value()-1));self.timeline.setMaximum(self.frame.maximum());self.sync_timeline_events()
-        self.update_plot_cursor()
+        self.seek(self.frame.value())
 
     def update_plot_cursor(self):
         index=self.table.currentRow()
@@ -217,7 +217,7 @@ class CurationPage(QWidget):
             self.frame.setMaximum(max(0,high-low-1));self.frame.setValue(0);self.timeline.setRange(0,self.frame.maximum());self.timeline.setValue(0)
             self.episode_list.setCurrentRow(index);self.episode_title.setText(self.rows[index]['selection_id']+' · 원본 ['+str(low)+', '+str(high)+')')
         finally:self._syncing_review=False
-        self.request_plot();self.review()
+        self.request_plot();self.seek(0)
     def finished(self,response):
         self.busy=False
         if not response.get('ok'):
