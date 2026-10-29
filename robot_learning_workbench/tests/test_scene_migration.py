@@ -7,7 +7,7 @@ from real2sim_builder.files import read,write,sha
 
 
 def test_migration_rebuilds_project_and_owns_data_without_source_links(tmp_path):
-    from test_candidate_pairs import candidate_fixture
+    from authoring_fixture import candidate_fixture
     from robot_learning_workbench.scene_migration import migrate_authoring
     original,c,model,mapping=candidate_fixture(tmp_path);note=original.root/'input/note.txt';note.write_text('existing measurement')
     evidence=original.evidence;evidence['briefs']=[{'path':'input/note.txt','sha256':sha(note)}];write(original.root/'input/evidence.yaml',evidence)
@@ -48,7 +48,7 @@ def test_registered_package_keeps_identity_bytes_and_closure_without_source(tmp_
 
 
 def test_runtime_residual_is_removed_from_new_authoring_revisions(tmp_path):
-    from test_candidate_pairs import candidate_fixture
+    from authoring_fixture import candidate_fixture
     from robot_learning_workbench.scene_migration import migrate_authoring
     from real2sim_builder.scene import value
     original,c,m,mapping=candidate_fixture(tmp_path);s=original.scene;s['robot_model']['simulation_joint_offsets_rad']=value([.01]*6,'estimated',['historical only']);write(original.root/'working/current_scene.yaml',s)

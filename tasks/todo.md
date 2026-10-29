@@ -300,3 +300,15 @@ Each Phase precedes the next; isolate thin slices, run focused checks, preserve 
 
 Actual new-unit calibration, measured physical accuracy and approved real arm
 Teleoperation remain unverified; see `docs/scene-preparation-v8.md`.
+
+
+## Real/Sim passive native Scene observation — 2026-10-30
+
+- [x] Replace Candidate/Input/notes/Teleoperation controls with executable Scene and engine selection, connect/Capture/stop.
+- [x] Mirror read-only Follower feedback into native MuJoCo/Isaac state and render four views without motor commands or physics rollout.
+- [x] Store/reopen four-image pairs with existing Snapshot/Builder contracts; remove replaced Candidate and finite live Real/Sim paths.
+- [x] Fix Capture button eligibility flashing and persistent operation errors without weakening timing/stability guards.
+- [x] Verify preparation cancellation, frozen Scene/settings identity, actual engines/Qt, full 1,153-test regression, wheel and original preservation.
+
+New physical Follower hand-motion E2E, exposure synchronization and physical accuracy
+remain unverified. See `docs/real-sim-observation.md` and `docs/capture-feedback.md`.

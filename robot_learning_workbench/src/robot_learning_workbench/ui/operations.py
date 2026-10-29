@@ -5,7 +5,7 @@ import sys
 
 
 def stage_support(stage: str) -> dict:
-    if stage in ('scene_capture','sdk_calibration','paired_rerender','capture_session','paired_session','teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
+    if stage in ('scene_capture','sdk_calibration','capture_session','paired_session','teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
     if stage=='source':return {'runnable':True,'reason':'Recorded Target Stream 또는 Live Leader 읽기 → Simulation Source. 실제 Follower 명령 없음.'}
@@ -36,13 +36,16 @@ def prepared(path: str,modules: str) -> dict:
         from ..robot.sdk_calibration import validate
         validate(plan)
         return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
-    if plan.stage in ('capture_session','paired_session'):
+    if plan.stage=='paired_session':
+        from ..robot.session_devices import construct_observation
+        from ..robot.scene_render import SceneView
+        devices,cameras=construct_observation(plan)
+        SceneView(plan.resolved_inputs['scene']['path'],plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
+        return {**support,'state':'runtime_ready','reason':'Follower/Camera 읽기 전용 → 선택 Scene 관측. 실물 모터 명령 없음','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+    if plan.stage=='capture_session':
         from ..robot.session_devices import construct
-        devices,cameras,bounds=construct(plan)  # Constructors only, never connect.
-        if plan.stage=='paired_session':
-            from ..robot.real_sim import CandidateView
-            CandidateView(plan.resolved_inputs['project']['root'],plan.resolved_inputs['candidate']['path'],plan.resolved_inputs['robot_model']['path'],devices['follower'].precision_mapper.metadata())
-        return {**support,'state':'runtime_ready','reason':'지속 연결 관측 준비 · 실물 Teleoperation은 새 현장 승인 전 차단','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+        construct(plan)
+        return {**support,'state':'runtime_ready','reason':'지속 관측 준비 · 실물 Teleoperation은 별도 현장 승인 필요','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage in ('teleoperation','real_evaluation') and plan.effective_settings['execution'].get('mode')=='gripper_once':
         from ..robot.live import open_inputs
         from ..robot.configuration import bind_gripper_command

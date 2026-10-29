@@ -356,7 +356,8 @@ def _poll_commands(root,state,stage):
             rows.append(row)
     rows.sort(key=lambda row:row['seq']);out=[]
     allowed={'cancel'}|({'pause','resume','step'} if stage in ('source','annotation','datagen','simulation_evaluation','real_sim') else set())|({'mark','skip'} if stage=='annotation' else set())|({'save','discard'} if stage=='source' else set())
-    if stage in('scene_capture','capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
+    if stage in('scene_capture','capture_session'):allowed|=set(_SESSION_COMMANDS)
+    if stage=='paired_session':allowed|={'session_snapshot','session_disconnect','session_finish','session_heartbeat'}
     if stage=='sdk_calibration':allowed.add('calibration_response')
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')
@@ -408,10 +409,10 @@ def _run_stage(plan,*,events,commands):
     if plan.stage in ('source','annotation','datagen','simulation_evaluation'):
         filename='evaluation' if plan.stage=='simulation_evaluation' else plan.stage
         module=f'engines.{plan.engine}.{filename}';function='run'
-    elif plan.stage=='paired_rerender':module='robot.real_sim';function='rerender'
+    elif plan.stage=='paired_session':module='robot.real_sim';function='run'
     elif plan.stage=='scene_capture':module='robot.scene_observation';function='run'
     elif plan.stage=='sdk_calibration':module='robot.sdk_calibration';function='run'
-    elif plan.stage in('capture_session','paired_session'):module='robot.session';function='run'
+    elif plan.stage=='capture_session':module='robot.session';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'
     elif plan.stage=='teleoperation':module='robot.teleoperation';function='run'
@@ -423,7 +424,7 @@ def _run_stage(plan,*,events,commands):
     if not (package/Path(*module.split('.'))).with_suffix('.py').is_file():_fail('STAGE_UNAVAILABLE','stage',module+' is not implemented')
     launcher=None
     try:
-        if plan.engine=='isaac' and (plan.stage in ('source','annotation','datagen','simulation_evaluation') or plan.stage=='real_sim' and plan.effective_settings['execution'].get('mode')!='offline'):
+        if plan.engine=='isaac' and plan.stage in ('source','annotation','datagen','simulation_evaluation'):
             from isaaclab.app import AppLauncher
             # SimulationApp5.1 fast_shutdown=True may exit the process inside
             # close(), before execute() publishes its terminal run record.

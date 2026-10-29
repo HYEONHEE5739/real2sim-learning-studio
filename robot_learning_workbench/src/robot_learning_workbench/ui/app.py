@@ -72,8 +72,9 @@ class Window(QMainWindow):
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
         self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','precision_calibration','real_evaluation')}
-        from .session_page import SessionPage
-        self.sessions={kind:SessionPage(kind,backend_python,modules,self.workspace,self)for kind in ('capture','real_sim')}
+        from .session_page import CapturePage
+        from .real_sim_page import RealSimPage
+        self.sessions={'capture':CapturePage(backend_python,modules,self.workspace,self),'real_sim':RealSimPage(backend_python,modules,self.workspace,self)}
         self.source_tabs=QWidget();source_layout=QVBoxLayout(self.source_tabs);source_layout.setContentsMargins(0,0,0,0);source_layout.addWidget(self.workflows['source'])
         self.source_dialog=QDialog(self);self.source_dialog.setWindowTitle('저장 Source 검토');self.source_dialog.resize(1400,920);QVBoxLayout(self.source_dialog).addWidget(self.source)
         source_review=QPushButton('저장 Source 검토');source_review.clicked.connect(self.source_dialog.show);self.workflows['source'].form.insertWidget(1,source_review)
@@ -100,6 +101,7 @@ class Window(QMainWindow):
         self.curation_dialog=QDialog(self);self.curation_dialog.setWindowTitle('Data Curation · Episode 검토');self.curation_dialog.resize(1400,920);self.curation_dialog.setWindowModality(Qt.WindowModality.WindowModal);QVBoxLayout(self.curation_dialog).addWidget(self.curation)
         self.tabs.addTab(self.sessions['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.sessions['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
         self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(1)
+        self.tabs.currentChanged.connect(lambda index:self.safety.setText('Real/Sim: Follower 측정값 → Sim 관측 · 실물 Goal/Torque 명령 없음'if index==1 else'실물 연결은 관측으로 시작 · 6축 Teleoperation은 현장 확인·개별 승인 후 활성화'))
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage('Scene v8 원본 보존 · 실제 모터 구동 기본 차단 · Hub 쓰기 별도 승인')
 
@@ -140,7 +142,7 @@ class Window(QMainWindow):
         if self.scene.builder.state()!=QProcess.ProcessState.NotRunning:
             self.scene.builder.terminate();event.ignore();QTimer.singleShot(500,self.close);return
         for page in self.workflows.values():page.timer.stop()
-        for page in self.sessions.values():page.client.timer.stop();page.settings.calibration_client.timer.stop()
+        for page in self.sessions.values():page.stop_timers()
         import shutil
         for page in (self.source,self.curation):
             page.stop_playback();shutil.rmtree(page.preview_directory,ignore_errors=True)

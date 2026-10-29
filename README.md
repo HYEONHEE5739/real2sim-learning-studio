@@ -39,7 +39,7 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Official LeRobot Dataset materialization with existing encoded video sharing.
 - Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
 - Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
-- Project-based persistent Capture and measured-state Real/Sim pairing with Builder registration and Candidate rerendering.
+- Project-based Capture, plus a separate read-only Real/Sim view: choose an executable Scene and MuJoCo/Isaac, mirror Follower feedback, capture four images and stop. Builder Candidate editing stays in Builder.
 - Hardware connections begin read-only. Supervised six-axis Teleoperation requires fresh on-site approval and runtime guards; autonomous real Policy control remains disabled. Physical motion is unverified.
   Six-axis Teleoperation is verified with memory devices; actual movement awaits on-site approval and hardware preconditions. Real Policy motor writes remain disabled.
   Gripper-only one-shot code requires a separate command binding and supervised motion approval; no physical motion is verified.
@@ -139,6 +139,8 @@ requires separately provisioned assets and SDK/Qt environments.
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
 - [Scene preparation, owned v8 and device setup](docs/scene-preparation-v8.md)
+- [Real/Sim observation and four-image Capture](docs/real-sim-observation.md)
+- [Capture status and button fixes](docs/capture-feedback.md)
 - [Persistent Capture / Real-Sim sessions](docs/capture-paired-sessions.md)
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
 - [Live observation, Capture and gripper approval boundary](docs/hardware-read-gripper.md)

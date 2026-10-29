@@ -1,261 +1,140 @@
-"""Measured-state Builder Candidate rendering and immutable paired evidence."""
-import copy,time,os,json
+"""Follower feedback → native Scene rendering and four-image Paired Capture.
+
+This connection has no Leader, Teleoperation capability, Goal or Torque command.
+"""
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import numpy as np
-from PIL import Image
-from ..data.native import digest,file_sha256,atomic_json
+import time
+from .capture import Stability,observed_positions,snapshot_state,capture_reason
 from .calibration import JOINTS
+from .devices import close_devices,DeviceError
+from .snapshots import SnapshotStore
+from .render_transport import RenderProcess
+from ..data.native import atomic_json
 
 
-def checked_geometry_binding(package_path,calibration_id,measured_model,geometry_model,mapping):
-    """Use only an existing package's declared baked geometry; never adjust q."""
-    from scene_contract.package import load_scene
-    from .calibration import mapper_from_scene
-    from .registration import mapping_coordinates_equal
-    package=load_scene(package_path);record=package.calibration['records'][calibration_id]
-    if record['kind']!='robot_residual'or record['application']['mode']!='baked':raise ValueError('Explicit baked geometry record required')
-    if record['source_model_sha256']!=file_sha256(measured_model)or record['execution_model_sha256']!=file_sha256(geometry_model):raise ValueError('Geometry/measurement model identity mismatch')
-    dependencies=record['application'].get('input_calibration_ids',[])
-    matching=False
-    for name in dependencies:
-        previous=package.calibration['records'][name]
-        if previous['kind']=='encoder_mapping':
-            expected=mapper_from_scene(package,name,role='follower',phase='device_observation').metadata()
-            matching=mapping_coordinates_equal(expected,mapping)
-    if not matching:raise ValueError('Baked geometry mapping differs from measured coordinates')
-    return {'manifest_sha256':package.identity.manifest_sha256,'calibration_id':calibration_id,'measurement_model_sha256':record['source_model_sha256'],
-            'geometry_model_sha256':record['execution_model_sha256'],'physical_verified':False,'files':[str(package.root/'manifest.json'),*[str(package.root/f.path)for f in package.files]]}
-
-
-class CandidateView:
-    def __init__(self,project,candidate,model,mapping):
+class RealSimSession:
+    def __init__(self,plan,devices,cameras,*,events):
         from real2sim_builder.project import Project
-        from real2sim_builder.files import read
-        from real2sim_builder.scene import validate
-        self.project=Project(project);self.path=Path(candidate).resolve();self.model=Path(model).resolve();self.mapping=copy.deepcopy(mapping)
-        if not self.path.is_relative_to(self.project.root):raise ValueError('Candidate must belong to selected Project')
-        self.scene=read(self.path);validate(self.scene,self.project.root,complete=True)
-        robot=self.scene.get('robot_model',{})
-        from .registration import mapping_coordinates_equal
-        self.geometry_binding=None
-        if robot.get('geometry_binding'):
-            from real2sim_builder.scene import local_path
-            binding=robot['geometry_binding'];self.geometry_binding=checked_geometry_binding(local_path(self.project.root,binding['package']),binding['calibration_id'],self.model,local_path(self.project.root,robot['path']),mapping)
-        elif robot.get('model_sha256')!=file_sha256(self.model):raise ValueError('Candidate robot model differs from measured model')
-        compatible=mapping_coordinates_equal(robot['mapping'],mapping)if robot.get('mapping',{}).get('schema')=='so101.precision-joint-mapping/1'else robot.get('mapping')==mapping
-        if not compatible or robot.get('joint_names')!=list(JOINTS):raise ValueError('Candidate joint mapping/order differs from measured feedback')
-        cameras={c['id']:c for c in self.scene['cameras']}
-        if set(cameras)!={'side','wrist'}or any(c['resolution']!=[640,480]for c in cameras.values()):raise ValueError('Explicit Candidate Side/Wrist640x480 required')
-        from real2sim_builder.scene import local_path
-        self.candidate_model=local_path(self.project.root,robot['path'])
-        if file_sha256(self.candidate_model)!=robot['model_sha256'] or self.geometry_binding is None and file_sha256(self.candidate_model)!=file_sha256(self.model):raise ValueError('Candidate FK URDF differs from measured model')
-        self.identity=self._identity()
-        self.watched=[self.path,self.model,self.candidate_model,*[local_path(self.project.root,r['path'])for r in self.scene['assets'].values()]]
-        self.watched+=self.geometry_binding['files']if self.geometry_binding else[]
-        self.watched=[Path(p)for p in self.watched];self.stats=self._stats()
-
-    def _stats(self):
-        return [(str(p),p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.stat().st_nlink)for p in self.watched]
-
-    def verify(self):
-        if self.geometry_binding is not None:
-            from real2sim_builder.scene import local_path
-            model=self.scene['robot_model'];binding=model['geometry_binding']
-            current=checked_geometry_binding(local_path(self.project.root,binding['package']),binding['calibration_id'],self.model,self.candidate_model,self.mapping)
-            if {k:v for k,v in current.items()if k!='files'}!={k:v for k,v in self.geometry_binding.items()if k!='files'}:raise ValueError('Geometry package Manifest/revision changed during Session')
-        if self._identity()!=self.identity:raise ValueError('Candidate/model/asset identity changed during session')
-
-    def _identity(self):
-        from real2sim_builder.scene import local_path
-        return dict(project_id=self.project.info['id'],candidate_path=str(self.path.relative_to(self.project.root)),candidate_sha256=file_sha256(self.path),
-            geometry_binding={k:v for k,v in self.geometry_binding.items()if k!='files'}if self.geometry_binding else None,model_sha256=file_sha256(self.model),candidate_model_sha256=file_sha256(self.candidate_model),camera_calibration_sha256=digest(self.scene['cameras']),
-            assets={key:file_sha256(local_path(self.project.root,row['path']))for key,row in self.scene['assets'].items()})
-
-    def pose(self,q):
-        from real2sim_builder.capture import observation_scene
-        q=np.asarray(q,dtype=float)
-        if q.shape!=(6,)or not np.isfinite(q).all():raise ValueError('Six finite measured joints required')
-        if self._stats()!=self.stats:
-            self.verify();self.stats=self._stats()
-        return observation_scene(self.scene,dict(session_id='measured_session',eligible=True,q_measured=q.tolist(),joint_names=list(JOINTS)),self.project.root)
-
-
-class CandidateRenderer:
-    def __init__(self,view,engine,directory):
-        self.view=view;self.engine=engine;self.directory=Path(directory);self.directory.mkdir(parents=True,exist_ok=True);self.isaac=None
-    def render(self,q,*,source_capture=None):
-        from real2sim_builder.scene import world_pose
-        begin=time.monotonic_ns();posed=self.view.pose(q);observations=[];geometry={}
-        if source_capture is not None:
-            from real2sim_builder.capture import load_session
-            source_capture=Path(source_capture).resolve()
-            if not source_capture.is_relative_to(self.view.project.root):raise ValueError('Source observation must belong to Project')
-            manifest,samples,_=load_session(source_capture)
-            if samples[0]['q_measured']!=list(q) or manifest['joint_mapping']!=self.view.mapping:raise ValueError('Source measured pose/mapping differs')
-            observations=[r for r in self.view.project.evidence['images']if (self.view.project.root/r['path']).resolve().is_relative_to(source_capture)]
-        if self.engine=='mujoco':
-            from real2sim_builder.rendering import Renderer
-            mode='software-egl'if os.environ.get('LIBGL_ALWAYS_SOFTWARE')=='1'else'egl'
-            with Renderer(posed,self.view.project.root,self.directory/'mjcf',mode)as renderer:
-                images={n:renderer.rgb(n)for n in('side','wrist')}
-                from real2sim_builder.validation import object_metrics
-                for observation in observations:
-                    wanted={r['object']for r in self.view.project.evidence.get('masks',[])if r['image']==observation['path']}
-                    masks={object_id:renderer.mask(observation['camera'],object_id)for object_id in wanted}
-                    geometry[observation['camera']]=object_metrics(self.view.project,posed,observation,masks)
-        elif self.engine in('isaac','isaaclab'):
-            from .candidate_isaac import StaticRenderer
-            if self.isaac is None:self.isaac=StaticRenderer(posed,self.view.project.root,self.directory)
-            images=self.isaac.render(posed)
-        else:raise ValueError('Actual MuJoCo or Isaac engine required')
-        return dict(images=images,measured_q_rad=np.asarray(q,dtype=float).tolist(),applied_sim_joint_rad=np.asarray(q,dtype=float).tolist(),
-            geometry=geometry,geometry_status='PROVIDED_EVIDENCE_DIAGNOSTICS'if geometry else'UNMEASURED',sim_joint_delta_rad=[0.]*6,candidate_identity=self.view.identity,engine=self.engine,physics_steps=0,state_application='builder_measured_joint_fk',
-            sim_timestamp={'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},render_ms=(time.monotonic_ns()-begin)/1e6,
-            sim_cameras={c['id']:{'resolution':c['resolution'],'K':c['K']['value'],'T_world_optical':world_pose(posed,c).tolist()}for c in posed['cameras']},joint_mapping=self.view.mapping)
-    def close(self):
-        if self.isaac is not None:self.isaac.close()
-    def __enter__(self):return self
-    def __exit__(self,*_):self.close()
-
-
-def write_pair(root,manifest,pending,rendered):
-    """Fill the existing snapshot paired-observation/1 before it is published."""
-    from real2sim_builder.files import read
-    from real2sim_builder.validation import compare
-    root=Path(root);row=manifest['snapshots'][0];shot=root/row['path'];metadata=read(shot/'metadata.json')
-    if rendered['measured_q_rad']!=pending['sample']['q_measured']:raise ValueError('Renderer result does not match frozen measured q')
-    context={'workspace_id':manifest['project_id'],'content_sha256':rendered['candidate_identity']['candidate_sha256'],'builder':{'manifest_sha256':digest(rendered['candidate_identity'])}}
-    metrics={};sim_files={}
-    for image in metadata['images']:
-        name=image['camera'];rgb=rendered['images'][name];real=np.asarray(Image.open(shot/image['path']).convert('RGB'));sim='sim_'+name+'.png'
-        transport=rendered.get('files',{}).get(name)
-        if transport is not None:
-            if file_sha256(transport['path'])!=transport['sha256']:raise ValueError('Rendered transport bytes changed')
-            if not(shot/sim).exists():os.link(transport['path'],shot/sim)
-            if file_sha256(shot/sim)!=transport['sha256']:raise ValueError('Paired render bytes changed while sharing')
-        else:Image.fromarray(rgb).save(shot/sim)
-        metadata['files'][sim]=file_sha256(shot/sim);sim_files[name]=sim
-        # Existing Builder diagnostics emit normalized RGB metrics and visual comparisons.
-        metrics[name]={**compare(real,rgb,shot/'comparison'/name,save_inputs=False),'objects':rendered.get('geometry',{}).get(name,[]),'landmark_rmse_px':None,'mask_iou':None,'geometry_status':'UNMEASURED'}
-    for path in (shot/'comparison').rglob('*.png'):metadata['files'][path.relative_to(shot).as_posix()]=file_sha256(path)
-    pair={k:v for k,v in rendered.items()if k not in('images','files','id','requested_ns','generation','result_latency_ms')};pair.update(schema='real2sim.paired-observation/1',meaning='historical_runtime_baseline_not_ground_truth',
-        measurement_basis='follower_feedback',workspace_context=context,sim_q_measured_rad=rendered['applied_sim_joint_rad'],quality={'eligible':not pending['quality'],'warnings':pending['quality'],'physical_verified':False},
-        sim_images=sim_files,comparison=metrics,hardware_synchronized=False,source_capture_timestamp_ns=pending['sample']['timestamp_ns'])
-    atomic_json(shot/'pair.json',pair);metadata['files']['pair.json']=file_sha256(shot/'pair.json');atomic_json(shot/'metadata.json',metadata)
-    row['metadata_sha256']=file_sha256(shot/'metadata.json');pending['comparison']=metrics
-
-
-class RenderProcess:
-    """A concrete read-only render child; serial control remains in Session."""
-    def __init__(self,plan,mapping):
-        import subprocess,sys
-        self.root=plan.output_path/'renderer';self.root.mkdir();self.engine=plan.engine;self.capture_id=None;self.last_live=None;self.last_request=0;self.number=0
-        view=CandidateView(plan.resolved_inputs['project']['root'],plan.resolved_inputs['candidate']['path'],plan.resolved_inputs['robot_model']['path'],mapping)
-        atomic_json(self.root/'config.json',dict(project=str(view.project.root),candidate=str(view.path),model=str(view.model),mapping=mapping,identity=view.identity,engine=plan.engine))
-        self.log=(self.root/'stdout.log').open('wb');self.process=subprocess.Popen([sys.executable,'-B','-m','robot_learning_workbench.robot.render_worker',str(self.root)],stdout=self.log,stderr=subprocess.STDOUT,start_new_session=True)
-
-    def observe(self,q):
-        now=time.monotonic_ns()
-        if now-self.last_request<100_000_000:return
-        self.number+=1;self.last_request=now;atomic_json(self.root/'latest.json',{'id':'live_'+str(self.number),'q':list(q),'requested_ns':now})
-
-    def capture(self,pending):
-        if self.capture_id is not None:raise ValueError('One Pair render at a time')
-        self.capture_id=pending['id'];atomic_json(self.root/'capture.json',{'id':self.capture_id,'q':pending['sample']['q_measured'],'requested_ns':time.monotonic_ns(),**({'source_capture':pending['source_capture']}if pending.get('source_capture')else{})})
-
-    def _read(self,name):
-        path=self.root/name
-        if not path.is_file():return None
-        before=path.read_bytes();result=json.loads(before);images={}
-        for camera,row in result['files'].items():
-            image=Path(row['path'])
-            if not image.resolve().is_relative_to(self.root.resolve()):raise ValueError('Render result escaped owned storage')
-            try:
-                if file_sha256(image)!=row['sha256']:return None
-                images[camera]=np.asarray(Image.open(image).convert('RGB'))
-            except(FileNotFoundError,OSError):return None
-        if path.read_bytes()!=before:return None
-        return {**result,'images':images,'result_latency_ms':(time.monotonic_ns()-result['requested_ns'])/1e6}
-
-    def poll(self):
-        if(self.root/'error.json').is_file():raise ValueError('Candidate render failed: '+json.loads((self.root/'error.json').read_text())['error'])
-        if self.process.poll()is not None:raise ValueError('Candidate render child exited: '+str(self.process.returncode))
-        live=self._read('live-result.json')
-        if live is not None and (self.last_live is None or live['id']!=self.last_live['id']):
-            self.last_live={k:v for k,v in live.items()if k!='images'}
-            from ..data import video
-            if video._preview_sink is not None:
-                for n,image in live['images'].items():video._preview_sink('sim_'+n,image,live['generation'],live['sim_timestamp']['monotonic_ns']/1e9,0)
-        result=self._read('capture-result.json')if self.capture_id is not None else None
-        if result is not None and result['id']==self.capture_id:self.capture_id=None;return result
-
-    def release_capture(self,identifier):
-        # Scratch cleanup cannot turn an already published observation into failure.
-        import shutil
-        from real2sim_builder.scene import identifier as validate_id
-        validate_id(identifier);warnings=[]
-        try:shutil.rmtree(self.root/'captures'/identifier)
-        except FileNotFoundError:pass
-        except OSError as error:warnings.append(str(error))
+        if set(devices)!={'follower'}:raise ValueError('Real/Sim observes only the Follower')
+        self.plan=plan;self.devices=devices;self.cameras=cameras;self.events=events;self.follower=devices['follower']
+        self.project=Project(plan.resolved_inputs['project']['root']);self.history=deque(maxlen=180);self.stability=Stability();self.packets={}
+        self.store=SnapshotStore(self.project,session_id=plan.output_path.name.replace('-','_'),model=plan.resolved_inputs['robot_model']['path'],mapping=self.follower.precision_mapper.metadata())
+        self.state='DISCONNECTED';self.terminal=False;self.closing=False;self.cancelled=False;self.renderer=None;self.snapshots=[];self.seen=set();self.last_heartbeat=time.monotonic_ns()
+        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='paired-capture');self.future=None;self.phase=None;self.acquiring=None;self.pending=None;self.command_pending=None
+    def emit(self,**progress):
+        busy=self.acquiring is not None or self.pending is not None or self.future is not None
+        self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'device_source':self.plan.effective_settings['execution']['device_source'],
+            'capture_request_allowed':self.state=='OBSERVING'and not busy and not self.closing,'capture_pending':busy,'snapshots':len(self.snapshots),**progress}}})
+    def ack(self,c,status='completed',reason=None):
+        self.events({'kind':'command_ack','payload':{'command_id':c['command_id'],'status':status,**({'reason':reason}if reason else{})}})
+    def connect(self):
+        self.state='CONNECTING';self.emit(capture_reason='Follower/Camera 연결과 선택 Scene 초기화 중')
         try:
-            path=self.root/'capture-result.json'
-            if path.is_file()and json.loads(path.read_text()).get('id')==identifier:path.unlink()
-        except (OSError,ValueError)as error:warnings.append(str(error))
-        return warnings
-
-    def close(self):
-        import signal,subprocess
-        (self.root/'stop').touch()
+            self.follower.connect()
+            for camera in self.cameras.values():camera.start()
+            from ..recipe import verify_prepared_inputs
+            verify_prepared_inputs(self.plan)
+            self.renderer=RenderProcess(self.plan,self.follower.precision_mapper.metadata());self.render_deadline=time.monotonic()+180
+        except BaseException:self.close();raise
+    def dispatch(self,commands):
+        rows=list(commands);stops=[c for c in rows if c['kind']in('cancel','session_disconnect','session_finish')]
+        for c in rows:
+            if c['kind']=='session_heartbeat':
+                t=c['payload']['timestamp_ns']
+                if 0<=time.monotonic_ns()-t<=1000000000:self.last_heartbeat=t
+                continue
+            if c['command_id']in self.seen:continue
+            self.seen.add(c['command_id'])
+            if stops and c not in stops:self.ack(c,'rejected','Stop/cancel takes precedence');continue
+            if c in stops:
+                self.cancelled|=c['kind']=='cancel';self.close();self.ack(c);continue
+            if c['kind']!='session_snapshot':self.ack(c,'rejected','Real/Sim is a read-only observation connection');continue
+            if self.state!='OBSERVING'or self.acquiring is not None or self.pending is not None or self.future is not None:
+                self.ack(c,'rejected','Wait for Real/Sim connection or current Capture to finish');continue
+            self.acquiring=c;self.acquire_deadline=time.monotonic()+5;self.state='CAPTURING';self.emit(capture_reason='최신 영상·관절 정합 확인 중')
+    def observe(self):
+        native,interval=self.follower.read();t=interval['end']['monotonic_ns'];q=observed_positions(self.follower.precision_mapper,native,raw=self.follower.last_raw,motor_specs=self.follower.motor_specs)
+        self.history.append({'timestamp_ns':t,'native':native,'raw':dict(self.follower.last_raw),'q_measured':[q[n]for n in JOINTS],'feedback_interval':interval})
+        self.stability.add(t,native);self.packets={n:c.nearest(t,not_after=True)for n,c in self.cameras.items()};self.observed_at=time.monotonic_ns()
+        self.renderer.observe(self.history[-1]['q_measured']);result=self.renderer.poll()
+        if self.renderer.last_live is not None and self.state=='CONNECTING':self.state='OBSERVING'
+        if self.state=='CONNECTING'and time.monotonic()>self.render_deadline:raise TimeoutError('Selected Scene did not initialize within180s')
+        if self.pending is not None and result is not None:
+            self.future=self.writer.submit(self.store.finish,self.pending,rendered=result);self.phase='finish'
+        from ..data import video
+        if video._preview_sink:
+            for name,packet in self.packets.items():
+                if packet is not None:video._preview_sink(name,packet['rgb'],packet['sequence'],t/1e9,0)
+        reason=capture_reason(self.history,self.stability,self.packets,self.store.last_sequences,busy=self.pending is not None or self.future is not None)
+        self.emit(q_measured=self.history[-1]['q_measured'],capture_ready=not reason,capture_reason=reason or'최신 측정 관절값으로 Real/Sim Capture할 수 있습니다',
+            camera_timing={n:None if p is None else {**self.cameras[n].statistics(),'age_ms':(time.monotonic_ns()-p['read_end']['monotonic_ns'])/1e6,'joint_skew_ms':(p['read_end']['monotonic_ns']-t)/1e6}for n,p in self.packets.items()},
+            render_timing=None if self.renderer.last_live is None else {'render_ms':self.renderer.last_live['render_ms'],'age_ms':(time.monotonic_ns()-self.renderer.last_live['sim_timestamp']['monotonic_ns'])/1e6})
+        if self.acquiring:
+            if not reason:
+                state=snapshot_state(self.follower,list(self.history),self.packets,self.stability.assess());state.update(captured_host_ns=self.observed_at,camera_metadata={n:c.metadata for n,c in self.cameras.items()},device_source=self.plan.effective_settings['execution']['device_source'])
+                self.command_pending=self.acquiring;self.acquiring=None;images={'real_'+n:p['rgb']for n,p in self.packets.items()}
+                self.future=self.writer.submit(self.store.prepare,'pair_'+self.command_pending['command_id'],state,images);self.phase='prepare'
+            elif time.monotonic()>self.acquire_deadline:
+                self.ack(self.acquiring,'rejected','5초 안에 정합된 관측을 얻지 못했습니다: '+reason);self.acquiring=None;self.state='OBSERVING'
+        self.poll_save()
+    def poll_save(self):
+        if self.future is None or not self.future.done():return
+        future=self.future;self.future=None
         try:
-            if self.process.poll()is None:
-                try:self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid,signal.SIGTERM)
-                    try:self.process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:os.killpg(self.process.pid,signal.SIGKILL);self.process.wait(timeout=5)
-        finally:self.log.close()
+            result=future.result()
+            if self.phase=='prepare':
+                self.pending=result
+                if self.closing:
+                    self.ack(self.command_pending,'rejected','Stopped before Sim render; sealed observation retained');self.command_pending=None
+                else:self.renderer.capture(self.pending);self.render_deadline=time.monotonic()+180
+            else:
+                self.snapshots.append(result);warnings=self.renderer.release_capture(self.pending['id'])
+                if warnings:self.events({'kind':'log','payload':{'level':'warning','message':'Render cleanup: '+str(warnings)}})
+                self.pending=None;self.ack(self.command_pending);self.command_pending=None;self.state='DISCONNECTING'if self.closing else'OBSERVING';self.emit(snapshot=result)
+        except Exception as error:
+            if self.command_pending:self.ack(self.command_pending,'rejected',str(error));self.command_pending=None
+            self.state='OBSERVING';self.emit(error=str(error),pending_snapshot=self.pending)
+    def close(self):
+        if self.terminal:return
+        self.closing=True;self.state='DISCONNECTING';self.emit();errors=[]
+        if self.acquiring:self.ack(self.acquiring,'rejected','Stopped before Capture');self.acquiring=None
+        try:close_devices({**self.devices,**self.cameras})
+        except Exception as error:errors.append(str(error))
+        if self.renderer:
+            try:self.renderer.close()
+            except Exception as error:errors.append(str(error))
+        try:
+            if self.future is not None:
+                try:self.future.result()
+                except Exception:pass
+                self.poll_save()
+            if self.command_pending:self.ack(self.command_pending,'rejected','Stopped before Pair completion; pending observation retained');self.command_pending=None
+            self.writer.shutdown(wait=True)
+        except Exception as error:errors.append(str(error))
+        self.terminal=True;self.state='FAILED'if errors else'DISCONNECTED';self.emit(cleanup_errors=errors)
+        if errors:raise DeviceError('real_sim_close','; '.join(errors),effect='not_applied')
 
 
-def derive_snapshot(project,source,identifier):
-    """Hardlink immutable measured files, replacing only owned derived metadata."""
-    import shutil
-    from real2sim_builder.capture import load_session
-    from real2sim_builder.files import read
-    manifest,samples,_=load_session(source);source=Path(source)
-    if manifest.get('project_id')!=project.info['id']:raise ValueError('Source Capture belongs to another Project')
-    if len(samples)!=1:raise ValueError('Select one Snapshot for rerender')
-    staging=project.root/'input/captures'/('pending_'+identifier)
-    shutil.copytree(source,staging,copy_function=os.link)
-    row=manifest['snapshots'][0];shot=staging/row['path'];metadata=read(shot/'metadata.json')
-    real_files={'state.json',*[i['path']for i in metadata['images']]}
-    for relative in list(metadata['files']):
-        if relative not in real_files:(shot/relative).unlink();del metadata['files'][relative]
-    atomic_json(shot/'metadata.json',metadata);row['metadata_sha256']=file_sha256(shot/'metadata.json')
-    manifest.update(dataset_id=identifier,derived_from={'path':str(source),'manifest_sha256':file_sha256(source/'capture_manifest.yaml')})
-    atomic_json(staging/'capture_manifest.yaml',manifest)
-    return dict(id=identifier,staging=str(staging),source_capture=str(source),sample={'timestamp_ns':samples[0]['timestamp_ns'],'q_measured':samples[0]['q_measured']},quality=metadata.get('quality_warnings',[]))
-
-
-def rerender(plan,*,events,commands):
+def run(plan,*,events,commands):
     from ..recipe import verify_prepared_inputs
     from ..run import StageResult
-    from .snapshots import SnapshotStore
-    from real2sim_builder.project import Project
-    from real2sim_builder.capture import load_session
-    from types import SimpleNamespace
-    verify_prepared_inputs(plan);plan.output_path.mkdir();source=Path(plan.resolved_inputs['capture_session']['path']);manifest,_,_=load_session(source)
-    project=Project(plan.resolved_inputs['project']['root']);model=source/manifest['robot']['path'];mapping=manifest['joint_mapping']
-    pending=derive_snapshot(project,source,plan.output_path.name.replace('-','_'))
-    render_plan=SimpleNamespace(output_path=plan.output_path,engine=plan.engine,resolved_inputs={**plan.resolved_inputs,'robot_model':{'path':str(model)}})
-    worker=RenderProcess(render_plan,mapping);deadline=time.monotonic()+180
+    from .session_devices import construct_observation
+    verify_prepared_inputs(plan);devices,cameras=construct_observation(plan);plan.output_path.mkdir();session=None;error=None
     try:
-        worker.capture(pending);result=None
-        while result is None:
-            if any(c['kind']=='cancel'for c in commands()):return StageResult('cancelled',(str(plan.output_path),),0,{'pending_snapshot':pending['staging']})
-            if time.monotonic()>deadline:raise TimeoutError('Candidate render did not finish within180s; measured input preserved')
-            result=worker.poll();time.sleep(.05)
-        store=SnapshotStore(project,session_id=plan.output_path.name.replace('-','_'),model=model,mapping=mapping)
-        saved=store.finish(pending,rendered=result);warnings=worker.release_capture(pending['id']);atomic_json(plan.output_path/'session-report.json',{'snapshots':[saved],'derived_from':str(source),'hardware_connected':False,'cleanup_warnings':warnings})
-        events({'kind':'status','payload':{'progress':{'snapshot':saved}}})
-        return StageResult('completed',(str(plan.output_path),),0,{'snapshots':1,'hardware_connected':False})
-    finally:worker.close()
+        session=RealSimSession(plan,devices,cameras,events=events);session.connect()
+        while not session.terminal:
+            begin=time.monotonic();session.dispatch(commands())
+            if session.terminal:break
+            if time.monotonic_ns()-session.last_heartbeat>3000000000:raise DeviceError('real_sim','UI heartbeat lost; closing observation',effect='not_applied')
+            if session.pending is not None and time.monotonic()>session.render_deadline:raise TimeoutError('Frozen Pair render timed out; observation retained')
+            session.observe();time.sleep(max(0,1/30-(time.monotonic()-begin)))
+    except Exception as exc:error=str(exc);raise
+    finally:
+        try:
+            if session:session.close()
+            else:close_devices({**devices,**cameras})
+        finally:atomic_json(plan.output_path/'session-report.json',{'state':session.state if session else'FAILED','error':error,'scene_identity':dict(plan.scene_identity),'snapshots':session.snapshots if session else[],
+            'pending_snapshot':session.pending if session else None,'hardware_connected':plan.effective_settings['execution']['device_source']=='hardware','command_sent':False,'goal_torque_writes':0})
+    return StageResult('cancelled'if session.cancelled else'completed',(str(plan.output_path),),0,{'snapshots':len(session.snapshots),'command_sent':False})

@@ -75,12 +75,11 @@ def test_snapshot_store_repeats_without_reopening_devices_or_duplication(tmp_pat
     finally:f.close()
 
 
-def test_pair_registration_and_rerender_keep_real_bytes_and_original_identity(tmp_path):
+def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_path):
     from test_robot_lifecycle import make
     from test_precision_calibration import CURRENT
     from robot_learning_workbench.robot.snapshots import SnapshotStore
     from robot_learning_workbench.robot.capture import snapshot_state
-    from robot_learning_workbench.robot.real_sim import derive_snapshot
     from robot_learning_workbench.data.native import file_sha256
     f,_,_=make(tmp_path);f.connect()
     try:
@@ -88,19 +87,19 @@ def test_pair_registration_and_rerender_keep_real_bytes_and_original_identity(tm
         packets={n:{'read_start':{'monotonic_ns':t-2_000_000},'read_end':{'monotonic_ns':t-1_000_000},'sequence':1}for n in('side','wrist')};state=snapshot_state(f,history,packets,{'stable':True,'window_start_ns':t-600_000_000,'window_end_ns':t})
         project=Project.create(tmp_path/'projects','Paired');store=SnapshotStore(project,session_id='session',model=CURRENT,mapping=f.precision_mapper.metadata());rgb={n:np.full((480,640,3),31,np.uint8)for n in('real_side','real_wrist')}
         pending=store.prepare('pair1',state,rgb,now_ns=t)
-        rendered=dict(images={n:rgb['real_'+n].copy()for n in('side','wrist')},measured_q_rad=pending['sample']['q_measured'],applied_sim_joint_rad=pending['sample']['q_measured'],candidate_identity={'candidate_sha256':'a'*64},engine='mujoco',sim_timestamp={'monotonic_ns':t+100_000_000},sim_cameras={},joint_mapping=f.precision_mapper.metadata())
+        rendered=dict(images={n:rgb['real_'+n].copy()for n in('side','wrist')},measured_q_rad=pending['sample']['q_measured'],applied_sim_joint_rad=pending['sample']['q_measured'],scene_identity={'manifest_sha256':'a'*64},engine='mujoco',sim_timestamp={'monotonic_ns':t+100_000_000},sim_cameras={},joint_mapping=f.precision_mapper.metadata())
         one=store.finish(pending,rendered=rendered);original=Path(one['path']);before={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
         baseline=project.evidence['images'][0]['runtime_baseline'];assert(project.root/baseline['pair_path']).is_file()and(project.root/baseline['path']).is_file()
-        new=derive_snapshot(project,original,'pair2');rendered['candidate_identity']['candidate_sha256']='b'*64;two=store.finish(new,rendered=rendered)
+        packets={n:{**p,'sequence':2}for n,p in packets.items()};state=snapshot_state(f,history,packets,state['real_stability'])
+        new=store.prepare('pair2',state,rgb,now_ns=t);rendered['scene_identity']['manifest_sha256']='b'*64;two=store.finish(new,rendered=rendered)
         assert before=={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
-        real=next(original.glob('shots/*/side.png'));derived=next(Path(two['path']).glob('shots/*/side.png'));assert real.stat().st_ino==derived.stat().st_ino
-        assert load_session(two['path'])[0]['derived_from']['manifest_sha256']==file_sha256(original/'capture_manifest.yaml')
+        assert load_session(two['path'])[0]['command_source']=='measured_observation_no_training_action'
         assert len(project.evidence['capture_sessions'])==2
     finally:f.close()
 
 
 def test_pair_transport_image_is_shared_and_ipc_paths_are_not_published(tmp_path):
-    from robot_learning_workbench.robot.real_sim import write_pair
+    from robot_learning_workbench.robot.pairs import write_pair
     from robot_learning_workbench.data.native import atomic_json,file_sha256
     from PIL import Image
     root=tmp_path/'pending';shot=root/'shots/one';shot.mkdir(parents=True);rgb=np.full((480,640,3),90,np.uint8)
@@ -109,7 +108,7 @@ def test_pair_transport_image_is_shared_and_ipc_paths_are_not_published(tmp_path
         Image.fromarray(rgb).save(shot/(name+'.png'));Image.fromarray(rgb).save(transport/(name+'.png'))
         files[name]={'path':str(transport/(name+'.png')),'sha256':file_sha256(transport/(name+'.png'))};images.append({'camera':name,'path':name+'.png'})
     atomic_json(shot/'metadata.json',{'images':images,'files':{}});manifest={'project_id':'fixture','snapshots':[{'path':'shots/one'}]};pending={'sample':{'q_measured':[0.]*6,'timestamp_ns':1},'quality':[]}
-    result={'images':dict.fromkeys(('side','wrist'),rgb),'files':files,'measured_q_rad':[0.]*6,'applied_sim_joint_rad':[0.]*6,'candidate_identity':{'candidate_sha256':'a'*64},'engine':'mujoco','sim_timestamp':{'monotonic_ns':2},'sim_cameras':{},'joint_mapping':{}}
+    result={'images':dict.fromkeys(('side','wrist'),rgb),'files':files,'measured_q_rad':[0.]*6,'applied_sim_joint_rad':[0.]*6,'scene_identity':{'manifest_sha256':'a'*64},'engine':'mujoco','sim_timestamp':{'monotonic_ns':2},'sim_cameras':{},'joint_mapping':{}}
     write_pair(root,manifest,pending,result)
     assert (shot/'sim_side.png').stat().st_ino==(transport/'side.png').stat().st_ino
     pair=json.loads((shot/'pair.json').read_text());assert 'files'not in pair

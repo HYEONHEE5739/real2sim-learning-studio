@@ -53,7 +53,7 @@ class SnapshotStore:
             if staging.exists():
                 manifest=read(staging/'capture_manifest.yaml')
                 if rendered is not None:
-                    from .real_sim import write_pair
+                    from .pairs import write_pair
                     write_pair(staging,manifest,pending,rendered)
                 write(staging/'capture_manifest.yaml',manifest);normalized,_,_=load_session(staging)
                 final=self.project.root/'input/captures'/normalized['session_id'];os.rename(staging,final);pending['path']=str(final)
@@ -61,6 +61,9 @@ class SnapshotStore:
             manifest=read(final/'capture_manifest.yaml');metadata=read(final/manifest['snapshots'][0]['path']/'metadata.json')
             paired='pair.json'in metadata['files']
             report=import_snapshots(self.project,final,paired=paired)
-        result=dict(id=identifier,path=str(final),project_id=self.project_id,session_id=self.session_id,status='SAVED',registration=report,
+        shot=final/manifest['snapshots'][0]['path'];images={i['camera']:str(shot/i['path'])for i in metadata['images']}
+        if paired:
+            pair=read(shot/'pair.json');images.update({'sim_'+n:str(shot/file)for n,file in pair['sim_images'].items()})
+        result=dict(images=images,id=identifier,path=str(final),project_id=self.project_id,session_id=self.session_id,status='SAVED',registration=report,
             quality=pending['quality'],timestamp_ns=pending['sample']['timestamp_ns'],unix_ns=pending['sample'].get('unix_ns'),q_measured=pending['sample']['q_measured'],calibration_approved=False,paired=paired)
         self.completed[identifier]=result;return result

@@ -18,31 +18,54 @@ class MemoryCamera:
     def read(self):time.sleep(1/30);return self.image.copy()
 
 
-def construct(plan):
+def binding(plan,role):
     from ..recipe import _plain
+    device_key,profile_key=('device_profile','calibration_profile')if role=='follower'else('leader_device_profile','leader_calibration_profile')
     model=Path(plan.resolved_inputs['robot_model']['path']);model_hash=file_sha256(model);source=plan.resolved_inputs.get('source_robot_model')
-    profiles={};specs={};devices={};memory=plan.effective_settings['execution']['device_source']=='memory'
-    for role,device_key,profile_key in(('follower','device_profile','calibration_profile'),('leader','leader_device_profile','leader_calibration_profile')):
-        profile=load_profile(plan.resolved_inputs[profile_key]['path'],role=role)
-        if profile['urdf_sha256']!=model_hash:
-            if source is None:raise ValueError('Explicit source_robot_model required for verified limit-only model binding')
-            profile=profile_for_model(profile,model_hash,source_model=Path(source['path']).read_bytes(),execution_model=model.read_bytes())
-        spec=_plain(plan.input_documents[device_key])
-        if spec['role']!=role:raise ValueError('Wrong device role')
-        profiles[role]=profile;specs[role]=spec
-    bounds={n:e['limits']for n,e in joint_specs(model).items()};initial=None
+    profile=load_profile(plan.resolved_inputs[profile_key]['path'],role=role)
+    if profile['urdf_sha256']!=model_hash:
+        if source is None:raise ValueError('Explicit source_robot_model required for verified limit-only model binding')
+        profile=profile_for_model(profile,model_hash,source_model=Path(source['path']).read_bytes(),execution_model=model.read_bytes())
+    spec=_plain(plan.input_documents[device_key])
+    if spec['role']!=role:raise ValueError('Wrong device role')
+    return spec,profile
+
+
+def device(spec,profile,memory,initial=None,*,memory_port=None):
     if memory:
-        from .calibration import PrecisionMapper
-        f=PrecisionMapper(profiles['follower']).command_limits(bounds);l=PrecisionMapper(profiles['leader']).command_limits(bounds)
-        initial={n:(max(f[n][0],l[n][0])+min(f[n][1],l[n][1]))/2 for n in JOINTS}
-    for role,profile in profiles.items():
-        spec=specs[role]
-        if memory:
-            from .teleoperation import fake_device
-            device=fake_device(spec,profile,initial_model_q=initial);device.read_only=True
-        else:device=create_observer(spec,profile)
-        devices[role]=device
+        import copy
+        spec=copy.deepcopy(spec);profile=copy.deepcopy(profile)
+        spec['sdk']['port']=str(memory_port);profile['identity']['port']=str(Path(memory_port).resolve())
+        from .teleoperation import fake_device
+        result=fake_device(spec,profile,initial_model_q=initial);result.read_only=True
+    else:result=create_observer(spec,profile)
+    return result
+
+
+def construct(plan):
+    from .calibration import PrecisionMapper
+    model=Path(plan.resolved_inputs['robot_model']['path']);bounds={n:e['limits']for n,e in joint_specs(model).items()}
+    memory=plan.effective_settings['execution']['device_source']=='memory';bindings={r:binding(plan,r)for r in('leader','follower')};initial=None
+    if memory:
+        limits={r:PrecisionMapper(p).command_limits(bounds)for r,(_,p)in bindings.items()}
+        initial={n:(max(limits['follower'][n][0],limits['leader'][n][0])+min(limits['follower'][n][1],limits['leader'][n][1]))/2 for n in JOINTS}
+    devices={r:device(spec,profile,memory,initial,memory_port=plan.output_path/('memory-'+r))for r,(spec,profile)in bindings.items()}
     if Path(devices['leader'].bus.port).resolve()==Path(devices['follower'].bus.port).resolve():raise ValueError('Leader/Follower cannot share a serial port')
+    return devices,construct_cameras(plan),bounds
+
+
+def construct_observation(plan):
+    from .calibration import PrecisionMapper
+    spec,profile=binding(plan,'follower');memory=plan.effective_settings['execution']['device_source']=='memory';initial=None
+    if memory:
+        limits=PrecisionMapper(profile).command_limits({n:e['limits']for n,e in joint_specs(plan.resolved_inputs['robot_model']['path']).items()})
+        initial={n:(low+high)/2 for n,(low,high)in limits.items()}
+    return {'follower':device(spec,profile,memory,initial,memory_port=plan.output_path/'memory-follower')},construct_cameras(plan)
+
+
+def construct_cameras(plan):
+    from ..recipe import _plain
+    memory=plan.effective_settings['execution']['device_source']=='memory'
     configs=_plain(plan.input_documents['camera_config'])['cameras']
     if set(configs)!={'side','wrist'}:raise ValueError('Both Side/Wrist camera definitions required')
     paths=[];cameras={}
@@ -54,4 +77,4 @@ def construct(plan):
         cameras[name]=CameraReader(MemoryCamera(name),device='memory:'+name)if memory else CameraReader.from_config(cfg)
         cameras[name].metadata['synthetic_input']=memory
     if len(set(paths))!=2:raise ValueError('Side/Wrist cannot share a camera device')
-    return devices,cameras,bounds
+    return cameras

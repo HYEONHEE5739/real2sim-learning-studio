@@ -540,13 +540,17 @@ the UI's Continue action edits an append request for the selected existing root.
 All new-run suggestions remain editable; old artifacts are never migrated.
 
 
-## 지속 Capture / Paired Session
+## Capture와 Real/Sim 연결
 
-`capture_session`과 `paired_session`은 Project·명시 장치/Precision/Camera/Robot Model 입력으로 기존 R03 Worker를 사용한다. Project identity는 project.yaml, Candidate와 자산/실행 코드는 불변 입력으로 고정하며 추가 Capture 때문에 mutable Evidence 전체를 고정하지 않는다. `paired_rerender`는 보존 Capture와 다른 Candidate의 파생 결과를 저장하며 장치를 연결하지 않는다. 상세 계약과 사용자 흐름은 [지속 Session 보고서](capture-paired-sessions.md)에 있다.
+`capture_session`은 Project·Leader/Follower·명시 Model/Precision/Camera 입력으로 관측과 별도 승인 Teleoperation을 제공한다. `paired_session`은 별도 읽기 전용 Follower/Camera Session이며 등록된 닫힌 Scene Package·engine_config를 요구한다. Leader·명령 budget·Candidate 입력을 받지 않는다. 두 UI는 각각 CapturePage/RealSimPage가 소유하며 Snapshot 목록만 같은 표시 컴포넌트를 사용한다. Real/Sim은 Scene/엔진 선택과 연결·Capture·중단만 제공한다.
 
-사용자 명령은 기존 ordered/idempotent ACK 계약을 유지한다. 주기 UI heartbeat는 `touch_session(handle, monotonic_ns)`의 최신 run-owned 값 하나이며 사용자 동작의 완료 ACK가 아니다. 숨김/종료/중지 시 Teleoperation 권한을 차단하고, 읽기 전용 장치의 권한을 flag로 승격하지 않는다. 실물 구동은 현재 proposal에 결합한 현장 승인이 필요하다.
+Project 등록 Scene identity와 실제 Manifest를 설정 복원·prepare에서 대조하고, 장치 연결 뒤 Prepared 입력을 재검사한다. render child 시작 직전에도 Scene·엔진 설정 SHA를 Prepared 값과 비교한다. NativeRenderer는 실제 MuJoCo/Isaac Scene의 관절 **상태**를 Follower 측정값으로 갱신한다. 추가 runtime offset·Policy/Position Target·실물 Goal/Torque·Physics rollout을 사용하지 않는다. Isaac 상태의 float32 표현 차이는 applied_sim_joint_rad/delta로 보존한다.
 
-저장은 기존 `real2sim.snapshot/1` 및 `real2sim.paired-observation/1`이다. Raw/Native/model 측정값과 명령 목표를 구분하며, 정지 Capture는 학습 Action을 생성하지 않는다. 미확인 Base/Camera Calibration은 `NEEDS_MORE_DATA`로 등록한다. Pair는 frozen measured q 기준이며 하드웨어 동시 노출이나 물리 Calibration 승인이 아니다.
+구형 Candidate 기반 paired_rerender Stage와 전용 런타임을 제거했다. 기존 real_sim Stage는 보존 입력의 명시 offline 검사만 허용한다. 새 Scene 비교를 구형 유한 observer에 mode 분기로 추가하지 않는다. 과거 Snapshot/Pair 원본과 Reader는 유지한다.
+
+사용자 명령은 기존 ordered/idempotent R03 ACK 계약을 유지한다. 주기 heartbeat는 최신 run-owned 값 하나이며 완료 ACK가 아니다. Real/Sim은 teleop 명령을 거부한다. 준비 중 중단이면 Worker를 시작하지 않고, start 응답 대기 중 중단이면 반환된 owned handle에 cancel을 보낸다. Stop은 요청·저장을 우선 중지하고 실제 port/camera/render child 정리를 기다린다. Torque 상태를 바꾸지 않는다.
+
+저장은 기존 real2sim.snapshot/1 + real2sim.paired-observation/1이다. 같은 frozen 관측 q에 대한 Real2/Sim2 원본을 게시하고 네 경로를 목록에 반환한다. SDK/Raw/model 측정과 실제 Sim 적용 dtype을 구분하며 학습 Action은 만들지 않는다. Camera/joint skew100ms·age200ms·안정성·새 sequence 조건은 유지한다. Capture 버튼의 요청 가능 상태와 그 순간 데이터의 저장 적격성은 별개다. Pair는 hardware 동시 노출·물리 Calibration 승인이 아니다. 상세는 [Real/Sim](real-sim-observation.md), [Capture 피드백](capture-feedback.md) 참조.
 
 
 ## Scene preparation and local devices
@@ -562,7 +566,7 @@ resolves exact USB serial/VID/PID again; tty numbering does not establish roles.
 Same-identity configuration edits preserve calibration; a different unit does not
 inherit its mapping. JSON/YAML remains an explicit advanced interface.
 
-Mapped `capture_session`/`paired_session` retain Snapshot and Pair contracts.
+Mapped `capture_session` and read-only `paired_session` retain Snapshot and Pair contracts; paired_session uses the registered executable Scene and has no Leader/Teleoperation capability.
 `scene_capture` is a separate RO SDK-native/camera reference path using Builder
 images/documents, with no fabricated model state or Action. `sdk_calibration` is a
 separate, explicit on-site procedure invoking official SDK calibration with R03

@@ -12,7 +12,7 @@ class SessionClient(QObject):
     terminal=pyqtSignal(str)
     error=pyqtSignal(str)
     def __init__(self,python,modules,parent=None):
-        super().__init__(parent);self.modules=str(modules);self.handle=None;self.busy=False;self.running=False;self.phase=None;self.cursor=0;self.generations={};self.heartbeat=0
+        super().__init__(parent);self.modules=str(modules);self.handle=None;self.busy=False;self.running=False;self.phase=None;self.cursor=0;self.generations={};self.heartbeat=0;self.cancel_requested=False
         self.job=BackendJob(python,self);self.job.finished.connect(self.done);self.job.log.connect(self.error)
         self.timer=QTimer(self);self.timer.setInterval(80);self.timer.timeout.connect(self.poll);self.timer.start()
     def active(self):return self.busy or self.running
@@ -20,15 +20,18 @@ class SessionClient(QObject):
         if self.active():raise ValueError('기존 연결 종료를 기다리세요')
         import yaml
         self.stage=yaml.safe_load(Path(path).read_text())['stage']
-        self.path=str(path);self.busy=True;self.phase='prepare';self.job.start('prepare',path=self.path,modules=self.modules)
+        self.path=str(path);self.busy=True;self.phase='prepare';self.cancel_requested=False;self.job.start('prepare',path=self.path,modules=self.modules)
     def done(self,response):
         self.busy=False
         if not response.get('ok'):self.error.emit(response.get('error',{}).get('message','Backend error'));self.terminal.emit('failed');return
         result=response['result']
         if self.phase=='prepare':
-            if not result.get('runnable'):self.error.emit(result['reason']);return
+            if self.cancel_requested:self.terminal.emit('cancelled');return
+            if not result.get('runnable'):self.error.emit(result['reason']);self.terminal.emit('failed');return
             self.busy=True;self.phase='start';self.job.start('start',path=self.path,modules=self.modules,request_id=uuid.uuid4().hex,expected_recipe_sha256=result['recipe_sha256'],expected_prepared_sha256=result['prepared_sha256'])
-        elif self.phase=='start':self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0
+        elif self.phase=='start':
+            self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0
+            if self.cancel_requested:self.send('cancel')
     def send(self,kind,payload=None):
         if not self.running:raise ValueError('연결된 Session이 없습니다')
         from ..run import RunHandle,send_command
@@ -67,4 +70,5 @@ class SessionClient(QObject):
             if event['kind']=='status':self.progress.emit(event['payload'].get('progress',{}))
         return len(page.items)
     def cancel(self):
+        self.cancel_requested=True
         if self.running:self.send('cancel')

@@ -63,18 +63,3 @@ def test_real_observe_policy_performs_official_path_but_never_sends(tmp_path,mon
     assert record['command_sent'] is False
     assert record['status']==('FAILED'if fail_second else'HARDWARE_READ_VERIFIED')
     if fail_second:assert 'second inference'in record['error']
-
-
-def test_real_sim_renderer_keeps_measured_q_separate_from_position_commands(tmp_path):
-    from scene_contract.package import load_scene
-    from robot_learning_workbench.engines.mujoco.source import resolved_model_config
-    from robot_learning_workbench.robot.live import render_comparison
-    from test_policy_paths import ROOT
-    import json
-    scene=load_scene(ROOT/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native/scene.json')
-    # Reuse the exercised ModelConfig rather than changing physics or assets.
-    settings=json.loads((ROOT/'docs/evidence/hardware-read-gripper/real-sim-engine.json').read_text())
-    p=NS(engine='mujoco',scene=scene,input_documents={'engine_config':settings})
-    q=np.array(settings['initial_joint_rad']);rgb,actual=render_comparison(p,q,tmp_path)
-    np.testing.assert_array_equal(actual,q)
-    assert set(rgb)=={'side','wrist'} and all(x.shape==(480,640,3)for x in rgb.values())

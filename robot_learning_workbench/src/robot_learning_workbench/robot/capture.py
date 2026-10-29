@@ -384,3 +384,29 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
         if child.name!='COMPLETE':os.replace(child,destination/child.name)
     os.replace(root/'COMPLETE',destination/'COMPLETE');root.rmdir()
     return destination
+
+
+def capture_reason(history,stability,packets,sequences,*,busy=False):
+    """Current observation eligibility; accepting a capture request is a separate state."""
+    reason=''
+    if busy:reason='Pair 렌더/저장 중';return reason
+    assessment=stability.assess()
+    if not history or not assessment.get('stable'):
+        if assessment.get('reason')in('insufficient_history','warming_up'):
+            reason='Follower 자세 안정 확인 중 · 최소0.6초의 연속 관측이 필요합니다'
+        else:
+            limits=assessment.get('thresholds',{})
+            reason=f"Follower 자세 안정 대기 · 관절 변화 {assessment.get('arm_span_deg',0):.2f}°/{limits.get('arm_span_deg',1.):.2f}°, 그리퍼 {assessment.get('gripper_span_percentage_points',0):.2f}/{limits.get('gripper_span',2.):.2f}%p, 측정 간격 {assessment.get('max_gap_ms',0):.0f}ms/100ms"
+        return reason
+    t=history[-1]['timestamp_ns'];now=time.monotonic_ns()
+    window=[r['timestamp_ns']for r in history if r['timestamp_ns']>=assessment['window_start_ns']]
+    gap=max((b-a for a,b in zip(window,window[1:])),default=0)
+    if gap>100_000_000:reason=f'관절 측정 간격 {gap/1e6:.0f}ms >100ms · 연속 Follower 관측 대기';return reason
+    for name,p in packets.items():
+        label=name.title()
+        if p is None:reason=label+' 영상 수신 대기';return reason
+        age=now-p['read_end']['monotonic_ns'];skew=abs(t-p['read_end']['monotonic_ns'])
+        if age>200_000_000:reason=f'{label} 영상 age {age/1e6:.0f}ms >200ms · 새 프레임 대기';return reason
+        if skew>100_000_000:reason=f'{label} 영상↔관절 시간차 {skew/1e6:.0f}ms >100ms · 새 프레임 대기';return reason
+        if p['sequence']<=sequences.get(name,-1):reason=label+': 새 프레임 대기';return reason
+    return ''

@@ -1,8 +1,7 @@
 """Persistent R03 hardware sessions. UI commands never carry motor targets."""
-import time,copy
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from .capture import Stability,observed_positions,snapshot_state
 from .devices import close_devices,DeviceError
 from .supervised import Teleoperation
@@ -12,12 +11,12 @@ from ..data.native import atomic_json
 
 
 class HardwareSession:
-    def __init__(self,plan,devices,cameras,bounds,*,events,renderer=None):
+    def __init__(self,plan,devices,cameras,bounds,*,events):
         from real2sim_builder.project import Project
-        self.plan=plan;self.devices=devices;self.cameras=cameras;self.events=events;self.renderer=renderer
+        self.plan=plan;self.devices=devices;self.cameras=cameras;self.events=events
         self.state='DISCONNECTED';self.terminal=False;self.closing=False;self.cancelled=False;self.finished=False;self.snapshots=[];self.pending=None;self.pending_command=None
         self.history=deque(maxlen=180);self.packets={};self.stability=Stability();self.last_heartbeat=time.monotonic_ns();self.capture_error='연결 후 안정된 관측을 기다립니다';self.seen=set()
-        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.pending_render=None;self.acquiring=None;self.acquire_deadline=0
+        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.acquiring=None;self.acquire_deadline=0
         self.project=Project(plan.resolved_inputs['project']['root']);self.session_id=plan.output_path.name.replace('-','_')
         self.store=SnapshotStore(self.project,session_id=self.session_id,model=plan.resolved_inputs['robot_model']['path'],mapping=devices['follower'].precision_mapper.metadata())
         settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,max_step_rad=settings.get('max_command_step_rad'),max_follow_error_rad=settings.get('max_follow_error_rad'))
@@ -52,7 +51,6 @@ class HardwareSession:
             from .telemetry import Recorder
             if not hasattr(self,'recorder'):self.recorder=Recorder(self.plan,self.devices['follower'])
             self.recorder.append(row)
-        if self.renderer is not None:self.renderer.observe(self.history[-1]['q_measured'])
         from ..data import video
         if video._preview_sink is not None:
             for name,packet in self.packets.items():
@@ -61,28 +59,9 @@ class HardwareSession:
                   camera_timing={n:None if p is None else {**self.cameras[n].statistics(),'sequence':p['sequence'],'age_ms':(time.monotonic_ns()-p['read_end']['monotonic_ns'])/1e6,'joint_skew_ms':(p['read_end']['monotonic_ns']-t)/1e6}for n,p in self.packets.items()})
 
     def capture_ready(self):
-        self.capture_error=''
-        if self.pending is not None or self.saving is not None:self.capture_error='Pair 렌더/저장 중';return False
-        stability=self.stability.assess()
-        if not self.history or not stability.get('stable'):
-            if stability.get('reason')in('insufficient_history','warming_up'):
-                self.capture_error='Follower 자세 안정 확인 중 · 최소0.6초의 연속 관측이 필요합니다'
-            else:
-                limits=stability.get('thresholds',{})
-                self.capture_error=f"Follower 자세 안정 대기 · 관절 변화 {stability.get('arm_span_deg',0):.2f}°/{limits.get('arm_span_deg',1.):.2f}°, 그리퍼 {stability.get('gripper_span_percentage_points',0):.2f}/{limits.get('gripper_span',2.):.2f}%p, 측정 간격 {stability.get('max_gap_ms',0):.0f}ms/100ms"
-            return False
-        t=self.history[-1]['timestamp_ns'];now=time.monotonic_ns()
-        window=[r['timestamp_ns']for r in self.history if r['timestamp_ns']>=stability['window_start_ns']]
-        gap=max((b-a for a,b in zip(window,window[1:])),default=0)
-        if gap>100_000_000:self.capture_error=f'관절 측정 간격 {gap/1e6:.0f}ms >100ms · 연속 Follower 관측 대기';return False
-        for name,p in self.packets.items():
-            label=name.title()
-            if p is None:self.capture_error=label+' 영상 수신 대기';return False
-            age=now-p['read_end']['monotonic_ns'];skew=abs(t-p['read_end']['monotonic_ns'])
-            if age>200_000_000:self.capture_error=f'{label} 영상 age {age/1e6:.0f}ms >200ms · 새 프레임 대기';return False
-            if skew>100_000_000:self.capture_error=f'{label} 영상↔관절 시간차 {skew/1e6:.0f}ms >100ms · 새 프레임 대기';return False
-            if p['sequence']<=self.store.last_sequences.get(name,-1):self.capture_error=label+': 새 프레임 대기';return False
-        return True
+        from .capture import capture_reason
+        self.capture_error=capture_reason(self.history,self.stability,self.packets,self.store.last_sequences,busy=self.pending is not None or self.saving is not None)
+        return not self.capture_error
 
     def dispatch(self,commands):
         commands=list(commands)
@@ -120,7 +99,7 @@ class HardwareSession:
             elif kind=='session_import':
                 if self.saving is not None or self.pending_command is not None:raise ValueError('Capture/render/save is still running; retry after failure')
                 if self.pending is None or self.pending['id']!=payload['snapshot_id']:raise ValueError('No recoverable pending capture')
-                self.pending_command=command;self.complete_capture(self.pending_render);return
+                self.pending_command=command;self.complete_capture();return
             else:raise ValueError('Command is not supported by this Session')
             self.ack(command)
         except Exception as error:
@@ -140,9 +119,8 @@ class HardwareSession:
         elif time.monotonic()>self.acquire_deadline:
             command=self.acquiring;self.acquiring=None;self.state='TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.ack(command,'rejected','정합된 관측을5초 안에 얻지 못했습니다: '+self.capture_error)
 
-    def complete_capture(self,rendered=None):
-        if rendered is not None:self.pending_render=rendered
-        self.saving=self.writer.submit(self.store.finish,self.pending,rendered=rendered);self.save_phase='finish'
+    def complete_capture(self):
+        self.saving=self.writer.submit(self.store.finish,self.pending);self.save_phase='finish'
 
     def poll_capture(self):
         self.try_capture()
@@ -152,16 +130,10 @@ class HardwareSession:
             result=future.result()
             if self.save_phase=='prepare':
                 self.pending=result
-                if self.closing and self.renderer is not None:
-                    self.ack(self.pending_command,'rejected','Disconnected before Pair render; sealed observation retained');self.pending_command=None;return
-                if self.renderer is None:self.complete_capture()
-                else:self.renderer.capture(self.pending)
+                self.complete_capture()
             else:
                 self.snapshots.append(result)
-                if self.renderer is not None:
-                    warnings=self.renderer.release_capture(self.pending['id'])
-                    if warnings:self.events({'kind':'log','payload':{'level':'warning','message':'Render IPC cleanup: '+str(warnings)}})
-                self.pending=None;self.pending_render=None;self.ack(self.pending_command);self.pending_command=None
+                self.pending=None;self.ack(self.pending_command);self.pending_command=None
                 self.state='DISCONNECTING'if self.closing else'TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.emit(snapshot=result)
         except Exception as error:
             self.ack(self.pending_command,'rejected',str(error));self.pending_command=None;self.state='OBSERVING';self.teleoperation.stop();self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
@@ -171,9 +143,6 @@ class HardwareSession:
         self.closing=True;self.teleoperation.stop();self.state='DISCONNECTING';self.emit();errors=[]
         if self.acquiring is not None:
             self.ack(self.acquiring,'rejected','Disconnected before synchronized capture; no observation published');self.acquiring=None
-        if self.renderer is not None:
-            try:self.renderer.close()
-            except Exception as error:errors.append(str(error))
         try:close_devices({**self.devices,**self.cameras})
         except Exception as error:errors.append(str(error))
         if hasattr(self,'recorder'):
@@ -195,14 +164,9 @@ def run(plan,*,events,commands):
     from ..recipe import verify_prepared_inputs
     from ..run import StageResult
     from .session_devices import construct
-    verify_prepared_inputs(plan);devices,cameras,bounds=construct(plan);plan.output_path.mkdir();renderer=None
-    if plan.stage=='paired_session':
-        from .real_sim import RenderProcess
-        renderer=RenderProcess(plan,devices['follower'].precision_mapper.metadata())
-    try:session=HardwareSession(plan,devices,cameras,bounds,events=events,renderer=renderer)
-    except Exception:
-        if renderer is not None:renderer.close()
-        close_devices({**devices,**cameras});raise
+    verify_prepared_inputs(plan);devices,cameras,bounds=construct(plan);plan.output_path.mkdir()
+    try:session=HardwareSession(plan,devices,cameras,bounds,events=events)
+    except Exception:close_devices({**devices,**cameras});raise
     error=None
     try:
         session.connect()
@@ -212,10 +176,6 @@ def run(plan,*,events,commands):
             if time.monotonic_ns()-session.last_heartbeat>3_000_000_000:raise DeviceError('session','UI heartbeat lost; no further goals',effect='not_applied')
             session.observe()
             session.poll_capture()
-            if renderer is not None:
-                result=renderer.poll()
-                if renderer.last_live is not None:session.emit(render_timing={'render_ms':renderer.last_live['render_ms'],'age_ms':(time.monotonic_ns()-renderer.last_live['sim_timestamp']['monotonic_ns'])/1e6})
-                if result is not None and session.pending is not None:session.complete_capture(result)
             time.sleep(max(0,1/30-(time.monotonic()-begin)))
     except Exception as exc:error=str(exc);raise
     finally:

@@ -75,7 +75,7 @@ class DeviceSetup(QDialog):
             except Exception as error:self.status.setText(str(error))
     def load_recipe(self,path):
         path=Path(path).resolve();data=yaml.safe_load(path.read_text())
-        if data.get('stage')not in('scene_capture','capture_session','paired_session'):raise ValueError('Scene 관측 또는 지속 Session 구성을 선택하세요')
+        if data.get('stage')not in('scene_capture','capture_session'):raise ValueError('Capture 장치 구성을 선택하세요. Real/Sim은 Scene에서 구성을 복원합니다.')
         for k,v in data['inputs'].items():data['inputs'][k]=str((path.parent/v).resolve())
         self.advanced.text.setPlainText(yaml.safe_dump(data,sort_keys=False,allow_unicode=True));self.saved_recipe=path
         for key,spec_key in(('leader','leader_device_profile'),('follower','device_profile')):

@@ -173,7 +173,7 @@ app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.
 c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.workflows['precision_calibration']
 assert hasattr(c,'snapshot_table')and hasattr(c,'client')
 assert set(r.previews)=={'side','wrist','sim_side','sim_wrist'}
-assert not c.start_teleop_button.isEnabled()and not r.start_teleop_button.isEnabled()
+assert not c.start_teleop_button.isEnabled()and not hasattr(r,'start_teleop_button')
 assert p.reference_table.columnCount()==6 and p.precision_table.rowCount()==6
 for page in (p,w.workflows['real_evaluation']):
     assert not page.gripper_button.isEnabled()

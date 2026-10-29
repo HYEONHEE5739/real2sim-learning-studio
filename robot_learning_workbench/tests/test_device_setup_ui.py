@@ -71,7 +71,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.app import Window
 app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace');p=w.sessions['capture']
-for key in('one','two','one'):p.add_snapshot({'id':key,'path':str(root/'shared-dataset'),'q_measured':[]})
+for key in('one','two','one'):p.snapshot_table.append({'id':key,'path':str(root/'shared-dataset'),'q_measured':[]})
 assert len(p.rows)==2 and p.snapshot_table.rowCount()==2
 w.close()
 ''',tmp_path)

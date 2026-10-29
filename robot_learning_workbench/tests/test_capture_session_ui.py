@@ -11,14 +11,13 @@ from robot_learning_workbench.ui.app import Window
 app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace')
 for size in ((1320,900),(1920,1080)):
  w.resize(*size);w.show();app.processEvents()
- for name,tab in [('capture',0),('real_sim',1)]:
-  w.tabs.setCurrentIndex(tab);app.processEvents();p=w.sessions[name]
-  assert p.project_combo.isVisible() and p.settings_button.isVisible()
-  assert set(p.previews)==({'side','wrist'}if name=='capture'else{'side','wrist','sim_side','sim_wrist'})
-  assert p.snapshot_table.isVisible() and len(p.joint_labels)==6
-  assert not p.start_teleop_button.isEnabled()and not p.capture_button.isEnabled()
-  assert not p.disconnect_button.isEnabled()and not p.finish_button.isEnabled()
-  assert p.width()<=size[0] and p.height()<size[1]
+ p=w.sessions['capture'];w.tabs.setCurrentIndex(0);app.processEvents()
+ assert p.project_combo.isVisible()and p.settings_button.isVisible()
+ assert set(p.previews)=={'side','wrist'}
+ assert p.snapshot_table.isVisible()and len(p.joint_labels)==6
+ assert not p.start_teleop_button.isEnabled()and not p.capture_button.isEnabled()
+ assert not p.disconnect_button.isEnabled()and not p.finish_button.isEnabled()
+ assert p.width()<=size[0]and p.height()<size[1]
 w.close();app.processEvents();assert not w.isVisible()
 assert not any(m in sys.modules for m in ('torch','lerobot','isaaclab','mujoco','serial'))
 ''',tmp_path)

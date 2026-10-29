@@ -60,6 +60,7 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
         return gripper_trial(plan,events=events,commands=commands)
     if opts.get('enable_motion') or mode not in ('observe_only','live_capture'):
         raise DataError('ARM_MOTION_NOT_APPROVED','execution','ARM_MOTION_NOT_APPROVED: live workers collect observations only')
+    if plan.stage not in('capture','precision_calibration','real_evaluation'):raise ValueError('Live Real/Sim uses paired_session; real_sim is offline inspection only')
     verify_prepared_inputs(plan)
     frames=opts.get('max_frames',1)
     if type(frames)is not int or not 1<=frames<=300:raise ValueError('Explicit bounded max_frames in 1..300 required')
@@ -140,20 +141,6 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
                 metadata.update(scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)))
             save_session(plan.output_path,model=model,mapping=device.precision_mapper.metadata(),samples=rows,images=images,metadata=metadata,scene=plan.scene)
         else:plan.output_path.mkdir()
-        if plan.stage=='real_sim' and rows and not cancelled:
-            from PIL import Image
-            if set(cameras)!={'side','wrist'}:raise ValueError('Real/Sim needs measured Side/Wrist RGB')
-            simulated,applied=render_comparison(plan,np.array(rows[-1]['q_measured']),plan.output_path)
-            comparison={}
-            for name,rgb in simulated.items():
-                Image.fromarray(rgb).save(plan.output_path/('sim-'+name+'.png'))
-                Image.fromarray(images[-1][name]).save(plan.output_path/('real-'+name+'.png'))
-                comparison[name]={'photometric_mae_rgb_0_255':float(np.abs(rgb.astype(float)-images[-1][name].astype(float)).mean()),
-                    'landmark_error':'unmeasured: no corresponding observed landmarks supplied',
-                    'calibration_approved':False,'camera_host_skew_ns':rows[-1]['camera_timing'][name]['joint_skew_ns']}
-            report['real_sim']={'engine':plan.engine,'measured_q_rad':rows[-1]['q_measured'],'simulation_state_q_rad':applied.tolist(),
-                'state_dtype':str(applied.dtype),'cameras':comparison,'physics_steps':0,'physical_robot_commands':0,
-                'scope':'measured state rendering and photometric comparison; not geometric Calibration approval'}
         if plan.stage=='precision_calibration':
             from .calibration import review_joint
             report['precision']={'joint_reviews':{n:review_joint(e)['review']for n,e in device.profile['joints'].items()},
@@ -170,43 +157,6 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
         try:
             if policy is not None:policy.reset()
         finally:close_devices(owned)
-
-
-def render_comparison(plan: 'PreparedRun', measured_q: np.ndarray, directory: Path) -> tuple[dict[str,np.ndarray],np.ndarray]:
-    """Render measured simulation state, not a motor target or a physics rollout."""
-    from ..recipe import _plain
-    settings=_plain(plan.input_documents.get('engine_config'))
-    q=np.asarray(measured_q,dtype=np.float64)
-    if q.shape!=(6,) or not np.isfinite(q).all():raise ValueError('Finite measured model-radian q required')
-    if settings is None:raise ValueError('Explicit existing engine_config required for Real/Sim render')
-    if plan.engine=='mujoco':
-        import mujoco
-        from ..engines.mujoco.model import ModelConfig,build_model
-        model,binding=build_model(plan.scene,ModelConfig(**settings));data=mujoco.MjData(model)
-        data.qpos[list(binding.q_indices)]=q;mujoco.mj_forward(model,data)
-        with mujoco.Renderer(model,height=480,width=640)as renderer:
-            images={}
-            for name in ('side','wrist'):
-                renderer.update_scene(data,camera=binding.camera_ids[name]);images[name]=renderer.render().copy()
-        return images,data.qpos[list(binding.q_indices)].copy()
-    if plan.engine=='isaac':
-        import torch,tempfile
-        from isaaclab.envs import ManagerBasedEnv
-        from ..engines.isaac.env_cfg import build_env_cfg
-        env=None
-        with tempfile.TemporaryDirectory(dir=directory,prefix='real-sim-')as temporary:
-            try:
-                env=ManagerBasedEnv(cfg=build_env_cfg(plan.scene,settings,runtime_directory=Path(temporary)/'runtime'));env.reset()
-                robot=env.scene['robot'];ids=[robot.joint_names.index(n)for n in JOINTS]
-                pose=robot.data.joint_pos.clone();pose[:,ids]=torch.tensor(q,dtype=pose.dtype,device=env.device)
-                robot.write_joint_state_to_sim(pose,torch.zeros_like(pose));env.scene.write_data_to_sim();env.sim.forward()
-                for _ in range(3):env.sim.render()
-                for name in ('side','wrist'):env.scene['camera_'+name].update(env.physics_dt,force_recompute=True)
-                images={n:env.scene['camera_'+n].data.output['rgb'][0,:,:,:3].detach().cpu().numpy().copy()for n in ('side','wrist')}
-                return images,robot.data.joint_pos[0,ids].detach().cpu().numpy().copy()
-            finally:
-                if env is not None:env.close()
-    raise ValueError('Supported actual engine required')
 
 
 def gripper_trial(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callable[[],Iterable[dict]]) -> 'StageResult':

@@ -118,18 +118,3 @@ def test_retry_cannot_replace_pending_snapshot_command_during_save(tmp_path):
     assert s.saving is future and s.pending_command['command_id']=='original'
     assert events[-2]['payload']['status']=='rejected'
     s.saving=None;s.close()
-
-
-def test_pair_render_in_flight_cannot_be_recovered_as_unpaired_capture(tmp_path):
-    from robot_learning_workbench.robot.session import HardwareSession
-    from robot_learning_workbench.robot.session_devices import construct
-    from test_precision_calibration import OLD
-    import yaml
-    path,project,spec=session_recipe(tmp_path);spec['inputs']['source_robot_model']=str(OLD);path.write_text(yaml.safe_dump(spec))
-    plan=prepare_recipe(read_recipe(path));d,c,b=construct(plan);events=[];s=HardwareSession(plan,d,c,b,events=events.append)
-    try:
-        s.pending={'id':'pair_pending'};s.pending_command={'command_id':'original'};s.renderer=object()
-        s.command({'kind':'session_import','command_id':'retry','payload':{'snapshot_id':'pair_pending'}})
-        assert s.saving is None and s.pending_command['command_id']=='original'
-        assert any(e['kind']=='command_ack'and e['payload']['status']=='rejected'for e in events)
-    finally:s.renderer=None;s.pending_command=None;s.close()

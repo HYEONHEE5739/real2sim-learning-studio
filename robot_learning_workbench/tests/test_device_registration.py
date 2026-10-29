@@ -33,18 +33,6 @@ def test_registration_never_reuses_a_different_units_or_geometry_precision_mappi
     b=copy.deepcopy(a);b['profile']['urdf_sha256']='0'*64;b=PrecisionMapper(b['profile']).metadata();assert not mapping_coordinates_equal(a,b)
 
 
-def test_registered_geometry_accepts_only_its_exact_measured_model_and_mapping():
-    from robot_learning_workbench.robot.real_sim import checked_geometry_binding
-    from scene_contract.package import load_scene
-    from robot_learning_workbench.robot.calibration import mapper_from_scene
-    root=Path(__file__).resolve().parents[2]/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native';package=load_scene(root/'scene.json');record=package.calibration['records']['residual']
-    measured=next(root/f.path for f in package.files if f.sha256==record['source_model_sha256']);geometry=next(root/f.path for f in package.files if f.sha256==record['execution_model_sha256']);mapping=mapper_from_scene(package,'follower',role='follower',phase='device_observation').metadata()
-    assert checked_geometry_binding(root/'scene.json','residual',measured,geometry,mapping)['manifest_sha256']==package.identity.manifest_sha256
-    with pytest.raises(ValueError,match='model'):checked_geometry_binding(root/'scene.json','residual',geometry,geometry,mapping)
-    wrong=dict(mapping);wrong['sha256']='0'*64
-    with pytest.raises(ValueError,match='mapping|hash'):checked_geometry_binding(root/'scene.json','residual',measured,geometry,wrong)
-
-
 def test_new_so101_setup_needs_device_choices_not_handwritten_profiles(tmp_path):
     from robot_learning_workbench.robot.registration import configure_selected
     from real2sim_builder.files import read
@@ -76,13 +64,3 @@ def test_edit_camera_keeps_same_usb_pair_calibration_and_precision(tmp_path):
     choices['follower']['serial']='different-unit';fresh=read(configure_selected(tmp_path,'different hardware',choices,existing=file))
     assert fresh['stage']=='scene_capture'and 'calibration_profile'not in fresh['inputs']
     assert not Path(read(fresh['inputs']['device_profile'])['calibration_path']).exists()
-
-
-def test_geometry_binding_rechecks_exact_package_manifest_identity(monkeypatch,tmp_path):
-    import robot_learning_workbench.robot.real_sim as module
-    from types import SimpleNamespace
-    view=module.CandidateView.__new__(module.CandidateView)
-    view.geometry_binding={'manifest_sha256':'a'*64,'files':[]};view.project=SimpleNamespace(root=tmp_path);view.model=tmp_path/'measurement.urdf';view.candidate_model=tmp_path/'geometry.urdf';view.mapping={}
-    view.scene={'robot_model':{'geometry_binding':{'package':'package/scene.json','calibration_id':'geometry'}}};view.identity={'unchanged':'cached'};view._identity=lambda:view.identity
-    monkeypatch.setattr(module,'checked_geometry_binding',lambda *a:{'manifest_sha256':'b'*64,'files':[]})
-    with pytest.raises(ValueError,match='Manifest|manifest|revision'):view.verify()
