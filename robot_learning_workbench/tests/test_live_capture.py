@@ -10,7 +10,7 @@ def test_capture_writer_reuses_builder_reader_and_preserves_model_and_measuremen
     _,mapper=bound('follower')
     from robot_learning_workbench.robot.calibration import JOINTS
     samples=[{'id':'sample1','timestamp_ns':100,'q_measured':[0.]*6,'images':[],'joint_skew_ns':0,'command_applied':False}]
-    images={'side':np.zeros((480,640,3),np.uint8),'wrist':np.full((480,640,3),17,np.uint8)}
+    images={'side':np.repeat((np.indices((480,640)).sum(0)%2*255).astype(np.uint8)[:,:,None],3,axis=2),'wrist':np.full((480,640,3),17,np.uint8)}
     source=tmp_path/'source';source.mkdir();model=source/'robot.urdf'
     # A fixture with exact six-joint unit declarations, no external mesh deps.
     model.write_text('<robot name="fixture">'+''.join('<joint name="'+n+'" type="revolute"/>'for n in JOINTS)+'</robot>')
@@ -21,6 +21,7 @@ def test_capture_writer_reuses_builder_reader_and_preserves_model_and_measuremen
     m,rows,_=load_session(output)
     assert rows[0]['q_measured']==[0.]*6 and rows[0]['command_applied'] is False
     assert len(rows[0]['images'])==2 and m['clock']['hardware_synchronized'] is False
+    assert rows[0]['images'][0]['blur_variance']>10 and rows[0]['images'][1]['blur_variance']==0
     assert model.read_bytes()==(output/m['robot']['path']).read_bytes()
     assert samples[0]['images']==[]
     with pytest.raises(FileExistsError):capture.save_session(output,model=model,mapping=mapping,samples=samples,images=[images],metadata={})

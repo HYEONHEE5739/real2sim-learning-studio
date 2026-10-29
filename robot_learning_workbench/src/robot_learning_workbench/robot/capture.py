@@ -204,6 +204,11 @@ def assess_pair(
         "limitation": "Software pairing of host receipt times only; USB exposure/buffering latency is unknown. Eligibility is a heuristic, not proof of geometric calibration.",
     }
 
+def blur_variance(rgb: np.ndarray) -> float:
+    """Existing Laplacian texture heuristic; never a Calibration approval."""
+    import cv2
+    return float(cv2.Laplacian(cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY),cv2.CV_64F).var())
+
 def prepare_snapshot(state, images, profile, now_ns=None):
     """Validate and freeze one whole observation before publishing any files."""
     state=copy.deepcopy(state)
@@ -242,7 +247,6 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     for n,detail in joint_limit_warnings.items():
         warnings.append(f'{n}: measured {np.degrees(detail["measured_rad"]):.2f} deg outside URDF limits; original measurement retained')
     observed = []
-    import cv2
     for name in ('side', 'wrist'):
         rgb = images['real_' + name]
         if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
@@ -258,7 +262,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
             raise ValueError(name + ' image/joint timestamp skew exceeds 100 ms')
         if start < stability['window_start_ns'] or t > stability['window_end_ns']:
             raise ValueError(name + ' frame is not covered by stable measured feedback')
-        blur = float(cv2.Laplacian(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var())
+        blur = blur_variance(rgb)
         if blur < 10:
             warnings.append(name + ': blurred or textureless image; excluded from calibration')
         observed.append({'camera': name, 'path': name + '.png', 'timestamp_ns': t,
@@ -332,7 +336,7 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
             relative=f'images/{index:08d}-{camera}.png';target=root/relative;target.parent.mkdir(exist_ok=True)
             Image.fromarray(rgb).save(target);files[relative]=hashlib.sha256(target.read_bytes()).hexdigest()
             timing=row.get('camera_timing',{}).get(camera,{})
-            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],sequence=timing.get('sequence',index),timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
+            row['images'].append(dict(camera=camera,blur_variance=blur_variance(rgb),path=relative,resolution=[640,480],sequence=timing.get('sequence',index),timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
     atomic_json(root/'samples.json',rows);atomic_json(root/'events.json',[])
     for name in ('samples.json','events.json'):files[name]=hashlib.sha256((root/name).read_bytes()).hexdigest()
     manifest=dict(schema='real2sim.capture/1',session_id=destination.name.replace('-','_'),group_id=destination.name.replace('-','_'),split='train',purpose='demonstration',

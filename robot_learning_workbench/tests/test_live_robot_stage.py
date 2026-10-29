@@ -36,7 +36,8 @@ def test_full_real_motion_is_rejected_before_any_connection(tmp_path,monkeypatch
     with pytest.raises(ValueError,match='ARM_MOTION_NOT_APPROVED'):live.run(p,events=lambda _:None,commands=lambda:())
 
 
-def test_real_observe_policy_performs_official_path_but_never_sends(tmp_path,monkeypatch):
+@pytest.mark.parametrize('fail_second',[False,True])
+def test_real_observe_policy_performs_official_path_but_never_sends(tmp_path,monkeypatch,fail_second):
     # Fake optical/device boundary; actual loop must call policy_inputs/infer/reset.
     from test_robot_lifecycle import make
     from robot_learning_workbench.learning import policy
@@ -46,14 +47,22 @@ def test_real_observe_policy_performs_official_path_but_never_sends(tmp_path,mon
     monkeypatch.setattr(live,'open_inputs',lambda p:(device,{}))
     monkeypatch.setattr(policy,'policy_inputs',lambda *a:(NS(reset=lambda:calls.append('reset')),None,None,{'step':4},{'joint_order':list(JOINTS)}))
     monkeypatch.setattr(policy,'observation_batch',lambda *a,**kw:{})
-    monkeypatch.setattr(policy,'infer',lambda *a,**kw:(calls.append('infer')or np.ones((1,6))*.2))
+    def infer(*a,**kw):
+        calls.append('infer')
+        if fail_second and calls.count('infer')==2:raise ValueError('Controlled second inference error')
+        return np.ones((1,6))*.2
+    monkeypatch.setattr(policy,'infer',infer)
     scene=NS(scene={'robot':{'model_sha256':'a'*64}})
     p=NS(stage='real_evaluation',effective_settings={'execution':{'mode':'observe_only','max_frames':2}},input_documents={},resolved_inputs={},scene=scene,output_path=tmp_path/'out')
-    live.run(p,events=lambda _:None,commands=lambda:())
+    if fail_second:
+        with pytest.raises(ValueError,match='second inference'):live.run(p,events=lambda _:None,commands=lambda:())
+    else:live.run(p,events=lambda _:None,commands=lambda:())
     record=json.loads((p.output_path/'hardware-report.json').read_text())
     assert calls==['reset','infer','infer','reset']
     assert record['observations'][0]['policy_action_model_rad']==[.2]*6
     assert record['command_sent'] is False
+    assert record['status']==('FAILED'if fail_second else'HARDWARE_READ_VERIFIED')
+    if fail_second:assert 'second inference'in record['error']
 
 
 def test_real_sim_renderer_keeps_measured_q_separate_from_position_commands(tmp_path):

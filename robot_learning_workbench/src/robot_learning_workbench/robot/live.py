@@ -161,6 +161,11 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
                 'new_calibration_saved':False,'motor_specs':device.motor_specs}
         atomic_json(plan.output_path/'hardware-report.json',report)
         return StageResult('cancelled'if cancelled else 'completed',(str(plan.output_path),),0,{'frames':len(rows),'arm_commands':0,'command_sent':False})
+    except Exception as error:
+        report.update(status='FAILED',frames=len(rows),observations=rows,error=str(error))
+        plan.output_path.mkdir(exist_ok=True)
+        atomic_json(plan.output_path/'hardware-report.json',report)
+        raise
     finally:
         try:
             if policy is not None:policy.reset()
