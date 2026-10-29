@@ -64,6 +64,7 @@ class RecipeDocument:
 
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
+ 'paired_rerender':({'project','candidate','capture_session'},set()),
  'capture_session':({'project','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
  'paired_session':({'project','candidate','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
  'teleoperation':({'device_profile','calibration_profile'},{'leader_device_profile','leader_calibration_profile','scene','camera_config'}),
@@ -74,6 +75,7 @@ _INPUTS={
  'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session','scene','robot_model'}),
  'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session','engine_config','robot_model'})}
 _EXEC={
+ 'paired_rerender':(set(),set()),
  'capture_session':({'device_source','max_command_step_rad','max_follow_error_rad'},set()),
  'paired_session':({'device_source','max_command_step_rad','max_follow_error_rad'},set()),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
@@ -108,7 +110,7 @@ def _validate(data,path):
     if type(data['schema_version']) is not int or data['schema_version']!=1:_fail('schema_version','unsupported Schema',path,code='SCHEMA_UNSUPPORTED')
     stage=data['stage']
     if not isinstance(stage,str) or stage not in _INPUTS:_fail('stage','unknown stage',path)
-    if stage in _SIM or stage=='paired_session':
+    if stage in _SIM or stage in ('paired_session','paired_rerender'):
         if data.get('engine') not in ('isaaclab','mujoco'):_fail('engine','isaaclab or mujoco required',path)
     elif 'engine' in data:_fail('engine','not used by this stage',path)
     req,opt=_INPUTS[stage];_mapping(data['inputs'],req|opt,req,'inputs',path)
@@ -407,6 +409,15 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
             path=Path(documents[name]['calibration_path'])
             if not path.is_absolute():_fail('inputs.'+name,'explicit SDK calibration path required',doc.path)
             resolved[name+'_sdk_calibration']=_freeze(_artifact(path.resolve()))
+    if spec.stage in ('paired_session','paired_rerender'):
+        from real2sim_builder.files import read
+        from real2sim_builder.scene import local_path
+        root=Path(resolved['project']['root']);candidate_path=Path(resolved['candidate']['path'])
+        if not candidate_path.is_relative_to(root):_fail('inputs.candidate','Candidate must belong to selected Project',doc.path)
+        authoring=read(candidate_path)
+        dependencies={local_path(root,row['path'])for row in authoring.get('assets',{}).values()}
+        if authoring.get('robot_model',{}).get('path'):dependencies.add(local_path(root,authoring['robot_model']['path']))
+        resolved['candidate_assets']=tuple(_freeze(_artifact(p))for p in sorted(dependencies))
     if scene is not None and 'scene' not in resolved:
         scene=load_scene(scene.root/'scene.json',expected=scene.identity)
         resolved['scene']=_freeze({'kind':'scene','path':str(scene.root/'scene.json'),'identity':_plain(scene.identity)})
@@ -469,12 +480,12 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):code_names += ['robot/teleoperation.py','robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
-    if spec.stage in('capture_session','paired_session'):code_names += ['robot/session.py','robot/supervised.py','robot/snapshots.py','robot/real_sim.py','robot/session_devices.py','robot/telemetry.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py']
+    if spec.stage in('capture_session','paired_session','paired_rerender'):code_names += ['robot/session.py','robot/supervised.py','robot/snapshots.py','robot/real_sim.py','robot/render_worker.py','robot/candidate_isaac.py','robot/session_devices.py','robot/telemetry.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
-    if spec.stage in ('capture','real_sim','real_evaluation'):
+    if spec.stage in ('capture','real_sim','real_evaluation','capture_session','paired_session','paired_rerender'):
         from .robot.offline import capture_reader
         capture=capture_reader()
-        for name in ('capture.py','files.py','scene.py'):
+        for name in ('capture.py','files.py','scene.py','project.py','candidate.py','evidence.py','rendering.py','validation.py','calibration/geometry.py','exporters/usd.py','exporters/mjcf.py'):
             p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)
     if 'env_num' in runtime_execution:runtime_execution['num_envs']=runtime_execution['env_num']

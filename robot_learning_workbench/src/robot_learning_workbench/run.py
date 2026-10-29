@@ -336,6 +336,14 @@ def send_command(handle,command):
     return CommandReceipt(command_id,'queued')
 
 
+def touch_session(handle,timestamp_ns):
+    """Latest UI liveness only. User commands still use durable ACK transactions."""
+    root=Path(handle.run_dir);record=_read(root/'run.json')
+    if type(timestamp_ns)is not int or timestamp_ns<=0 or handle.run_id!=root.name or handle.request_id!=record.get('request_id') or record.get('stage')not in('capture_session','paired_session'):
+        _fail('PROTOCOL_INVALID','heartbeat','Current session handle and monotonic timestamp required')
+    _atomic(root/'session-heartbeat.json',{'run_id':handle.run_id,'timestamp_ns':timestamp_ns})
+
+
 def _poll_commands(root,state,stage):
     with (root/'control.lock').open('a+b') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -362,6 +370,10 @@ def _poll_commands(root,state,stage):
         if reason:_ack(root,state,cid,'rejected',reason=reason);continue
         _ack(root,state,cid,'accepted');out.append(command)
         if command['kind']=='cancel':_append_event(root,state,'status',{'status':'running','phase':'stopping'})
+    if stage in('capture_session','paired_session')and(root/'session-heartbeat.json').is_file():
+        heartbeat=_read(root/'session-heartbeat.json')
+        if heartbeat.get('run_id')!=root.name or type(heartbeat.get('timestamp_ns'))is not int:_fail('PROTOCOL_INVALID','heartbeat','Invalid session liveness')
+        out.append({'kind':'session_heartbeat','command_id':'liveness','payload':{'timestamp_ns':heartbeat['timestamp_ns']}})
     return tuple(out)
 
 
@@ -394,6 +406,7 @@ def _run_stage(plan,*,events,commands):
     if plan.stage in ('source','annotation','datagen','simulation_evaluation'):
         filename='evaluation' if plan.stage=='simulation_evaluation' else plan.stage
         module=f'engines.{plan.engine}.{filename}';function='run'
+    elif plan.stage=='paired_rerender':module='robot.real_sim';function='rerender'
     elif plan.stage in('capture_session','paired_session'):module='robot.session';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'
@@ -530,7 +543,7 @@ def preview_session(run_dir,events,*,interval_s=1/30):
     previous=video._preview_sink;generation={};last={};warned=False;preview_lock=threading.RLock();slots={}
     def publish_frame(camera,image,frame_index,time_s,env_index=0):
         nonlocal warned
-        if camera not in ('side','wrist'):return
+        if camera not in ('side','wrist','sim_side','sim_wrist'):return
         selection=folder/'selection.json'
         selected=_read(selection).get('env_index',0) if selection.is_file() else 0
         if selected!=env_index:return
@@ -578,7 +591,7 @@ def preview_session(run_dir,events,*,interval_s=1/30):
 
 def read_preview_frame(run_dir,camera):
     """Latest self-identifying PPM bytes; mismatch during overwrite is a dropped preview."""
-    if camera not in ('side','wrist'):raise ValueError('Side/Wrist preview required')
+    if camera not in ('side','wrist','sim_side','sim_wrist'):raise ValueError('Known Real/Sim Side/Wrist preview required')
     root=Path(run_dir);folder=root/'preview'
     try:
         meta=_read(folder/(camera+'.json'))

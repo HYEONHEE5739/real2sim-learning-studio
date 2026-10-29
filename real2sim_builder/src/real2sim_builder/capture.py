@@ -25,6 +25,9 @@ def register_unbound(project, destination, manifest, samples):
                      sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
                      joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
                      exclusion_reasons=['unbound_capture_calibration'],capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
+            if image.get('runtime_baseline'):
+                row['runtime_baseline']=copy.deepcopy(image['runtime_baseline'])
+                for key in ('path','pair_path'):row['runtime_baseline'][key]=(destination/image['runtime_baseline'][key]).relative_to(project.root).as_posix()
             evidence['images'].append(row);observed.append(row)
     source=dict(id=manifest['session_id'],path=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix(),sha256=sha(destination/'capture_manifest.yaml'),
         status='NEEDS_MORE_DATA',needs=['robot_base','camera_intrinsics','camera_extrinsics'],source_robot_sha256=manifest['source_robot_sha256'],schema=manifest['schema'],dataset_id=manifest.get('source_dataset_id'))
@@ -255,6 +258,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
             if image.get('runtime_baseline'):
                 observation['runtime_baseline'] = copy.deepcopy(image['runtime_baseline'])
                 observation['runtime_baseline']['path'] = (destination / image['runtime_baseline']['path']).relative_to(project.root).as_posix()
+                observation['runtime_baseline']['pair_path'] = (destination / image['runtime_baseline']['pair_path']).relative_to(project.root).as_posix()
             if sample.get('metadata_path'):
                 observation['snapshot_metadata'] = (destination / sample['metadata_path']).relative_to(project.root).as_posix()
             evidence['images'].append(observation)

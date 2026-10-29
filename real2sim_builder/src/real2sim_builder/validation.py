@@ -6,7 +6,7 @@ from PIL import Image,ImageOps
 import cv2
 
 
-def compare(real,sim,folder):
+def compare(real,sim,folder,*,save_inputs=True):
     real=np.asarray(real,dtype=np.uint8);sim=np.asarray(sim,dtype=np.uint8)
     if real.shape!=sim.shape or real.ndim!=3 or real.shape[2]!=3:raise ValueError('Real/sim RGB resolution mismatch')
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
@@ -17,7 +17,7 @@ def compare(real,sim,folder):
         'edge_iou':float(np.count_nonzero(edge_a&edge_b)/union) if union else 1.}
     for name,array in {'real':real,'sim':sim,'side_by_side':np.concatenate([real,sim],axis=1),
         'overlay':np.rint((real.astype(float)+sim)/2).astype(np.uint8),'difference':np.uint8(np.clip(error*255,0,255))}.items():
-        Image.fromarray(array).save(folder/(name+'.png'))
+        if save_inputs or name not in ('real','sim'):Image.fromarray(array).save(folder/(name+'.png'))
     return metrics
 
 

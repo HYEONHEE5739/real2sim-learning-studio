@@ -292,8 +292,9 @@ def prepare_snapshot(state, images, profile, now_ns=None):
 
 def snapshot_state(device, history, packets, stability):
     """Project an owned feedback window into the existing Snapshot contract."""
+    start=stability.get('window_start_ns',history[0]['timestamp_ns']);history=[r for r in history if r['timestamp_ns']>=start]
     last=history[-1];q=observed_positions(device.precision_mapper,last['native'],raw=last['raw'],motor_specs=device.motor_specs)
-    return dict(joint_names=list(JOINTS),sim_joint_mapping=device.precision_mapper.metadata(),precision_observation_only=True,sent_target=None,
+    return dict(captured_host_ns=time.monotonic_ns(),joint_names=list(JOINTS),sim_joint_mapping=device.precision_mapper.metadata(),precision_observation_only=True,sent_target=None,
         physical_follower_measured_joint_state=last['native'],physical_q_measured=[q[n]for n in JOINTS],precision_raw_feedback={'follower':last['raw']},
         hardware={'follower':{'motor_specs':device.motor_specs,'identity':device.identity}},measured_samples=[{k:r[k]for k in('timestamp_ns','native','raw')}for r in history],
         real_stability=stability,timestamps={'follower':last['feedback_interval'],'real_cameras':{'real_'+n:{k:p[k]for k in('read_start','read_end','sequence')}for n,p in packets.items()}})

@@ -27,3 +27,15 @@ def test_session_control_uses_explicit_existing_r03_envelope(tmp_path):
     for kind,payload in [('session_snapshot',{}),('session_disconnect',{}),('session_finish',{}),('teleop_prepare',{}),('teleop_stop',{}),('session_heartbeat',{'timestamp_ns':1})]:
         assert _command({'command_id':'one','kind':kind,'payload':payload})['kind']==kind
     with pytest.raises(Exception):_command({'command_id':'one','kind':'teleop_start','payload':{'approved':True}})
+
+
+def test_session_heartbeat_is_bounded_latest_liveness_not_durable_user_commands(tmp_path):
+    import time
+    from robot_learning_workbench.run import touch_session,RunHandle,_poll_commands
+    root=tmp_path/'runone';root.mkdir();(root/'commands').mkdir();(root/'run.json').write_text(json.dumps({'request_id':'req','stage':'capture_session'}))
+    handle=RunHandle('runone','req',root)
+    for _ in range(5):touch_session(handle,time.monotonic_ns())
+    assert not list((root/'commands').iterdir())
+    state={'seen_commands':set(),'command_seq':0}
+    rows=_poll_commands(root,state,'capture_session');assert rows[-1]['kind']=='session_heartbeat'
+    assert len(list(root.glob('session-heartbeat.json')))==1 and not state['seen_commands']

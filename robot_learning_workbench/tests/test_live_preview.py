@@ -57,3 +57,12 @@ def test_preview_selected_env_has_full_resolution_and_bounded_storage(tmp_path):
         meta,raw=run.read_preview_frame(root,'side');assert meta['env_index']==3 and meta['shape']==[480,640,3]
         assert raw.endswith(image.tobytes()) and meta['published_monotonic_ns']>0
     assert not (root/'preview').exists()
+
+
+def test_pair_preview_has_four_bounded_channels(tmp_path):
+    root=tmp_path/'pair';root.mkdir();rgb=np.full((480,640,3),77,np.uint8)
+    with run.preview_session(root,lambda _:None,interval_s=0):
+        for name in('side','wrist','sim_side','sim_wrist'):
+            video._preview_sink(name,rgb,1,0,0)
+            assert run.read_preview_frame(root,name)[0]['camera']==name
+        assert len(list((root/'preview').glob('*.ppm')))==4

@@ -421,6 +421,11 @@ class CameraReader:
         except BaseException as exc:
             if not self.stop.is_set():self.error=repr(exc)
 
+    def statistics(self):
+        with self.lock:
+            times=[f['read_end']['monotonic_ns']for f in self.frames]
+        return {'received_frames':len(times),'received_fps':(len(times)-1)*1e9/(times[-1]-times[0])if len(times)>1 else None}
+
     def nearest(self,target_ns=None,*,not_after=False):
         if self.error:raise DeviceError('camera_read',self.error,effect='not_applied')
         with self.lock:

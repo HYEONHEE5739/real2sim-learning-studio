@@ -67,7 +67,7 @@ def test_unsafe_start_stale_session_or_unknown_send_blocks_further_commands(tmp_
             else:
                 c.start(approval(p))
                 if fault=='heartbeat':c.last_heartbeat_ns=0
-                else:f.bus.fault='send'
+                else:f.bus.fault='send';c.last_raw_goal={}
                 with pytest.raises(Exception):c.tick()
                 assert not c.active
                 sends=ft.count('send')
@@ -81,5 +81,49 @@ def test_changed_identity_or_mapping_cannot_reuse_approval(tmp_path):
     try:
         p=c.propose();f.profile['identity']['id']='changed'
         with pytest.raises(Exception):c.start(approval(p))
+        assert not any(x.startswith('write_')for x in ft)
+    finally:l.close();f.close()
+
+
+def test_delayed_sdk_send_blocks_subsequent_goals_even_after_fresh_heartbeat(tmp_path,monkeypatch):
+    c,l,f,lt,ft,_=controller(tmp_path)
+    try:
+        c.start(approval(c.propose()));c.last_raw_goal={};real=f.device.send_action
+        def slow(packet):time.sleep(.21);return real(packet)
+        monkeypatch.setattr(f.device,'send_action',slow)
+        with pytest.raises(Exception,match='deadline|delay'):c.tick()
+        assert not c.active;c.heartbeat()
+        with pytest.raises(Exception,match='approved'):c.tick()
+        assert ft.count('send')==1
+    finally:l.close();f.close()
+
+
+def test_initial_unchanged_sdk_target_is_suppressed(tmp_path):
+    c,l,f,lt,ft,_=controller(tmp_path)
+    try:
+        c.start(approval(c.propose()));r=c.tick();assert r['duplicate_suppressed']and not r['command_sent']and 'send'not in ft
+    finally:l.close();f.close()
+
+
+def test_slow_torque_activation_never_proceeds_to_goal_commands(tmp_path,monkeypatch):
+    c,l,f,lt,ft,_=controller(tmp_path)
+    try:
+        p=c.propose();write=f.bus.sync_write
+        def delayed(register,packet,**kwargs):
+            result=write(register,packet,**kwargs)
+            if register=='Torque_Enable':time.sleep(.21)
+            return result
+        monkeypatch.setattr(f.bus,'sync_write',delayed)
+        with pytest.raises(Exception,match='deadline'):c.start(approval(p))
+        assert not c.active and 'send'not in ft
+    finally:l.close();f.close()
+
+
+def test_initial_feedback_outside_approved_intersection_does_not_enable_torque(tmp_path,monkeypatch):
+    c,l,f,lt,ft,_=controller(tmp_path)
+    try:
+        target,command,details,interval=c._target();bounds=np.array(details['bounds_rad']);q=target.copy();q[0]=bounds[0,1]+.001;target[0]=bounds[0,1]
+        monkeypatch.setattr(c,'feedback',lambda:(None,interval,q));monkeypatch.setattr(c,'_target',lambda:(target,command,details,interval))
+        with pytest.raises(Exception,match='bounds|range'):c.propose()
         assert not any(x.startswith('write_')for x in ft)
     finally:l.close();f.close()

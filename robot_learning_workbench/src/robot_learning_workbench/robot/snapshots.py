@@ -40,7 +40,7 @@ class SnapshotStore:
             static_layout_verified=False,physical_verified=False)
         atomic_json(staging/'capture_manifest.yaml',manifest);(staging/'COMPLETE').write_text('complete\n');load_session(staging)
         self.last_sequences=sequences
-        return dict(id=identifier,staging=str(staging),sample={'timestamp_ns':measured['timestamp_ns'],'q_measured':measured['q_measured']},quality=warnings,observed=observed)
+        return dict(id=identifier,staging=str(staging),sample={'timestamp_ns':measured['timestamp_ns'],'unix_ns':measured['timestamps']['follower']['end'].get('unix_ns'),'q_measured':measured['q_measured']},quality=warnings,observed=observed)
 
     def finish(self,pending,*,rendered=None):
         from real2sim_builder.files import read,write
@@ -60,5 +60,5 @@ class SnapshotStore:
             else:final=Path(pending['path'])
             report=import_snapshots(self.project,final,paired=rendered is not None)
         result=dict(id=identifier,path=str(final),project_id=self.project_id,session_id=self.session_id,status='SAVED',registration=report,
-            quality=pending['quality'],timestamp_ns=pending['sample']['timestamp_ns'],q_measured=pending['sample']['q_measured'],calibration_approved=False,paired=rendered is not None)
+            quality=pending['quality'],timestamp_ns=pending['sample']['timestamp_ns'],unix_ns=pending['sample'].get('unix_ns'),q_measured=pending['sample']['q_measured'],calibration_approved=False,paired=rendered is not None)
         self.completed[identifier]=result;return result

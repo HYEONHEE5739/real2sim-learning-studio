@@ -39,6 +39,8 @@ class Teleoperation:
         if set(mode)!=set(JOINTS)or any(mode[n]!=0 for n in JOINTS):raise DeviceError('teleop_preflight','All joints must already be in position mode',effect='not_applied')
         if set(torque)!=set(JOINTS)or any(torque[n]not in(0,1)for n in JOINTS):raise ValueError('Unknown Torque state')
         target,_,details,_=self._target()
+        bounds=np.asarray(details['bounds_rad'])
+        if np.any(q<bounds[:,0])or np.any(q>bounds[:,1]):raise DeviceError('teleop_preflight','Actual initial feedback outside approved model/motor bounds',effect='not_applied')
         if np.max(abs(target-q))>self.max_step:raise DeviceError('teleop_preflight','Leader initial target is too far from Follower feedback',effect='not_applied')
         return dict(raw=raw,goal=goal,mode=mode,torque=torque,measured_model_rad=q.tolist(),initial_target_rad=target.tolist(),bounds_rad=details['bounds_rad'],
                     follower_identity=self.follower.identity,leader_identity=self.leader.identity,follower_mapping=self.follower.precision_mapper.metadata()['sha256'],leader_mapping=self.leader.precision_mapper.metadata()['sha256'])
@@ -46,7 +48,7 @@ class Teleoperation:
     def propose(self):
         if self.active:raise ValueError('Teleoperation already active')
         state=self._start_state();now=time.monotonic_ns()
-        self.proposal={'session_id':self.session_id,'nonce':uuid.uuid4().hex,'state':state,'expires_ns':now+10_000_000_000,
+        self.proposal={'session_id':self.session_id,'nonce':uuid.uuid4().hex,'state':state,'expires_ns':now+30_000_000_000,
                        'max_step_rad':self.max_step,'max_follow_error_rad':self.max_follow,'stop_policy':'preserve_torque_no_new_goal'}
         self.proposal['sha256']=digest(self.proposal);return self.proposal.copy()
 
@@ -60,10 +62,12 @@ class Teleoperation:
         if digest(self._start_state())!=digest(p['state']):raise ValueError('Feedback/Goal/Calibration changed; fresh approval required')
         self.consumed.add(key);self.proposal=None
         try:
+            begin=time.monotonic_ns()
             if any(v==0 for v in p['state']['torque'].values()):
                 self.follower.bus.sync_write('Torque_Enable',dict.fromkeys(JOINTS,1),normalize=False,num_retry=0)
                 if any(v!=1 for v in self.follower.bus.sync_read('Torque_Enable',normalize=False).values()):raise ValueError('Torque activation readback differs')
-            self.last_target=np.array(p['state']['measured_model_rad']);self.last_raw_goal=dict(p['state']['goal']);self.last_tick_ns=time.monotonic_ns();self.heartbeat();self.active=True
+            if time.monotonic_ns()-begin>200_000_000:raise ValueError('Torque activation deadline exceeded; no Goal commands')
+            self.last_target=np.array(p['state']['measured_model_rad']);self.last_raw_goal={self.follower.bus.motors[n].id:p['state']['goal'][n]for n in JOINTS};self.last_tick_ns=time.monotonic_ns();self.heartbeat();self.active=True
         except Exception as error:
             self.stop();raise DeviceError('teleop_activate',str(error),effect='unknown')from error
 
@@ -87,7 +91,9 @@ class Teleoperation:
                 # Encoding already ran strict model/motor/Precision/SDK checks.
                 send_attempted=True;returned=self.follower.device.send_action({n+'.pos':command[n]for n in JOINTS})
                 if returned!={n+'.pos':command[n]for n in JOINTS}:raise ValueError('SDK changed the preflighted target')
-            end=time.monotonic_ns();self.last_tick_ns=end;self.sequence+=1;self.last_target=target;self.last_raw_goal=raw
+            end=time.monotonic_ns()
+            if end-now>200_000_000:raise ValueError('Control/send deadline exceeded; no further goals')
+            self.last_tick_ns=end;self.sequence+=1;self.last_target=target;self.last_raw_goal=raw
             return dict(sequence=self.sequence,timestamp_ns=feedback['end']['monotonic_ns'],measured_model_rad=q.tolist(),requested_model_rad=details['requested_model_rad'],
                         applied_model_rad=target.tolist(),saturation=details['saturation'],sdk_goal_raw=raw,command_sent=not duplicate,duplicate_suppressed=duplicate,
                         feedback_interval=feedback,leader_interval=leader_interval,send_latency_s=(end-begin)/1e9,follow_error_rad=(q-target).tolist())
