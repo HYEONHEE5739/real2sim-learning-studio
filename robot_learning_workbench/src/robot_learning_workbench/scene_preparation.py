@@ -54,7 +54,11 @@ def save_inputs(path,files,notes):
             if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):add_image(project,file,camera='reference',context_only=True)
             elif suffix in('.mp4','.mov','.avi'):add_video(project,file,camera='reference')
             else:
-                relative=copy_input(project,file,'models'if suffix in('.urdf','.stl','.obj')else'metadata');evidence=project.evidence;key='robot_inputs'if suffix=='.urdf'else'documents'
+                if suffix in('.urdf','.obj'):
+                    from real2sim_builder.export import copy_native_asset,verify_native_closure
+                    stored=copy_native_asset(file,project.root/'input/models');verify_native_closure(project.root,stored.relative_to(project.root).as_posix());relative=stored.relative_to(project.root).as_posix()
+                else:relative=copy_input(project,file,'models'if suffix=='.stl'else'metadata')
+                evidence=project.evidence;key='robot_inputs'if suffix=='.urdf'else'documents'
                 rows=evidence.setdefault(key,[])
                 if not any(row['path']==relative for row in rows):rows.append({'path':relative,'sha256':sha(project.root/relative),'source':str(file),'status':'UNVERIFIED_INPUT'})
                 write(project.root/'input/evidence.yaml',evidence);project.invalidate()
