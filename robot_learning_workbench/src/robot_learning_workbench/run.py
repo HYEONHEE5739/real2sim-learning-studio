@@ -292,12 +292,19 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
 
 
 _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
+_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'session_heartbeat':{'timestamp_ns'},'teleop_prepare':set(),'teleop_stop':set(),
+                   'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque'},'session_import':{'snapshot_id'}}
+_COMMANDS.update(_SESSION_COMMANDS)
 
 
 def _command(command):
     if not isinstance(command,dict) or set(command)-{'command_id','kind','payload','episode_id','env_index'}:_fail('PROTOCOL_INVALID','command','unknown envelope fields')
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
+    if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
+    if kind=='session_heartbeat'and(type(payload['timestamp_ns'])is not int or payload['timestamp_ns']<1):_fail('PROTOCOL_INVALID',kind,'host monotonic timestamp required')
+    if kind=='session_import':_identifier(payload['snapshot_id'])
+    if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
     if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')
     if kind=='step' and (type(payload.get('count')) is not int or not 1<=payload['count']<=1000):_fail('PROTOCOL_INVALID','step.count','expected 1..1000')
     if kind=='mark' and (not isinstance(payload.get('event'),str) or type(payload.get('frame')) is not int or payload['frame']<0):_fail('PROTOCOL_INVALID','mark','event and nonnegative frame required')
@@ -340,6 +347,7 @@ def _poll_commands(root,state,stage):
             rows.append(row)
     rows.sort(key=lambda row:row['seq']);out=[]
     allowed={'cancel'}|({'pause','resume','step'} if stage in ('source','annotation','datagen','simulation_evaluation','real_sim') else set())|({'mark','skip'} if stage=='annotation' else set())|({'save','discard'} if stage=='source' else set())
+    if stage in('capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')
         command=_command(row['payload']);cid=command['command_id']
@@ -386,6 +394,7 @@ def _run_stage(plan,*,events,commands):
     if plan.stage in ('source','annotation','datagen','simulation_evaluation'):
         filename='evaluation' if plan.stage=='simulation_evaluation' else plan.stage
         module=f'engines.{plan.engine}.{filename}';function='run'
+    elif plan.stage in('capture_session','paired_session'):module='robot.session';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'
     elif plan.stage=='teleoperation':module='robot.teleoperation';function='run'

@@ -421,11 +421,12 @@ class CameraReader:
         except BaseException as exc:
             if not self.stop.is_set():self.error=repr(exc)
 
-    def nearest(self,target_ns=None):
+    def nearest(self,target_ns=None,*,not_after=False):
         if self.error:raise DeviceError('camera_read',self.error,effect='not_applied')
         with self.lock:
-            if not self.frames:return None
-            frame=self.frames[-1] if target_ns is None else min(self.frames,key=lambda f:abs(f['read_end']['monotonic_ns']-target_ns))
+            frames=[f for f in self.frames if not not_after or target_ns is None or f['read_end']['monotonic_ns']<=target_ns]
+            if not frames:return None
+            frame=frames[-1] if target_ns is None else min(frames,key=lambda f:abs(f['read_end']['monotonic_ns']-target_ns))
             return {**copy.deepcopy({k:v for k,v in frame.items() if k!='rgb'}),'rgb':frame['rgb'].copy()}
 
     def close(self):

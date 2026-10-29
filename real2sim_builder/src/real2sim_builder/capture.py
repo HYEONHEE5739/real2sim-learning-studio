@@ -26,8 +26,15 @@ def register_unbound(project, destination, manifest, samples):
                      joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
                      exclusion_reasons=['unbound_capture_calibration'],capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
             evidence['images'].append(row);observed.append(row)
-    evidence.setdefault('capture_sessions',[]).append(dict(id=manifest['session_id'],path=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix(),sha256=sha(destination/'capture_manifest.yaml'),
-        status='NEEDS_MORE_DATA',needs=['robot_base','camera_intrinsics','camera_extrinsics'],source_robot_sha256=manifest['source_robot_sha256']))
+    source=dict(id=manifest['session_id'],path=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix(),sha256=sha(destination/'capture_manifest.yaml'),
+        status='NEEDS_MORE_DATA',needs=['robot_base','camera_intrinsics','camera_extrinsics'],source_robot_sha256=manifest['source_robot_sha256'],schema=manifest['schema'],dataset_id=manifest.get('source_dataset_id'))
+    paths=set(manifest['files'])
+    for sample in samples:
+        if sample.get('metadata_path'):
+            metadata=sample['metadata_path'];paths.add(metadata)
+            paths.update((Path(metadata).parent/p).as_posix()for p in read(destination/metadata)['files'])
+    source['input_files']=[dict(path=(destination/p).relative_to(project.root).as_posix(),sha256=sha(destination/p))for p in sorted(paths)]
+    evidence.setdefault('capture_sessions',[]).append(source)
     write(project.root/'input/evidence.yaml',evidence);project.invalidate()
     report=dict(imported=len(observed),eligible=0,status='NEEDS_MORE_DATA',scope='ARCHIVED_OBSERVATIONS_ONLY',physical_verified=False)
     write(project.root/'working/capture_import.json',report);return report

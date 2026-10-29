@@ -63,7 +63,7 @@ def collect_policy(policy: object, pre: Callable, post: Callable, *, follower: '
         finally:close_devices({'follower':follower})
 
 
-def fake_device(spec: dict, profile: dict) -> 'Follower':
+def fake_device(spec: dict, profile: dict, *, initial_model_q: dict|None=None) -> 'Follower':
     """Memory-only SDK API, with official normalization math; no serial constructor."""
     import json,hashlib
     from pathlib import Path
@@ -77,13 +77,18 @@ def fake_device(spec: dict, profile: dict) -> 'Follower':
     calibration={n:MotorCalibration(**c)for n,c in json.loads(raw).items()}
     motors={n:Motor(i+1,'sts3215',MotorNormMode.RANGE_0_100 if n=='gripper'else MotorNormMode.DEGREES)for i,n in enumerate(JOINTS)}
     arithmetic=object.__new__(FeetechMotorsBus);MotorsBus.__init__(arithmetic,spec['sdk']['port'],motors,calibration)
-    present={n:int(e['anchor_raw'])for n,e in profile['joints'].items()};goal=dict(present)
+    present={n:int(e['anchor_raw'])for n,e in profile['joints'].items()}
+    if initial_model_q is not None:
+        from .calibration import PrecisionMapper,raw_from_native
+        native=PrecisionMapper(profile).urdf_to_calibrated(initial_model_q)
+        present={n:round(raw_from_native(native[n],profile['joints'][n]['motor']))for n in JOINTS}
+    goal=dict(present);registers={'Torque_Enable':dict.fromkeys(JOINTS,0),'Operating_Mode':dict.fromkeys(JOINTS,0)}
     bus=NS(port=spec['sdk']['port'],is_connected=False,motors=motors,calibration=calibration,model_resolution_table=arithmetic.model_resolution_table,
         apply_drive_mode=arithmetic.apply_drive_mode,_normalize=arithmetic._normalize,_unnormalize=arithmetic._unnormalize)
     def connect():bus.is_connected=True
     def disconnect(disable_torque=True):bus.is_connected=False
-    def read(name,normalize=False):return dict(present if name=='Present_Position'else goal)
-    def write(name,packet,normalize=False):goal.update(packet)
+    def read(name,normalize=False):return dict(present if name=='Present_Position'else goal if name=='Goal_Position'else registers[name])
+    def write(name,packet,normalize=False,**kwargs):(goal if name=='Goal_Position'else registers[name]).update(packet)
     def send(packet):
         normalized={motors[n].id:packet[n+'.pos']for n in JOINTS};encoded=bus._unnormalize(normalized)
         present.update({n:encoded[m.id]for n,m in motors.items()});goal.update(present);return packet

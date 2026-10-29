@@ -290,6 +290,39 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     return measured, observed, warnings
 
 
+def snapshot_state(device, history, packets, stability):
+    """Project an owned feedback window into the existing Snapshot contract."""
+    last=history[-1];q=observed_positions(device.precision_mapper,last['native'],raw=last['raw'],motor_specs=device.motor_specs)
+    return dict(joint_names=list(JOINTS),sim_joint_mapping=device.precision_mapper.metadata(),precision_observation_only=True,sent_target=None,
+        physical_follower_measured_joint_state=last['native'],physical_q_measured=[q[n]for n in JOINTS],precision_raw_feedback={'follower':last['raw']},
+        hardware={'follower':{'motor_specs':device.motor_specs,'identity':device.identity}},measured_samples=[{k:r[k]for k in('timestamp_ns','native','raw')}for r in history],
+        real_stability=stability,timestamps={'follower':last['feedback_interval'],'real_cameras':{'real_'+n:{k:p[k]for k in('read_start','read_end','sequence')}for n,p in packets.items()}})
+
+
+def share_model(root, model):
+    """Share the existing portable model closure; never mutate source assets."""
+    import os,hashlib,xml.etree.ElementTree as ET
+    root=Path(root);model=Path(model).resolve()
+    dependencies=set()
+    def visit(path):
+        path=path.resolve()
+        if not path.is_file():raise ValueError('Missing model dependency: '+str(path))
+        if path in dependencies:return
+        dependencies.add(path)
+        if path==model or path.suffix.lower()=='.urdf':
+            for node in ET.parse(path).iter():
+                reference=node.get('filename') or node.get('file')
+                if reference:
+                    if Path(reference).is_absolute() or '://'in reference:raise ValueError('Portable relative model dependencies required')
+                    visit(path.parent/reference)
+    visit(model)
+    common=Path(os.path.commonpath([str(p.parent)for p in dependencies]));files={}
+    for source in dependencies:
+        relative=Path("model")/source.relative_to(common);target=root/relative;target.parent.mkdir(parents=True,exist_ok=True)
+        os.link(source,target);files[relative.as_posix()]=hashlib.sha256(target.read_bytes()).hexdigest()
+    return (Path("model")/model.relative_to(common)).as_posix(),files
+
+
 def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: list, images: list, metadata: dict, scene=None) -> Path:
     """Publish the existing Builder real2sim.capture/1 format, not a second Dataset.
 
@@ -306,25 +339,8 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
     reserved={'schema','session_id','group_id','split','purpose','clock','joint_names','joint_units','q_measured_source','joint_mapping','source_robot_sha256','robot','cameras','samples','events','files','quality'}
     if reserved&metadata.keys():raise ValueError('Capture metadata cannot override reserved measurement/identity fields')
     if not samples or len(samples)!=len(images):raise ValueError('Aligned nonempty samples/images required')
-    dependencies=set()
-    def visit(path):
-        path=path.resolve()
-        if not path.is_file():raise ValueError('Missing model dependency: '+str(path))
-        if path in dependencies:return
-        dependencies.add(path)
-        if path==model or path.suffix.lower()=='.urdf':
-            for node in ET.parse(path).iter():
-                reference=node.get('filename') or node.get('file')
-                if reference:
-                    if Path(reference).is_absolute() or '://'in reference:raise ValueError('Portable relative model dependencies required')
-                    visit(path.parent/reference)
-    visit(model)
-    common=Path(os.path.commonpath([str(p.parent)for p in dependencies]));root.mkdir()
-    destination=root;root=destination/'.pending';root.mkdir()
-    files={};rows=copy.deepcopy(samples)
-    for source in dependencies:
-        relative=Path('model')/source.relative_to(common);target=root/relative;target.parent.mkdir(parents=True,exist_ok=True)
-        os.link(source,target);files[relative.as_posix()]=hashlib.sha256(target.read_bytes()).hexdigest()
+    root.mkdir();destination=root;root=destination/'.pending';root.mkdir()
+    model_relative,files=share_model(root,model);rows=copy.deepcopy(samples)
     previous=-1
     for index,(row,frames)in enumerate(zip(rows,images)):
         q=np.asarray(row['q_measured']);t=row['timestamp_ns']
@@ -343,7 +359,7 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
         clock=dict(domain='host_monotonic_ns',hardware_synchronized=False,timestamp_kind='host_receipt_not_exposure'),
         joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',
         joint_mapping=mapping,source_robot_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
-        robot=dict(path=(Path('model')/model.relative_to(common)).as_posix(),mapping_verified=False),
+        robot=dict(path=model_relative,mapping_verified=False),
         cameras=[dict(id=n,resolution=[640,480],color='rgb')for n in ('side','wrist')],samples='samples.json',events='events.json',files=files,
         quality=dict(incomplete=False),**metadata)
     if scene is not None:
