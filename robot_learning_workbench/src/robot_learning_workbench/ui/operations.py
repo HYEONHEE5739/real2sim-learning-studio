@@ -120,7 +120,7 @@ def execute(request: dict) -> dict:
     if op=='hardware_result':
         root=Path(args['path']);file=root/'hardware-report.json'if(root/'hardware-report.json').is_file()else root/'gripper-report.json'
         result=json.loads(file.read_text())
-        small={k:result[k]for k in ('status','frames','command_sent','physical_verified','snapshot_quality','policy','precision','real_sim','motion','arm_commands','torque_commands')if k in result}
+        small={k:result[k]for k in ('status','frames','command_sent','physical_verified','snapshot_quality','policy','precision','real_sim','motion','arm_commands','torque_commands','effect','error','proposal')if k in result}
         if (root/'COMPLETE').is_file() and (root/'capture_manifest.yaml').is_file():
             from real2sim_builder.capture import load_session
             manifest,samples,_=load_session(root);small['verified_capture_frames']=len(samples)

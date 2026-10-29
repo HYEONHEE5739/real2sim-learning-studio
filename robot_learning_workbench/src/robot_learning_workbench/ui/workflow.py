@@ -14,7 +14,7 @@ from .operations import stage_support,run_outcome
 class WorkflowPage(QWidget):
     def __init__(self,stage,python,modules,parent=None):
         super().__init__(parent);self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules);self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set()
-        box=QVBoxLayout(self);self.heading=QLabel({'teleoperation':'Teleoperation · Fake 6축 / 실물 읽기 전용','source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation','capture':'Capture 보존 자료 검사','precision_calibration':'Precision 보존 근거 검사','real_evaluation':'Real Policy 오프라인 검사','real_sim':'Real/Sim 보존 입력 검사'}[stage]);box.addWidget(self.heading)
+        box=QVBoxLayout(self);self.heading=QLabel({'teleoperation':'Teleoperation · Fake 6축 / 실물 읽기 전용','source':'Source 입력','annotation':'Annotation','datagen':'DataGen','train':'공식 LeRobot Training','hub_download':'Hub 다운로드','hub_upload':'Hub 명시 업로드','simulation_evaluation':'Simulation Evaluation','offline_validation':'독립 Validation','capture':'Capture · 보존 자료 / 실물 읽기 전용','precision_calibration':'Precision · 읽기 / 기존 근거 검토','real_evaluation':'Real Policy · Observe Only / Gripper 별도 승인','real_sim':'Real/Sim · 보존 입력 / 측정 자세 비교'}[stage]);box.addWidget(self.heading)
         row=QHBoxLayout();box.addLayout(row)
         self.load_button=QPushButton('Recipe 열기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 기본 출력')
         for button in (self.load_button,self.save_button,self.check_button,self.new_output_button):row.addWidget(button)
@@ -41,14 +41,14 @@ class WorkflowPage(QWidget):
                 line.editingFinished.connect(lambda k=key,w=line:self.edit_gripper_parameter(k,w.text()))
         if stage=='precision_calibration':
             review=QPushButton('기존 각도 근거 재검토 → 새 Profile Revision');self.form.addWidget(review);review.clicked.connect(self.review_precision)
-        if stage in ('capture','precision_calibration','real_evaluation','real_sim'):
+        if stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):
             frames=QSpinBox();frames.setRange(1,300);frames.valueChanged.connect(lambda value:self.edit_execution('max_frames',value));self.form.addWidget(QLabel('실물 읽기 최대 frame (팔 구동 없음)'));self.form.addWidget(frames)
             self.live_frames=frames
         self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(lambda:self.edit_output());self.form.addWidget(self.output)
         self.placement=QComboBox();self.placement.addItems(['Fixed','Random'])
         if stage in ('datagen','simulation_evaluation'):self.form.addWidget(self.placement);self.placement.currentTextChanged.connect(self.change_placement)
         self.counts={}
-        for key in ({'teleoperation':['device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','scene','camera_config'],'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[])):
+        for key in ({'source':['env_num','num_episodes'],'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[])):
             spin=QSpinBox();spin.setRange(1,100000);spin.valueChanged.connect(lambda v,k=key:self.edit_execution(k,v));self.counts[key]=spin
             row=QHBoxLayout();row.addWidget(QLabel(key));row.addWidget(spin);self.form.addLayout(row)
         self.dataset_resume=None
@@ -343,7 +343,7 @@ class WorkflowPage(QWidget):
         elif self.operation=='precision_revision':
             self.state.setText('새 검토 Revision · '+data['path']+' · physical_verified=false');self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
         elif self.operation=='terminal_hardware':
-            self.dataset_state='실물 결과 재개방 확인';self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
+            self.dataset_state='실물 결과 재개방 확인 · 측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)));self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
             self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
             for kind,labels in (('real',self.previews),('sim',self.sim_previews)):
                 for n,path in data.get('images',{}).get(kind,{}).items():

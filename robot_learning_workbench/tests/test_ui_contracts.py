@@ -111,7 +111,9 @@ q=WorkflowPage('real_evaluation',sys.executable,'modules')
 assert q.mode.findText('observe_only')>=0
 assert q.mode.findText('full_robot')<0
 assert q.gripper_button.isEnabled() is False
-for page in (p,q):page.timer.stop();page.close()
+t=WorkflowPage('teleoperation',sys.executable,'modules')
+assert not t.counts and hasattr(t,'live_frames')
+for page in (p,q,t):page.timer.stop();page.close()
 '''
     result=subprocess.run([UI,'-B','-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
     assert result.returncode==0,result.stderr
