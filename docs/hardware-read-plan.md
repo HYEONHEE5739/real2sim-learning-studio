@@ -9,3 +9,5 @@
 5. Full regression, wheels, independent review, original preservation; report actual versus Fake/BLOCKED. Request separate approval only after reviewable preflight evidence. No motion at present.
 
 Local evidence: `docs/evidence/hardware-read-gripper/`; original Scene/Calibration/Dataset/checkpoints/SDK are read-only. USB paths or old profile identity alone do not certify current role/motor calibration or camera placement.
+
+Final implementation and actual/Fake/BLOCKED results: [hardware-read-gripper.md](hardware-read-gripper.md). No physical Goal/Torque command was sent. Main and remote branches remain unchanged.

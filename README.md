@@ -39,7 +39,9 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Official LeRobot Dataset materialization with existing encoded video sharing.
 - Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
 - Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
-- Preserved Capture/Calibration and real-policy offline inspection; live device control stays disabled.
+- Torque-preserving live Leader/Follower observation, Camera Capture and real-policy Observe Only.
+  Full-axis teleoperation/Policy execution is tested with memory devices; physical arm commands stay blocked.
+  Gripper-only one-shot code requires a separate command binding and supervised motion approval; no physical motion is verified.
 - Qt workflow pages and selected-environment Side/Wrist 640×480 latest-frame Preview.
 
 The SmolVLA path explicitly compiles one SHA-pinned LeRobot 0.4.1 module with a
@@ -107,6 +109,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 
 - Validation focuses on the preserved v8 Scene; v9 and new measured Calibration are unfinished.
 - Real Follower command binding, motor-range approval and physical safety are unverified.
+  Physical arm motion is blocked; measured Camera/Joint skew can also block Observe Only inference.
 - `env_num=1/4` was tested; arbitrary N, all Scenes, long runs and OOM recovery are not certified.
 - Preview polling targets approximately 30Hz; actual simulation/Preview throughput is lower.
 - ACT/SmolVLA/Diffusion short smoke training does not establish convergence or task success. The earlier canonical
@@ -125,6 +128,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
+- [Live observation, Capture and gripper approval boundary](docs/hardware-read-gripper.md)
 - [Four code-review fixes and verification](docs/code-review-followup.md)
 
 Historical reports contain local absolute paths and links to `docs/evidence/`.
