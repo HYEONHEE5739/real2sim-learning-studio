@@ -44,3 +44,21 @@ def test_capture_completion_is_not_public_during_reader_validation(tmp_path,monk
     monkeypatch.setattr(reader,'load_session',validate)
     capture.save_session(output,model=model,mapping={},samples=[{'id':'s','timestamp_ns':1,'q_measured':[0.]*6}],images=[{n:np.zeros((480,640,3),np.uint8)for n in ('side','wrist')}],metadata={})
     assert (output/'COMPLETE').is_file() and not (output/'.pending').exists()
+
+
+def test_scene_bound_capture_imports_into_new_builder_without_approving_calibration(tmp_path):
+    from scene_contract.package import load_scene
+    from robot_learning_workbench.robot.calibration import mapper_from_scene
+    from real2sim_builder.capture import import_session
+    from real2sim_builder.project import Project
+    root=Path(__file__).resolve().parents[2]
+    scene=load_scene(root/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native/scene.json')
+    mapper=mapper_from_scene(scene,'follower',role='follower',phase='device_observation')
+    model=next(scene.root/f.path for f in scene.files if f.sha256==mapper.profile['urdf_sha256'] and f.path.endswith('so101_isaaclab.urdf'))
+    output=tmp_path/'capture'
+    capture.save_session(output,model=model,mapping=mapper.metadata(),samples=[{'id':'s','timestamp_ns':1,'q_measured':[0.]*6}],images=[{n:np.zeros((480,640,3),np.uint8)for n in ('side','wrist')}],metadata={},scene=scene)
+    project=Project.create(tmp_path/'projects','Capture import')
+    import_session(project,output)
+    assert project.scene['robot_model']['mapping_verified'] is False
+    assert len(project.scene['cameras'])==2
+    assert all(c['calibration_quality']['physical_verified'] is False for c in project.scene['cameras'])

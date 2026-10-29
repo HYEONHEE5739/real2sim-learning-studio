@@ -286,7 +286,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     return measured, observed, warnings
 
 
-def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: list, images: list, metadata: dict) -> Path:
+def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: list, images: list, metadata: dict, scene=None) -> Path:
     """Publish the existing Builder real2sim.capture/1 format, not a second Dataset.
 
     Only measured observations are written. No action labels are inferred from q.
@@ -326,21 +326,33 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
         q=np.asarray(row['q_measured']);t=row['timestamp_ns']
         if q.shape!=(6,) or not np.isfinite(q).all() or t<=previous or set(frames)!={'side','wrist'}:raise ValueError('Invalid measured sample/image ordering')
         previous=t;row['images']=[]
+        row['quality']={'eligible_for_calibration':False,'reason':'observation recording; independent static/calibration approval absent'}
         for camera,rgb in frames.items():
             if rgb.dtype!=np.uint8 or rgb.shape!=(480,640,3):raise ValueError('640x480 uint8 original RGB required')
             relative=f'images/{index:08d}-{camera}.png';target=root/relative;target.parent.mkdir(exist_ok=True)
             Image.fromarray(rgb).save(target);files[relative]=hashlib.sha256(target.read_bytes()).hexdigest()
             timing=row.get('camera_timing',{}).get(camera,{})
-            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
+            row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],sequence=timing.get('sequence',index),timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
     atomic_json(root/'samples.json',rows);atomic_json(root/'events.json',[])
     for name in ('samples.json','events.json'):files[name]=hashlib.sha256((root/name).read_bytes()).hexdigest()
-    manifest=dict(schema='real2sim.capture/1',session_id=destination.name.replace('-','_'),group_id=destination.name.replace('-','_'),split='train',purpose='snapshot' if len(rows)==1 else 'demonstration',
+    manifest=dict(schema='real2sim.capture/1',session_id=destination.name.replace('-','_'),group_id=destination.name.replace('-','_'),split='train',purpose='demonstration',
         clock=dict(domain='host_monotonic_ns',hardware_synchronized=False,timestamp_kind='host_receipt_not_exposure'),
         joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',
         joint_mapping=mapping,source_robot_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
         robot=dict(path=(Path('model')/model.relative_to(common)).as_posix(),mapping_verified=False),
         cameras=[dict(id=n,resolution=[640,480],color='rgb')for n in ('side','wrist')],samples='samples.json',events='events.json',files=files,
         quality=dict(incomplete=False),**metadata)
+    if scene is not None:
+        from scene_contract.transforms import resolve_transform
+        frames=scene.scene['frames']
+        manifest['robot'].update(format='urdf',T_world_base=resolve_transform(frames,source='robot_base',target='world').tolist(),base_provenance={'T_world':'inherited_scene_unverified'})
+        manifest['cameras']=[]
+        for name in ('side','wrist'):
+            camera=scene.scene['cameras'][name];frame=frames[camera['frame_id']];parent=frame['parent']
+            if parent not in ('world','robot_base') and not parent.startswith('robot_link_'):raise ValueError('Explicit Scene camera mount link required')
+            manifest['cameras'].append(dict(id=name,parent=parent.removeprefix('robot_link_'),resolution=list(camera['resolution']),K=copy.deepcopy(camera['K']),
+                distortion=copy.deepcopy(camera.get('distortion')),T_parent_camera=copy.deepcopy(frame['T_parent_from_frame']),
+                provenance={key:'inherited_scene_unverified'for key in ('K','distortion','T_parent_camera')}))
     atomic_json(root/'capture_manifest.yaml',manifest)
     (root/'COMPLETE').write_text('complete\n')
     try:load_session(root)

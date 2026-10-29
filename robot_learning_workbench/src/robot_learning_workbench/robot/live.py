@@ -138,7 +138,7 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
             if plan.scene is not None:
                 from ..data.native import digest
                 metadata.update(scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)))
-            save_session(plan.output_path,model=model,mapping=device.precision_mapper.metadata(),samples=rows,images=images,metadata=metadata)
+            save_session(plan.output_path,model=model,mapping=device.precision_mapper.metadata(),samples=rows,images=images,metadata=metadata,scene=plan.scene)
         else:plan.output_path.mkdir()
         if plan.stage=='real_sim' and rows and not cancelled:
             from PIL import Image
