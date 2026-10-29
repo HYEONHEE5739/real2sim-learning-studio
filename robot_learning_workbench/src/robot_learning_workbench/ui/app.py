@@ -72,7 +72,9 @@ class Window(QMainWindow):
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
         self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','capture','precision_calibration','real_evaluation','real_sim')}
-        self.source_tabs=QTabWidget();self.source_tabs.addTab(self.workflows['source'],'Simulation Source 수집');self.source_tabs.addTab(self.source,'저장 Source 검토')
+        self.source_tabs=QWidget();source_layout=QVBoxLayout(self.source_tabs);source_layout.setContentsMargins(0,0,0,0);source_layout.addWidget(self.workflows['source'])
+        self.source_dialog=QDialog(self);self.source_dialog.setWindowTitle('저장 Source 검토');self.source_dialog.resize(1400,920);QVBoxLayout(self.source_dialog).addWidget(self.source)
+        source_review=QPushButton('저장 Source 검토');source_review.clicked.connect(self.source_dialog.show);self.workflows['source'].form.insertWidget(1,source_review)
         self.pipeline=QWidget();outer=QVBoxLayout(self.pipeline);outer.setContentsMargins(12,12,12,12);outer.setSpacing(16)
         header=QWidget();header.setObjectName('dashboardHeader');header_layout=QHBoxLayout(header);title_box=QVBoxLayout();brand=QLabel('SO-101  /  WORKSPACE');brand.setObjectName('eyebrow');title_box.addWidget(brand)
         self.dashboard_title=QLabel('Source Demo');self.dashboard_title.setObjectName('dashboardTitle');title_box.addWidget(self.dashboard_title);header_layout.addLayout(title_box,1)

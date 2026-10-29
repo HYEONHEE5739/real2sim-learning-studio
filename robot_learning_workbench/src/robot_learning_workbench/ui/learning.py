@@ -55,7 +55,14 @@ class TrainingSettings(QWidget):
         import json
         from pathlib import Path
         try:
-            data=json.loads(Path(self.page.inputs['training_config'].text()).read_text())
+            path=self.page.inputs['training_config'].text()
+            if not path:
+                from PyQt6.QtWidgets import QFileDialog
+                path,_=QFileDialog.getOpenFileName(self,'공식 LeRobot Config 선택','','JSON (*.json)')
+                if not path:return
+                self.page.inputs['training_config'].setText(path);self.page.edit_input('training_config',path)
+            base=self.page.editor.path.parent if self.page.editor.path is not None else Path.cwd()
+            data=json.loads((base/path).read_text())
             if self.model.findText(data['policy']['type'])<0:self.model.addItem(data['policy']['type'])
             self.policy_json.setPlainText(json.dumps(data['policy'],ensure_ascii=False,indent=2))
             self.model.setCurrentText(data['policy']['type']);self.pretrained.setEnabled(data['policy']['type']=='smolvla');self.pretrained.setChecked(data['policy'].get('load_vlm_weights',False))

@@ -217,3 +217,18 @@ p.job_finished({'ok':True,'result':{'runnable':True,'state':'runtime_ready','rea
 assert p.ready is None and not p.start_button.isEnabled() and p.editor.dirty
 p.timer.stop();p.close()
 ''',tmp_path)
+
+
+def test_source_preview_and_training_primary_settings_match_original_priorities(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.app import Window
+app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'space');w.resize(1320,900);w.show();w.tabs.setCurrentIndex(2);w.navigation.setCurrentRow(1);app.processEvents()
+p=w.workflows['source'];assert p.previews['side'].height()>=250
+w.navigation.setCurrentRow(6);app.processEvents();t=w.workflows['train']
+assert t.input_rows['policy'].isHidden() and t.input_rows['checkpoint'].isHidden()
+assert t.training_settings.mapTo(t.settings_content,t.training_settings.rect().topLeft()).y()<400
+w.close();app.processEvents()
+''',tmp_path)
