@@ -130,6 +130,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
 - [Live observation, Capture and gripper approval boundary](docs/hardware-read-gripper.md)
 - [Four code-review fixes and verification](docs/code-review-followup.md)
+- [Original Qt UI restoration and current Worker integration](docs/ui-original-restoration.md)
 
 Historical reports contain local absolute paths and links to `docs/evidence/`.
 Those preserved evidence directories are excluded from publication; such links are
