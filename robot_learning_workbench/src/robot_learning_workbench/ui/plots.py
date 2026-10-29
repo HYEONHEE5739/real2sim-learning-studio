@@ -5,18 +5,17 @@ outside the GUI; bounded numeric rows come from the existing data reader.
 """
 import json
 import numpy as np
-from PyQt6.QtCore import Qt,QPointF,QRectF,pyqtSignal
+from PyQt6.QtCore import Qt,QPointF,QRectF
 from PyQt6.QtGui import QPainter,QColor,QPen,QPolygonF
 from PyQt6.QtWidgets import QWidget,QToolTip
 SPLIT_COLORS={'train':'#55d6b0','val':'#69b9ff'}
 
 
 class ReviewPlot(QWidget):
-    picked=pyqtSignal(int)
     def __init__(self, mode):
-        super().__init__();self.mode=mode;self.rows=[];self.row=None;self.excluded=set();self.selected=-1
+        super().__init__();self.mode=mode;self.rows=[];self.row=None
         self.yaw=.7;self.pitch=.55;self.drag=None;self.screen=[];self.zoom=1.0
-        self.frame=0;self.payload={};self.sample_frame=0;self.context_rows=[]
+        self.frame=0;self.payload={};self.sample_frame=0
         self.action_lines=[];self.action_row=None;self.setMouseTracking(mode=='actions')
         self.setMinimumSize(240,200)
     def set_view(self, name):
@@ -54,10 +53,8 @@ class ReviewPlot(QWidget):
         painter.setPen(QColor('#b5c5d3'))
         painter.drawText(12,self.height()-12,'기록된 선택 시작 위치 · 지정 Frame [m] · 배치 경계 추정 없음')
     def has_splits(self):
-        return any(r.get('split') in SPLIT_COLORS for r in (self.context_rows or self.rows))
+        return any(r.get('split') in SPLIT_COLORS for r in self.rows)
     def point_color(self,row,split_mode):
-        if row['name'] in self.excluded:return '#66717d'
-        if row.get('evaluation_outcome'):return '#55d6b0' if row['recorded_success'] else '#ff7777'
         if split_mode:return SPLIT_COLORS.get(row.get('split'),'#b5c5d3')
         return '#efb467' if row['flags'] else '#55d6b0'
     def draw_axes(self,painter):
@@ -82,20 +79,16 @@ class ReviewPlot(QWidget):
         self.action_lines=[];self.action_row=None
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
-        robot_view=any(r.get('placement_region') for r in (self.context_rows or self.rows))
         title={'scatter':'선택 시작 Object 위치 · 지정 좌표 XY [m]','trajectory':'기록된 EEF 경로 · '+str((self.row or {}).get('display_frame',''))+' ['+str((self.row or {}).get('eef_unit','unknown'))+']','actions':'기록된 Target ['+str((self.row or {}).get('target_unit','unknown'))+'] · 선택 Frame'}[self.mode]
         painter.drawText(12,22,title)
-        if self.mode=='scatter' and (self.rows or self.context_rows):
+        if self.mode=='scatter' and self.rows:
             self.draw_distribution(painter)
             self.screen=self.project([r['xy'] for r in self.rows])
             split_mode=self.has_splits()
             for i,(row,point) in enumerate(zip(self.rows,self.screen)):
-                selected=getattr(self,'original_indices',list(range(len(self.rows))))[i]==self.selected
                 color=self.point_color(row,split_mode)
-                edge='#efb467' if row['flags'] and row['name'] not in self.excluded else color
+                edge='#efb467' if row['flags'] else color
                 painter.setPen(QPen(QColor(edge),2));painter.setBrush(QColor(color));painter.drawEllipse(point,5,5)
-                if selected:
-                    painter.setPen(QPen(QColor('#ffffff'),2));painter.setBrush(Qt.BrushStyle.NoBrush);painter.drawEllipse(point,8,8)
         elif self.row and self.mode=='trajectory':
             self.draw_axes(painter)
             points=self.project(self.row['ee']);painter.setPen(QPen(QColor('#55d6b0'),2))
@@ -161,10 +154,6 @@ class ReviewPlot(QWidget):
         self.update();event.accept()
     def mousePressEvent(self,event):
         self.drag=event.position()
-        if self.mode=='scatter' and self.screen:
-            d=[(p.x()-self.drag.x())**2+(p.y()-self.drag.y())**2 for p in self.screen]
-            if min(d)<225:
-                index=int(np.argmin(d));self.picked.emit(getattr(self,'original_indices',list(range(len(d))))[index])
     def mouseMoveEvent(self,event):
         if self.mode=='actions':
             text=self.action_tooltip(event.position())
