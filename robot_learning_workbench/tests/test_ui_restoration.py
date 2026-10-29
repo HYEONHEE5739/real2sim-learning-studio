@@ -133,6 +133,9 @@ def wait(condition):
         app.processEvents();QTest.qWait(10)
 p.load_source(root/'source');wait(lambda:len(p.rows)==1 and not p.busy and not p.plot_busy)
 assert p.episode_list.count()==1 and p.table.currentRow()==0
+from PyQt6.QtCore import Qt
+assert not(p.table.item(0,2).flags() & Qt.ItemFlag.ItemIsEditable)
+assert not(p.table.item(0,3).flags() & Qt.ItemFlag.ItemIsEditable)
 p.trim_start.setValue(2);p.trim_stop.setValue(5);p.seek(1)
 wait(lambda:not p.busy and getattr(p,'last_review',{}).get('original_frame')==3)
 assert p.dirty and p.frame.value()==1 and p.timeline.value()==1
@@ -220,6 +223,9 @@ p=WorkflowPage('datagen','/no/worker','modules');p.load_recipe(r);p.operation='p
 sha=hashlib.sha256(r.read_bytes()).hexdigest();p.counts['env_num'].setValue(2)
 p.job_finished({'ok':True,'result':{'runnable':True,'state':'runtime_ready','reason':'ready','recipe_sha256':sha,'prepared_sha256':'old-check'}})
 assert p.ready is None and not p.start_button.isEnabled() and p.editor.dirty
+p.load_recipe(r);r.unlink();p.operation='prepare'
+p.job_finished({'ok':True,'result':{'runnable':True,'state':'runtime_ready','reason':'ready','recipe_sha256':sha,'prepared_sha256':'old-check'}})
+assert p.ready is None and not p.start_button.isEnabled() and 'Recipe'in p.state.text()
 p.timer.stop();p.close()
 ''',tmp_path)
 

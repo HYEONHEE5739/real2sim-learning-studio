@@ -454,7 +454,10 @@ class WorkflowPage(QWidget):
         data=response['result']
         if self.operation=='prepare':
             import hashlib
-            if self.editor.dirty or self.editor.path is None or hashlib.sha256(self.editor.path.read_bytes()).hexdigest()!=data['recipe_sha256']:
+            try:current_sha=hashlib.sha256(self.editor.path.read_bytes()).hexdigest()if self.editor.path is not None else None
+            except OSError as error:
+                self.ready=None;self.start_button.setEnabled(False);self.state.setText('Recipe 재확인 실패: '+str(error));return
+            if self.editor.dirty or current_sha!=data['recipe_sha256']:
                 self.ready=None;self.start_button.setEnabled(False);self.recipe_status.setText('검사 중 편집됨 · 저장하고 다시 검사하세요');return
             self.ready=data if data['runnable'] and data['state']=='runtime_ready' else None
             self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None);self.recipe_status.setText('저장 입력 검사 통과'if self.ready else'검사 완료 · 실행 차단')

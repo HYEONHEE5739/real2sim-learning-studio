@@ -234,7 +234,8 @@ class CurationPage(QWidget):
                     values=[row['selection_id'],*row['selection_range'],outcome,row['split'] or '']
                     for j,value in enumerate(values,1):
                         item=QTableWidgetItem(str(value))
-                        if j in (1,4):item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        # Range editing has one visible source: the Trim controls.
+                        if j in (1,2,3,4):item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.table.setItem(i,j,item)
                 self.dirty=False
             finally:self.loading=False
