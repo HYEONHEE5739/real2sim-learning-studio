@@ -29,7 +29,8 @@ def validate(repo_id,repo_type,revision):
 def resolve(repo_id: str,repo_type: str,revision: str) -> dict:
     validate(repo_id,repo_type,revision)
     info=api().repo_info(repo_id,repo_type=repo_type,revision=revision)
-    if len(info.sha)!=40 or any(c not in '0123456789abcdef' for c in info.sha):raise ValueError('Hub did not return a pinned commit')
+    if info.sha is None:raise DataError('HUB_EMPTY_REPOSITORY','revision','Repository has no parent commit; initial publication is not supported by the guarded existing-Repo uploader. Creation and initial upload need separate approval.')
+    if not isinstance(info.sha,str) or len(info.sha)!=40 or any(c not in '0123456789abcdef' for c in info.sha):raise ValueError('Hub did not return a pinned commit')
     return dict(repo_id=repo_id,repo_type=repo_type,revision=revision,commit=info.sha,private=info.private)
 
 

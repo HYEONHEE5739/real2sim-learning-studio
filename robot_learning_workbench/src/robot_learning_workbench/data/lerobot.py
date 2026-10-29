@@ -5,7 +5,11 @@ The pinned _save_episode_data boundary is used because save_episode re-encodes
 existing MP4. Metadata.save_episode and feature statistics remain official.
 """
 from dataclasses import asdict
-from collections.abc import Sequence
+from collections.abc import Sequence,Callable,Iterable
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..recipe import PreparedRun
+    from ..run import StageResult
 from pathlib import Path
 import uuid
 from importlib.metadata import version
@@ -372,3 +376,21 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
             'semantics':{'observation':'recorded measured model rad' if contract else 'unverified explicit projection','action':'recorded joint target, not separately measured applied telemetry' if contract else 'unverified explicit projection','timestamp':'official relative clock; original in source.timestamp'},'independent':independent})
         return publish(ds,output)
     finally:ds.finalize()
+
+
+def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callable[[],Iterable[dict]]) -> 'StageResult':
+    """Recipe/R03 entry to the existing atomic materialization and Merge APIs."""
+    from ..recipe import verify_prepared_inputs,_plain
+    from ..run import StageResult
+    verify_prepared_inputs(plan)
+    for command in commands():
+        if command['kind']=='cancel':
+            events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':'completed'}})
+            return StageResult('cancelled',(),0,{})
+    task=plan.effective_settings['execution'].get('task_instruction')
+    if plan.stage=='merge':
+        output=merge([row['path']for row in plan.resolved_inputs['datasets']],plan.output_path,task=task)
+    else:
+        mapping=_plain(plan.input_documents.get('feature_mapping'))
+        output=materialize(plan.resolved_inputs['dataset']['path'],plan.output_path,feature_map=mapping,task=task)
+    return StageResult('completed',(str(output),),0,{'official_dataset':str(output)})

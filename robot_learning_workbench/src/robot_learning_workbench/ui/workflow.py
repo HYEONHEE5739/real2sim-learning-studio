@@ -55,7 +55,7 @@ class WorkflowPage(QWidget):
         if stage in ('source','datagen'):
             self.dataset_resume=QCheckBox('기존 Dataset 경로에 추가 (Resume)');self.form.addWidget(self.dataset_resume);self.dataset_resume.toggled.connect(self.edit_dataset_resume)
             choose=QPushButton('Dataset 경로 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once'] if stage=='teleoperation' else ['auto','manual'] if stage=='annotation' else {'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once'],'real_sim':['offline','observe_only']}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
+        self.mode=QComboBox();self.mode.addItems(['fake_all','observe_only','gripper_once'] if stage=='teleoperation' else ['auto','manual'] if stage=='annotation' else {'capture':['offline','observe_only','live_capture'],'precision_calibration':['offline','observe_only'],'real_evaluation':['offline','observe_only','gripper_once','fake_all'],'real_sim':['offline','observe_only']}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ['scratch','finetune','resume'])
         if stage in ('annotation','train','capture','precision_calibration','real_evaluation','real_sim','teleoperation'):self.form.addWidget(self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
         self.source_kind=None
         if stage=='source':
@@ -89,6 +89,11 @@ class WorkflowPage(QWidget):
         if stage in ('source','annotation','datagen','simulation_evaluation'):box.addWidget(QLabel('Preview / Manual 명령 Env'));box.addWidget(self.preview_env)
         preview=QHBoxLayout();box.addLayout(preview);self.previews={n:QLabel(n+' · Live Preview 대기') for n in ('side','wrist')}
         for label in self.previews.values():label.setMinimumSize(320,240);label.setAlignment(Qt.AlignmentFlag.AlignCenter);preview.addWidget(label)
+        self.sim_previews={}
+        if stage=='real_sim':
+            row=QHBoxLayout();box.addLayout(row)
+            for n in ('side','wrist'):
+                label=QLabel('Simulation '+n+' · 비교 결과 대기');label.setMinimumSize(320,240);row.addWidget(label);self.sim_previews[n]=label
         if stage not in ('source','annotation','datagen','simulation_evaluation','capture','real_evaluation','real_sim'):
             for label in self.previews.values():label.hide()
         self.loss_chart=None
@@ -337,6 +342,12 @@ class WorkflowPage(QWidget):
             self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None)
         elif self.operation=='precision_revision':
             self.state.setText('새 검토 Revision · '+data['path']+' · physical_verified=false');self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
+        elif self.operation=='terminal_hardware':
+            self.dataset_state='실물 결과 재개방 확인';self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
+            self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
+            for kind,labels in (('real',self.previews),('sim',self.sim_previews)):
+                for n,path in data.get('images',{}).get(kind,{}).items():
+                    if n in labels:labels[n].setPixmap(QPixmap(path).scaled(640,480,Qt.AspectRatioMode.KeepAspectRatio))
         elif self.operation=='terminal_catalog':
             self.log.appendPlainText('저장 결과 재개방 확인 · 완료 Episode '+str(len(data['inspection']['episodes']))+' / 미완료 intent '+str(len(data['inspection']['unresolved_source_intents'])))
         elif self.operation=='start':
@@ -374,9 +385,13 @@ class WorkflowPage(QWidget):
                 if status.status=='unknown' and self.handle['run_dir'] in self.owned_runs:
                     import shutil
                     shutil.rmtree(Path(self.handle['run_dir'])/'preview',ignore_errors=True)
-                if self.stage in ('source','annotation','datagen','simulation_evaluation') and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy:
+                if (self.stage in ('source','annotation','datagen','simulation_evaluation') or self.stage in ('teleoperation','real_evaluation') and (Path(self.handle['output_path'])/'run.json').is_file()) and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy:
                     self._verified_terminal=self.handle['run_id'];self.operation='terminal_catalog';self.busy=True;self.job.start('catalog',path=self.handle['output_path'])
-                for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')
+                if self.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation') and getattr(self,'_verified_terminal',None)!=self.handle['run_id'] and not self.busy and any((Path(self.handle['output_path'])/name).is_file()for name in ('hardware-report.json','gripper-report.json')):
+                    self._verified_terminal=self.handle['run_id'];self.operation='terminal_hardware';self.busy=True;self.job.start('hardware_result',path=self.handle['output_path'])
+                if getattr(self,'_preview_terminal_cleared',None)!=self.handle['run_id']:
+                    for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')
+                    self._preview_terminal_cleared=self.handle['run_id']
                 self.resume_button.setVisible(bool(outcome['needs_resume']))
                 text='Worker '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])

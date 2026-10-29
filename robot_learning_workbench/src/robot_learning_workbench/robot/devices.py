@@ -285,6 +285,7 @@ def send_gripper_once(follower: Follower, proposal: dict, *, approved: bool=Fals
     if bus.read('Present_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Goal_Position','gripper',normalize=False)!=proposal['current_raw'] or bus.read('Torque_Enable','gripper',normalize=False)!=1 or bus.read('Operating_Mode','gripper',normalize=False)!=0:
         raise DeviceError('gripper_send','Feedback/torque/mode changed; authorization invalid',effect='not_applied')
     if time.monotonic_ns()-check_start>200_000_000:raise DeviceError('gripper_send','Pre-send reads exceeded 200ms; authorization consumed without sending',effect='not_applied')
+    if fingerprint(proposal)!=getattr(follower,'_gripper_proposal',None):raise DeviceError('gripper_send','Stop invalidated authorization during pre-send reads',effect='not_applied')
     try:
         start=stamp();bus.write('Goal_Position','gripper',proposal['target_raw'],normalize=False);end=stamp()
         feedback=bus.read('Present_Position','gripper',normalize=False)

@@ -49,3 +49,10 @@ def test_create_repository_needs_explicit_approval_and_never_reuses_existing(tmp
     assert calls==[]
     out=hub.create_repository('owner/new-data','dataset',private=True,confirm=True)
     assert out['private'] is True and calls==[{'repo_id':'owner/new-data','repo_type':'dataset','private':True,'exist_ok':False}]
+
+
+def test_empty_remote_repository_is_explicitly_blocked_instead_of_typeerror(monkeypatch):
+    from robot_learning_workbench.learning import hub
+    monkeypatch.setattr(hub,'api',lambda:SimpleNamespace(repo_info=lambda *a,**kw:SimpleNamespace(sha=None,private=True)))
+    with pytest.raises(ValueError,match='initial')as error:hub.resolve('owner/empty','dataset','main')
+    assert error.value.code=='HUB_EMPTY_REPOSITORY'

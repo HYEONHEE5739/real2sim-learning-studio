@@ -52,3 +52,17 @@ def test_revision_lineage_reload_and_independent_export_are_unchanged(video_sour
 def test_rgb_stride_counts_actual_decoded_and_used_frames_separately(video_source):
     stats=c.rgb_statistics(video_source,'side',stride=2)
     assert stats['decoded_frames']==6 and stats['sampled_frames']==3
+
+
+def test_recipe_worker_convert_reuses_materialize_and_official_consumer(tmp_path):
+    import yaml
+    from test_lerobot_dataset import source
+    from robot_learning_workbench.recipe import read_recipe,prepare_recipe
+    from robot_learning_workbench.run import _run_stage
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    src=source(tmp_path);path=tmp_path/'convert.yaml'
+    path.write_text(yaml.safe_dump(dict(schema_version=1,stage='convert',inputs={'dataset':str(src.root)},execution={'task_instruction':'pick red cube'},output={'directory':str(tmp_path/'official')})))
+    result=_run_stage(prepare_recipe(read_recipe(path)),events=lambda _:None,commands=lambda:())
+    assert result.status=='completed'
+    d=LeRobotDataset('workbench/native',root=tmp_path/'official',video_backend='pyav')
+    assert len(d)==6 and tuple(d[0]['action'].shape)==(6,)

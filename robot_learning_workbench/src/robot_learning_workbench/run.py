@@ -387,9 +387,10 @@ def _run_stage(plan,*,events,commands):
         filename='evaluation' if plan.stage=='simulation_evaluation' else plan.stage
         module=f'engines.{plan.engine}.{filename}';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
-        module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.live';function='run'
+        module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'
     elif plan.stage=='teleoperation':module='robot.teleoperation';function='run'
     elif plan.stage in ('hub_download','hub_upload'):module='learning.hub';function='run'
+    elif plan.stage in ('convert','merge'):module='data.lerobot';function='run'
     elif plan.stage=='train':module='learning.train';function='train'
     elif plan.stage=='offline_validation':module='learning.validate';function='evaluate'
     else:_fail('STAGE_UNAVAILABLE','stage','this stage runner has not been implemented')

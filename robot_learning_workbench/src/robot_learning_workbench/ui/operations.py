@@ -28,6 +28,21 @@ def prepared(path: str,modules: str) -> dict:
     from ..cli import prepare
     plan=prepare(path,task_modules=modules);support=stage_support(plan.stage)
     if not support['runnable']:return {**support,'state':'prepared','plan':plan.summary()}
+    if plan.stage in ('teleoperation','real_evaluation') and plan.effective_settings['execution'].get('mode')=='gripper_once':
+        from ..robot.live import open_inputs
+        from ..robot.configuration import bind_gripper_command
+        from ..recipe import _plain
+        opts=plan.effective_settings['execution'];spec=_plain(plan.input_documents['device_profile'])
+        if 'max_gripper_delta_raw'not in opts or plan.stage=='teleoperation' and 'gripper_target_rad'not in opts:raise ValueError('명시 Target/작은 raw 변위 예산이 필요합니다. 기본 동작은 없습니다.')
+        if plan.scene is None or not spec.get('command_calibration_id'):raise ValueError('승인된 command Calibration이 없어 그리퍼 구동은 차단됩니다.')
+        device,_=open_inputs(plan);bind_gripper_command(device,plan.scene,spec['command_calibration_id'])
+        return {**support,'state':'runtime_ready','reason':'그리퍼 전용 사전검사 → 별도 현장 승인 후 Goal 1회. 팔 5축/모든 Torque 쓰기 금지.','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+    if plan.stage=='real_evaluation' and plan.effective_settings['execution'].get('mode')=='fake_all':
+        from ..robot.teleoperation import fake_device
+        from ..robot.calibration import load_profile
+        from ..recipe import _plain
+        fake_device(_plain(plan.input_documents['device_profile']),load_profile(plan.resolved_inputs['calibration_profile']['path'],role='follower'))
+        return {**support,'state':'runtime_ready','reason':'Fake 6축 Policy · 메모리 장치/합성 RGB만 사용 · 실물 포트/명령 없음','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage in ('capture','precision_calibration','real_evaluation','real_sim') and plan.effective_settings['execution'].get('mode')!='offline':
         from ..robot.live import open_inputs
         if not 1<=plan.effective_settings['execution'].get('max_frames',0)<=300:raise ValueError('명시 max_frames 1..300을 지정하세요')
@@ -102,6 +117,15 @@ def execute(request: dict) -> dict:
     if op=='hub_resolve':
         from ..learning.hub import resolve
         return resolve(**args)
+    if op=='hardware_result':
+        root=Path(args['path']);file=root/'hardware-report.json'if(root/'hardware-report.json').is_file()else root/'gripper-report.json'
+        result=json.loads(file.read_text())
+        small={k:result[k]for k in ('status','frames','command_sent','physical_verified','snapshot_quality','policy','precision','real_sim','motion','arm_commands','torque_commands')if k in result}
+        if (root/'COMPLETE').is_file() and (root/'capture_manifest.yaml').is_file():
+            from real2sim_builder.capture import load_session
+            manifest,samples,_=load_session(root);small['verified_capture_frames']=len(samples)
+        small['images']={kind:{n:str(root/(kind+'-'+n+'.png'))for n in ('side','wrist')if(root/(kind+'-'+n+'.png')).is_file()}for kind in ('real','sim')}
+        return small
     if op=='precision_revision':
         from ..robot.calibration import review_revision
         return review_revision(**args)

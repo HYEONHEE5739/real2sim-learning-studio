@@ -1,5 +1,6 @@
 """Host receipt-time Capture calculations. No acquisition, engine or writer loop."""
 from collections import deque
+from pathlib import Path
 import copy
 import time
 import numpy as np
@@ -285,7 +286,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     return measured, observed, warnings
 
 
-def save_session(root, *, model, mapping: dict, samples: list, images: list, metadata: dict):
+def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: list, images: list, metadata: dict) -> Path:
     """Publish the existing Builder real2sim.capture/1 format, not a second Dataset.
 
     Only measured observations are written. No action labels are inferred from q.
@@ -315,6 +316,7 @@ def save_session(root, *, model, mapping: dict, samples: list, images: list, met
                     visit(path.parent/reference)
     visit(model)
     common=Path(os.path.commonpath([str(p.parent)for p in dependencies]));root.mkdir()
+    destination=root;root=destination/'.pending';root.mkdir()
     files={};rows=copy.deepcopy(samples)
     for source in dependencies:
         relative=Path('model')/source.relative_to(common);target=root/relative;target.parent.mkdir(parents=True,exist_ok=True)
@@ -332,7 +334,7 @@ def save_session(root, *, model, mapping: dict, samples: list, images: list, met
             row['images'].append(dict(camera=camera,path=relative,resolution=[640,480],timestamp_ns=timing.get('timestamp_ns',t),eligible=timing.get('eligible',True) and row.get('stability',{}).get('stable',True),joint_skew_ns=timing.get('joint_skew_ns',0)))
     atomic_json(root/'samples.json',rows);atomic_json(root/'events.json',[])
     for name in ('samples.json','events.json'):files[name]=hashlib.sha256((root/name).read_bytes()).hexdigest()
-    manifest=dict(schema='real2sim.capture/1',session_id=root.name.replace('-','_'),group_id=root.name.replace('-','_'),split='train',purpose='snapshot' if len(rows)==1 else 'demonstration',
+    manifest=dict(schema='real2sim.capture/1',session_id=destination.name.replace('-','_'),group_id=destination.name.replace('-','_'),split='train',purpose='snapshot' if len(rows)==1 else 'demonstration',
         clock=dict(domain='host_monotonic_ns',hardware_synchronized=False,timestamp_kind='host_receipt_not_exposure'),
         joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',
         joint_mapping=mapping,source_robot_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
@@ -345,4 +347,7 @@ def save_session(root, *, model, mapping: dict, samples: list, images: list, met
     except BaseException:
         (root/'COMPLETE').unlink()
         raise
-    return root
+    for child in root.iterdir():
+        if child.name!='COMPLETE':os.replace(child,destination/child.name)
+    os.replace(root/'COMPLETE',destination/'COMPLETE');root.rmdir()
+    return destination

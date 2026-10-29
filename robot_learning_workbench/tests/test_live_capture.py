@@ -31,3 +31,16 @@ def test_capture_rejects_metadata_that_relabels_measured_data(tmp_path):
     model=tmp_path/'robot.urdf';model.write_text('<robot>'+''.join('<joint name="'+n+'" type="revolute"/>'for n in JOINTS)+'</robot>')
     with pytest.raises(ValueError,match='reserved'):
         capture.save_session(tmp_path/'bad',model=model,mapping={},samples=[{'id':'s','timestamp_ns':1,'q_measured':[0.]*6}],images=[{n:np.zeros((480,640,3),np.uint8)for n in ('side','wrist')}],metadata={'q_measured_source':'policy_prediction'})
+
+
+def test_capture_completion_is_not_public_during_reader_validation(tmp_path,monkeypatch):
+    from real2sim_builder import capture as reader
+    from robot_learning_workbench.robot.calibration import JOINTS
+    model=tmp_path/'robot.urdf';model.write_text('<robot>'+''.join('<joint name="'+n+'" type="revolute"/>'for n in JOINTS)+'</robot>')
+    output=tmp_path/'capture';load=reader.load_session
+    def validate(staging):
+        assert not (output/'COMPLETE').exists()
+        return load(staging)
+    monkeypatch.setattr(reader,'load_session',validate)
+    capture.save_session(output,model=model,mapping={},samples=[{'id':'s','timestamp_ns':1,'q_measured':[0.]*6}],images=[{n:np.zeros((480,640,3),np.uint8)for n in ('side','wrist')}],metadata={})
+    assert (output/'COMPLETE').is_file() and not (output/'.pending').exists()

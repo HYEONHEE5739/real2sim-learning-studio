@@ -1,15 +1,21 @@
 """Concrete observation loops for R03. Real arm Goal/Torque writes are prohibited."""
 from pathlib import Path
+from typing import TYPE_CHECKING
+from collections.abc import Callable,Iterable
 import time
 import numpy as np
 from ..data.native import DataError,atomic_json
 from .calibration import JOINTS,load_profile,mapper_from_scene
-from .devices import CameraReader,close_devices
+from .devices import CameraReader,close_devices,DeviceError
 from .configuration import create_observer
 from .capture import observed_positions,Stability
+if TYPE_CHECKING:
+    from ..recipe import PreparedRun
+    from ..run import StageResult
+    from .devices import Follower
 
 
-def policy_bundle(plan):
+def policy_bundle(plan: 'PreparedRun') -> tuple:
     """Reuse official Policy loading with the selected execution model contract."""
     from ..learning.policy import policy_inputs
     if plan.scene is None:raise ValueError('Explicit Scene and Policy control binding required before live inference')
@@ -21,7 +27,7 @@ def policy_bundle(plan):
     return policy_inputs(plan,urdf)
 
 
-def open_inputs(plan):
+def open_inputs(plan: 'PreparedRun') -> tuple['Follower',dict[str,CameraReader]]:
     """Construct explicit pinned devices; SDK constructors do not connect."""
     from ..recipe import _plain
     from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
@@ -46,7 +52,7 @@ def open_inputs(plan):
     return device,cameras
 
 
-def run(plan, *, events, commands):
+def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callable[[],Iterable[dict]]) -> 'StageResult':
     from ..recipe import verify_prepared_inputs,_plain
     from ..run import StageResult
     opts=plan.effective_settings['execution'];mode=opts.get('mode')
@@ -59,7 +65,7 @@ def run(plan, *, events, commands):
     if type(frames)is not int or not 1<=frames<=300:raise ValueError('Explicit bounded max_frames in 1..300 required')
     policy=None
     if plan.stage=='real_evaluation':
-        from ..learning.policy import observation_batch,infer
+        from ..learning.policy import observation_batch,infer,action_queue_depth
         policy,pre,post,record,contract=policy_bundle(plan)
         policy.reset()
     device,cameras=open_inputs(plan);owned={'device':device,**cameras};rows=[];images=[];cancelled=False
@@ -98,7 +104,7 @@ def run(plan, *, events, commands):
                 batch=observation_batch([q[n]for n in JOINTS],rgb,joint_order=JOINTS,task=opts.get('task_instruction'))
                 inference_start=time.perf_counter();action=infer(policy,pre,post,batch,contract=contract)[0]
                 rows[-1].update(policy_action_model_rad=action.tolist(),inference_s=time.perf_counter()-inference_start,
-                    observation_latency_s=(time.monotonic_ns()-t)/1e9,policy_queue_depth=len(getattr(policy,'_action_queue',[])))
+                    observation_latency_s=(time.monotonic_ns()-t)/1e9,policy_queue_depth=action_queue_depth(policy))
             if rgb:
                 images.append(rgb)
                 from ..data import video
@@ -161,7 +167,7 @@ def run(plan, *, events, commands):
         finally:close_devices(owned)
 
 
-def render_comparison(plan, measured_q: np.ndarray, directory: Path):
+def render_comparison(plan: 'PreparedRun', measured_q: np.ndarray, directory: Path) -> tuple[dict[str,np.ndarray],np.ndarray]:
     """Render measured simulation state, not a motor target or a physics rollout."""
     from ..recipe import _plain
     settings=_plain(plan.input_documents.get('engine_config'))
@@ -198,7 +204,7 @@ def render_comparison(plan, measured_q: np.ndarray, directory: Path):
     raise ValueError('Supported actual engine required')
 
 
-def gripper_trial(plan, *, events, commands):
+def gripper_trial(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callable[[],Iterable[dict]]) -> 'StageResult':
     """R03 one-shot preflight, supervised approval, exactly one motor6 goal."""
     from ..recipe import verify_prepared_inputs,_plain
     from ..run import StageResult
@@ -219,7 +225,7 @@ def gripper_trial(plan, *, events, commands):
         if len(models)!=1:raise ValueError('Exact command mapping URDF required')
         requested=opts.get('gripper_target_rad')
         if plan.stage=='real_evaluation':
-            from ..learning.policy import observation_batch,infer
+            from ..learning.policy import observation_batch,infer,action_queue_depth
             policy,pre,post,record,contract=policy_bundle(plan);policy.reset()
             if set(cameras)!={'side','wrist'}:raise ValueError('Real Policy needs both physical cameras')
             for c in cameras.values():c.start()
@@ -238,8 +244,19 @@ def gripper_trial(plan, *, events, commands):
         events({'kind':'status','payload':{'progress':{'gripper_proposal':proposal},'episode_id':'gripper-once'}})
         deadline=time.monotonic()+30;approved=False;cancelled=False
         while time.monotonic()<deadline and not approved and not cancelled:
-            for command in commands():
+            pending=list(commands())
+            if any(command['kind']=='cancel'for command in pending):
+                cancelled=True;device.stop()
+                for command in pending:
+                    ack={'command_id':command['command_id'],'status':'completed'if command['kind']=='cancel'else'rejected'}
+                    if command['kind']!='cancel':ack['reason']='Cancel takes priority over approval in the same command batch'
+                    events({'kind':'command_ack','payload':ack})
+                break
+            for command in pending:
                 payload=command.get('payload',{});kind=command['kind']
+                if approved:
+                    events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':'rejected','reason':'One-shot approval already consumed; no second send'}})
+                    continue
                 if kind=='cancel':cancelled=True;ok=True
                 else:
                     ok=kind=='gripper_approve' and payload.get('proposal_sha256')==fingerprint(proposal) and payload.get('target_raw')==proposal['target_raw'] and all(payload.get(k)is True for k in ('supervised','clear','stop_ready'))
@@ -252,6 +269,10 @@ def gripper_trial(plan, *, events, commands):
         report['status']='SINGLE_COMMAND_VERIFIED'if approved else 'CANCELLED'if cancelled else'APPROVAL_TIMEOUT'
         plan.output_path.mkdir();atomic_json(plan.output_path/'gripper-report.json',report)
         return StageResult('completed'if approved else'cancelled',(str(plan.output_path),),0,report)
+    except DeviceError as error:
+        report.update(status='FAILED',effect=error.effect,command_sent='unknown'if error.effect=='unknown'else report['command_sent'],error=str(error))
+        plan.output_path.mkdir(exist_ok=True);atomic_json(plan.output_path/'gripper-report.json',report)
+        raise
     finally:
         try:
             if policy is not None:policy.reset()

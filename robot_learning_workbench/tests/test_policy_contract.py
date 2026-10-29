@@ -65,3 +65,12 @@ def test_external_official_act_checkpoint_does_not_require_project_manifest(tmp_
     policy,pre,post,record=load_policy(tmp_path)
     assert record['external_official'] is True and record['control_contract'] is None
     assert policy.config.type=='act'
+
+
+def test_queue_diagnostics_do_not_report_missing_queues_as_zero():
+    from collections import deque
+    from types import SimpleNamespace as NS
+    from robot_learning_workbench.learning.policy import action_queue_depth
+    assert action_queue_depth(NS(_action_queue=deque([1])))==1
+    assert action_queue_depth(NS(_queues={'action':deque([1,2])}))==2
+    assert action_queue_depth(NS()) is None

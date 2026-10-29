@@ -115,3 +115,27 @@ for page in (p,q):page.timer.stop();page.close()
 '''
     result=subprocess.run([UI,'-B','-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
     assert result.returncode==0,result.stderr
+
+
+def test_prepared_gripper_is_labeled_as_approval_pending_write_not_observation(monkeypatch):
+    from types import SimpleNamespace as NS
+    from robot_learning_workbench import cli
+    from robot_learning_workbench.ui import operations
+    from robot_learning_workbench.robot import live,configuration
+    p=NS(stage='real_evaluation',effective_settings={'execution':{'mode':'gripper_once','max_gripper_delta_raw':1}},
+        resolved_inputs={'calibration_profile':{'path':'controlled'}},input_documents={'device_profile':{'command_calibration_id':'command'}},scene=object(),sha256='a'*64,recipe_sha256='b'*64,summary=lambda:{})
+    monkeypatch.setattr(cli,'prepare',lambda *a,**kw:p)
+    monkeypatch.setattr(live,'open_inputs',lambda _:(object(),{}))
+    monkeypatch.setattr(configuration,'bind_gripper_command',lambda *a:{'motion_approved':False})
+    value=operations.prepared('controlled','controlled')
+    assert value['runnable'] is True and value['state']=='runtime_ready'
+    assert '그리퍼' in value['reason'] and '승인' in value['reason']
+    assert 'Goal/Torque 쓰기 없음'not in value['reason']
+
+
+def test_hardware_result_reports_capture_frames_separately_from_native_episodes(tmp_path):
+    import json
+    from robot_learning_workbench.ui.operations import execute
+    (tmp_path/'hardware-report.json').write_text(json.dumps({'status':'HARDWARE_READ_VERIFIED','frames':3,'command_sent':False,'physical_verified':False}))
+    value=execute({'operation':'hardware_result','arguments':{'path':str(tmp_path)}})
+    assert value['frames']==3 and value['command_sent'] is False and value['physical_verified'] is False

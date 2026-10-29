@@ -1,8 +1,13 @@
 """Explicit device configuration binding; construction does not connect/activate."""
 from pathlib import Path
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..recipe import PreparedRun
+    from .devices import Follower,Leader
+    from scene_contract.package import ScenePackage
 
 
-def create_observer(spec: dict, profile: dict):
+def create_observer(spec: dict, profile: dict) -> 'Follower':
     """Construct a pinned SDK observation device; never connect/configure/calibrate."""
     import hashlib
     from .devices import Follower,Leader
@@ -21,7 +26,7 @@ def create_observer(spec: dict, profile: dict):
     return cls.from_config(cfg,profile=profile,calibration_path=path,identity=profile['identity'],model_hash=profile['urdf_sha256'])
 
 
-def bind_gripper_command(device, scene, calibration_id: str) -> dict:
+def bind_gripper_command(device: 'Follower', scene: 'ScenePackage', calibration_id: str) -> dict:
     """Explicit command-phase evidence only; this grants no motion approval."""
     from .calibration import mapper_from_scene
     mapper=mapper_from_scene(scene,calibration_id,role='follower',phase='device_command')
@@ -30,7 +35,7 @@ def bind_gripper_command(device, scene, calibration_id: str) -> dict:
     return {'calibration_id':calibration_id,'mapping_sha256':mapper.metadata()['sha256'],'motion_approved':False}
 
 
-def create_leader(plan):
+def create_leader(plan: 'PreparedRun') -> 'Leader':
     """Explicit SDK construction; callers must call connect/activate separately."""
     from .calibration import mapper_from_scene
     spec=plan.input_documents['device_profile']

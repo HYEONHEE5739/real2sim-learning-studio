@@ -9,6 +9,13 @@ from ..data.lerobot import control_contract,_pinned
 from ..robot.calibration import JOINTS
 
 
+def action_queue_depth(policy: object) -> int | None:
+    """Known official ACT/SmolVLA/Diffusion queues; unknown is not empty."""
+    queue=getattr(policy,'_action_queue',None)
+    if queue is None:queue=getattr(policy,'_queues',{}).get('action')
+    return len(queue) if queue is not None else None
+
+
 class ActionRejected(ValueError):
     def __init__(self,message,diagnostics):
         super().__init__(message);self.diagnostics=diagnostics

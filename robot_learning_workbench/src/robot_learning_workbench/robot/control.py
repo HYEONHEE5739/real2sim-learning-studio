@@ -89,7 +89,7 @@ def encode_model_target(requested: Sequence[float]|np.ndarray, *, follower: 'Fol
         raise
     return q,command,{**diagnostics,'encoded_model_rad':actual,'encoding_possible':True}
 
-def encode_goal(self, target, *, joints=JOINTS):
+def encode_goal(self, target, *, joints: Sequence[str]=JOINTS):
     """Read-only SDK encoding preflight, including integer truncation."""
     from .calibration import raw_from_native, native_from_raw
     if tuple(joints) not in (JOINTS,('gripper',)):raise ValueError('Only full Fake encoding or gripper encoding is supported')

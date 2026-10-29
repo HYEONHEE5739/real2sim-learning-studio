@@ -77,7 +77,7 @@ _EXEC={
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
  'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction','max_frames','max_gripper_delta_raw'}),'train':({'mode'},set()),
- 'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),set()),'merge':(set(),set()),
+ 'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),{'task_instruction'}),'merge':(set(),{'task_instruction'}),
  'hub_upload':({'repo_type','parent_commit','private','confirm_upload'},set()),'hub_download':({'repo_type'},set()),'capture':(set(),{'episodes','mode','max_frames'}),
  'precision_calibration':(set(),{'mode','max_frames'}),'real_sim':(set(),{'headless','mode','max_frames'})}
 _ROLES={'source':{'signals','metrics'},'annotation':{'signals','acceptance','metrics'},
@@ -131,7 +131,7 @@ def _validate(data,path):
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
-            if value not in (('fake_all','observe_only','gripper_once') if stage=='teleoperation' else ('manual','auto') if stage=='annotation' else {'capture':('offline','observe_only','live_capture'),'precision_calibration':('offline','observe_only'),'real_evaluation':('offline','observe_only','gripper_once'),'real_sim':('offline','observe_only')}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
+            if value not in (('fake_all','observe_only','gripper_once') if stage=='teleoperation' else ('manual','auto') if stage=='annotation' else {'capture':('offline','observe_only','live_capture'),'precision_calibration':('offline','observe_only'),'real_evaluation':('offline','observe_only','gripper_once','fake_all'),'real_sim':('offline','observe_only')}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -447,6 +447,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py']
         code_names += ['generation/mimic.py','data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
+    if spec.stage in ('convert','merge'):code_names += ['data/lerobot.py','data/native.py','data/curation.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):code_names += ['robot/teleoperation.py','robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']

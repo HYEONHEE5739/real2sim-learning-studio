@@ -51,7 +51,8 @@ def test_actual_sdk_needs_explicit_command_phase_binding(tmp_path):
     f.close()
 
 
-def test_worker_waits_for_exact_proposal_and_supervised_one_shot_approval(tmp_path,monkeypatch):
+@pytest.mark.parametrize('cancel_position',[None,'first','last','duplicate','send_timeout'])
+def test_worker_waits_for_exact_proposal_and_supervised_one_shot_approval(tmp_path,monkeypatch,cancel_position):
     from types import SimpleNamespace as NS
     from robot_learning_workbench.robot import live,configuration
     from robot_learning_workbench import recipe
@@ -71,13 +72,23 @@ def test_worker_waits_for_exact_proposal_and_supervised_one_shot_approval(tmp_pa
     def commands():
         if not proposal:return ()
         from robot_learning_workbench.robot.calibration import fingerprint
-        return ({'kind':'gripper_approve','command_id':'approved','payload':{'proposal_sha256':fingerprint(proposal[0]),'target_raw':proposal[0]['target_raw'],'supervised':True,'clear':True,'stop_ready':True}},)
+        approve={'kind':'gripper_approve','command_id':'approved','payload':{'proposal_sha256':fingerprint(proposal[0]),'target_raw':proposal[0]['target_raw'],'supervised':True,'clear':True,'stop_ready':True}}
+        cancel={'kind':'cancel','command_id':'cancel'}
+        return (cancel,approve)if cancel_position=='first'else(approve,cancel)if cancel_position=='last'else(approve,{**approve,'command_id':'second'})if cancel_position=='duplicate'else(approve,)
+    if cancel_position=='send_timeout':
+        def timeout(*a,**kw):raise TimeoutError('Goal delivery unknown')
+        sdk.bus.write=timeout
+        with pytest.raises(devices.DeviceError):live.run(p,events=events,commands=commands)
+        import json
+        report=json.loads((p.output_path/'gripper-report.json').read_text())
+        assert report['command_sent']=='unknown' and report['effect']=='unknown' and report['status']=='FAILED'
+        return
     result=live.run(p,events=events,commands=commands)
-    assert result.status=='completed' and len(proposal)==1
-    assert len([r for r in trace if isinstance(r,tuple)and r[0]=='write_one'])==1
+    assert result.status==('cancelled'if cancel_position in ('first','last')else'completed') and len(proposal)==1
+    assert len([r for r in trace if isinstance(r,tuple)and r[0]=='write_one'])==(0 if cancel_position in ('first','last')else 1)
 
 
-@pytest.mark.parametrize('hazard',['goal_changed','stopped','expired','packet_changed'])
+@pytest.mark.parametrize('hazard',['goal_changed','stopped','expired','packet_changed','stopped_during_read'])
 def test_approval_is_invalidated_before_any_goal_write(tmp_path,hazard):
     f,sdk,trace,raw=follower(tmp_path);e=f.profile['joints']['gripper']
     target=(raw+1-e['anchor_raw'])*e['rad_per_count']+e['reference_angle_rad']
@@ -86,6 +97,11 @@ def test_approval_is_invalidated_before_any_goal_write(tmp_path,hazard):
     if hazard=='stopped':f.stop()
     if hazard=='expired':p['created_ns']-=60_000_000_000
     if hazard=='packet_changed':p['target_raw']+=2
+    if hazard=='stopped_during_read':
+        read=sdk.bus.read
+        def stop_on_read(*a,**kw):
+            f.stop();return read(*a,**kw)
+        sdk.bus.read=stop_on_read
     with pytest.raises(devices.DeviceError):devices.send_gripper_once(f,p,approved=True)
     f.close()
     assert not any(isinstance(x,tuple)and x[0]=='write_one'for x in trace)
