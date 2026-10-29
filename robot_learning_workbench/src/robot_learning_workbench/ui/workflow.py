@@ -346,7 +346,7 @@ class WorkflowPage(QWidget):
             if key=='env_num':data['execution'].pop('num_envs',None)
             if key=='num_episodes':data['execution'].pop('episodes',None);data['execution'].pop('target_successes',None)
         self.safe_update(edit)
-        if key=='env_num':self.preview_env.setRange(0,value-1)
+        if key=='env_num':self.preview_env.setRange(0,value-1);self.sync_input_visibility()
     def edit_output(self):
         if self._syncing or self.editor.path is None:return
         self.safe_update(lambda data:data['output'].__setitem__('directory',self.output.text()))

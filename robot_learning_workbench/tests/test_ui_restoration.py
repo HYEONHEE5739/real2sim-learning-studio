@@ -138,9 +138,14 @@ wait(lambda:not p.busy and getattr(p,'last_review',{}).get('original_frame')==3)
 assert p.dirty and p.frame.value()==1 and p.timeline.value()==1
 assert p.timeline.markers[0]['frame']==1
 assert not p.images['side'].pixmap().isNull()
+assert p.actions.frame==3 and p.actions.sample_frame==3 and p.trajectory.frame==3
 QFileDialog.getSaveFileName=lambda *a,**kw:(str(root/'revision.json'),'JSON')
 p.save_revision();wait(lambda:p.source==str(root/'revision.json')and not p.busy and not p.plot_busy)
 assert not p.dirty and p.rows[0]['selection_range']==[2,5]
+assert p.trim_start.value()==2 and p.trim_stop.value()==5
+assert p.plot_data['original_range']==[2,5]
+p.seek(0);wait(lambda:not p.busy)
+assert p.actions.frame==0 and p.actions.sample_frame==0
 p.analyze();wait(lambda:not p.busy)
 assert p.histogram.series[0]['scope']['frames']==3
 assert p.histogram.series[0]['fields']['joint_targets']['count']==3
@@ -231,4 +236,20 @@ w.navigation.setCurrentRow(6);app.processEvents();t=w.workflows['train']
 assert t.input_rows['policy'].isHidden() and t.input_rows['checkpoint'].isHidden()
 assert t.training_settings.mapTo(t.settings_content,t.training_settings.rect().topLeft()).y()<400
 w.close();app.processEvents()
+''',tmp_path)
+
+
+def test_source_env_selector_follows_edited_environment_count(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);root=Path(sys.argv[1]);p=WorkflowPage('source','/no/worker','modules');p.show()
+r=root/'source.yaml';r.write_text('schema_version: 1\\nstage: source\\nengine: mujoco\\ninputs: {}\\nexecution: {env_num: 1, num_episodes: 1}\\noutput: {directory: output}\\n')
+p.load_recipe(r);app.processEvents();assert not p.preview_env.isVisible()
+p.counts['env_num'].setValue(4);app.processEvents()
+assert p.preview_env.isVisible() and p.preview_env.maximum()==3
+p.counts['env_num'].setValue(1);app.processEvents();assert not p.preview_env.isVisible()
+p.timer.stop();p.close()
 ''',tmp_path)

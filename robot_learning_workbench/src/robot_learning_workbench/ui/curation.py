@@ -121,12 +121,19 @@ class CurationPage(QWidget):
         if index<0:return
         self.table.item(index,2).setText(str(self.trim_start.value()));self.table.item(index,3).setText(str(self.trim_stop.value()))
         self.frame.setMaximum(max(0,self.trim_stop.value()-self.trim_start.value()-1));self.timeline.setMaximum(self.frame.maximum());self.sync_timeline_events()
+        self.update_plot_cursor()
+
+    def update_plot_cursor(self):
+        index=self.table.currentRow()
+        if index<0 or index>=len(self.rows):return
+        frame=self.frame.value()+self.trim_start.value()-self.rows[index]['selection_range'][0]
+        self.actions.set_frame(frame);self.trajectory.set_frame(frame)
 
     def seek(self,value):
         if self._syncing_review:return
         self._syncing_review=True
         self.frame.setValue(value);self.timeline.setValue(value);self.clock_label.setText(f'{value} / {self.frame.maximum()} · frame0')
-        self._syncing_review=False;self.actions.set_frame(value);self.trajectory.set_frame(value)
+        self._syncing_review=False;self.update_plot_cursor()
         if self.busy:self.pending_review=True
         else:self.review()
 
@@ -173,8 +180,8 @@ class CurationPage(QWidget):
         if self.plot_active!=self.plot_target:self.request_plot();return
         if not response.get('ok'):self.metrics.setText(response.get('error',{}).get('message','기록된 plot 없음'));return
         data=response['result'];self.plot_data=data;times=data['timestamps'];row={'actions':data['targets'],'frames':data['frames'],'sample_indices':data['indices'],'timestamps':times,'duration':float(times[-1]-times[0]),'events':data['events'],'target_unit':data['target_unit'],'joint_order':data['joint_order']}
-        self.actions.row=row;self.actions.set_frame(self.frame.value())
-        self.trajectory.row={**row,'ee':data['eef'],'display_frame':data['eef_frame'],'eef_unit':data['eef_unit']}if data['eef']is not None else None;self.trajectory.set_frame(self.frame.value())
+        self.actions.row=row
+        self.trajectory.row={**row,'ee':data['eef'],'display_frame':data['eef_frame'],'eef_unit':data['eef_unit']}if data['eef']is not None else None;self.update_plot_cursor()
         self.sync_timeline_events();self.metrics.setText('기록 Target · '+data['target_unit']+' · '+str(data['frames'])+' frame'+(' · 그래프 최대512점 표본'if data['sampled']else'')+'\n'+data['event_phase'])
 
     def sync_timeline_events(self):
@@ -232,7 +239,10 @@ class CurationPage(QWidget):
                 self.dirty=False
             finally:self.loading=False
             self.refresh_list()
-            if self.rows:self.episode_list.setCurrentRow(0)
+            if self.rows:
+                self.table.blockSignals(True);self.table.setCurrentCell(0,1);self.table.blockSignals(False)
+                self.episode_list.blockSignals(True);self.episode_list.setCurrentRow(0);self.episode_list.blockSignals(False)
+                self.selection_changed()
             self.result.setPlainText(json.dumps({'선택_frame':result['inspection']['selected_frames'],
                 '원본_attempt':[{'attempt':r['attempt'],'status':r['status'],'category':r.get('diagnostics',{}).get('category'),'steps':r.get('diagnostics',{}).get('steps')} for r in result['inspection']['source_attempts']],
                 '미확정_수':len(result['inspection']['unresolved_source_intents'])},ensure_ascii=False,indent=2))
