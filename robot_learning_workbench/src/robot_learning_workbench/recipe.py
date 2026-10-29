@@ -64,6 +64,8 @@ class RecipeDocument:
 
 _SIM={'source','annotation','datagen','simulation_evaluation','real_sim'}
 _INPUTS={
+ 'scene_capture':({'project','camera_config'},{'device_profile','leader_device_profile'}),
+ 'sdk_calibration':({'device_profile'},set()),
  'paired_rerender':({'project','candidate','capture_session'},set()),
  'capture_session':({'project','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
  'paired_session':({'project','candidate','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
@@ -75,9 +77,11 @@ _INPUTS={
  'hub_download':({'repo_id'},{'revision'}),'capture':({'device_profile','camera_config'},{'calibration_profile','capture_session','scene','robot_model'}),
  'precision_calibration':({'device_profile'},{'calibration_profile'}),'real_sim':({'scene','device_profile'},{'camera_config','calibration_profile','capture_session','engine_config','robot_model'})}
 _EXEC={
+ 'scene_capture':({'device_source'},set()),
+ 'sdk_calibration':({'confirm_on_site'},{'timeout_s'}),
  'paired_rerender':(set(),set()),
- 'capture_session':({'device_source','max_command_step_rad','max_follow_error_rad'},set()),
- 'paired_session':({'device_source','max_command_step_rad','max_follow_error_rad'},set()),
+ 'capture_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
+ 'paired_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
@@ -132,7 +136,7 @@ def _validate(data,path):
             if not isinstance(value,str) or len(value)!=40 or any(c not in '0123456789abcdef' for c in value):_fail(where,'resolved parent commit required',path)
         elif key=='seed':
             if type(value) is not int or not 0<=value<2**32:_fail(where,'uint32 integer required',path)
-        elif key in ('headless','enable_motion','resume','private','confirm_upload'):
+        elif key in ('headless','enable_motion','resume','private','confirm_upload','confirm_on_site'):
             if type(value) is not bool:_fail(where,'boolean required',path)
         elif key in ('timeout_s','episode_time_s','reset_time_s'):
             if type(value) not in (int,float) or not math.isfinite(value) or (value<0 if key=='reset_time_s' else value<=0):_fail(where,'finite valid seconds required',path)
@@ -142,6 +146,8 @@ def _validate(data,path):
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
             if value not in (('fake_all','observe_only','gripper_once') if stage=='teleoperation' else ('manual','auto') if stage=='annotation' else {'capture':('offline','observe_only','live_capture'),'precision_calibration':('offline','observe_only'),'real_evaluation':('offline','observe_only','gripper_once','fake_all'),'real_sim':('offline','observe_only')}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
+    if stage=='scene_capture'and data['execution']['device_source']!='hardware':_fail('execution.device_source','Scene materials use real observations; use capture_session for mapped memory tests',path)
+    if stage=='sdk_calibration'and data['execution']['confirm_on_site']is not True:_fail('execution.confirm_on_site','Explicit on-site calibration approval required',path)
     if stage in ('source','datagen'):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
@@ -404,8 +410,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         path=Path(calibration)
         if not path.is_absolute():_fail('inputs.device_profile.calibration_path','explicit absolute SDK calibration path required',doc.path)
         resolved['motor_calibration']=_freeze(_artifact(path.resolve()))
-    if spec.stage in('capture_session','paired_session'):
+    if spec.stage in('scene_capture','capture_session','paired_session'):
         for name in('device_profile','leader_device_profile'):
+            if name not in documents:continue
             path=Path(documents[name]['calibration_path'])
             if not path.is_absolute():_fail('inputs.'+name,'explicit SDK calibration path required',doc.path)
             resolved[name+'_sdk_calibration']=_freeze(_artifact(path.resolve()))
@@ -417,6 +424,13 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         authoring=read(candidate_path)
         dependencies={local_path(root,row['path'])for row in authoring.get('assets',{}).values()}
         if authoring.get('robot_model',{}).get('path'):dependencies.add(local_path(root,authoring['robot_model']['path']))
+        from real2sim_builder.export import verify_native_closure
+        for p in tuple(dependencies):
+            if p.suffix.lower()=='.urdf':dependencies.update(verify_native_closure(root,p))
+        binding=authoring.get('robot_model',{}).get('geometry_binding')
+        if binding:
+            package_path=local_path(root,binding['package']);load_scene(package_path)
+            resolved['candidate_geometry_package']=_freeze(_artifact(package_path.parent))
         resolved['candidate_assets']=tuple(_freeze(_artifact(p))for p in sorted(dependencies))
     if scene is not None and 'scene' not in resolved:
         scene=load_scene(scene.root/'scene.json',expected=scene.identity)
@@ -481,8 +495,10 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):code_names += ['robot/teleoperation.py','robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     if spec.stage in('capture_session','paired_session','paired_rerender'):code_names += ['robot/session.py','robot/supervised.py','robot/snapshots.py','robot/real_sim.py','robot/render_worker.py','robot/candidate_isaac.py','robot/session_devices.py','robot/telemetry.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py']
+    if spec.stage in('scene_capture','sdk_calibration'):code_names+=['robot/scene_observation.py','robot/sdk_calibration.py','robot/registration.py','robot/devices.py','robot/offline.py','ui/session_operations.py']
+    if spec.stage in('capture_session','paired_session','paired_rerender'):code_names+=['robot/registration.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
-    if spec.stage in ('capture','real_sim','real_evaluation','capture_session','paired_session','paired_rerender'):
+    if spec.stage in ('capture','real_sim','real_evaluation','scene_capture','capture_session','paired_session','paired_rerender'):
         from .robot.offline import capture_reader
         capture=capture_reader()
         for name in ('capture.py','files.py','scene.py','project.py','candidate.py','evidence.py','rendering.py','validation.py','calibration/geometry.py','exporters/usd.py','exporters/mjcf.py'):

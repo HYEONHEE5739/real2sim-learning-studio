@@ -119,6 +119,15 @@ see the Capture session report for read-only operation and remaining hardware li
 - The historical Isaac cube–cup position residual **1.197188790mm** remains OPEN.
 - Same-path collection Resume is an Episode boundary operation, not an exact mid-physics checkpoint.
 
+The local Studio now owns `pickplace_colorblock` under `workbench_runs/scenes/`,
+with its closed v8 Package and a separate device configuration binding. Selecting
+this Scene restores configuration without connecting hardware. Capture supports
+optional Input Data and free-form notes; new users can start with cameras alone.
+Unbound observations remain reference evidence and do not acquire robot actions or
+model-radian semantics. See [Scene preparation and v8 migration](docs/scene-preparation-v8.md).
+These local assets and the copied Qt runtime are excluded from Git; a clone still
+requires separately provisioned assets and SDK/Qt environments.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) · [Interfaces](docs/interfaces.md) · [Capability map](CAPABILITY-MAP.md)
@@ -129,6 +138,7 @@ see the Capture session report for read-only operation and remaining hardware li
 - [Saturation recovery](docs/position-saturation-recovery.md)
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
+- [Scene preparation, owned v8 and device setup](docs/scene-preparation-v8.md)
 - [Persistent Capture / Real-Sim sessions](docs/capture-paired-sessions.md)
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
 - [Live observation, Capture and gripper approval boundary](docs/hardware-read-gripper.md)

@@ -107,3 +107,9 @@ def test_rerender_uses_existing_builder_landmark_and_object_mask_metrics(tmp_pat
     with CandidateRenderer(view,'mujoco',tmp_path/'render')as renderer:result=renderer.render(q,source_capture=source)
     row=next(r for r in result['geometry']['side']if r['object']==object_id)
     assert row['landmark_rmse_px']==pytest.approx(0)and row['iou']==1 and row['evidence_status']=='EVALUATED_PROVIDED_EVIDENCE'
+
+
+def test_candidate_never_silently_applies_historical_runtime_joint_offsets(tmp_path):
+    from robot_learning_workbench.robot.real_sim import CandidateView
+    p,c,m,mapping=candidate_fixture(tmp_path);s=c.scene;s['robot_model']['simulation_joint_offsets_rad']={'value':[.01]*6,'provenance':'estimated','evidence':['retired workflow']};write(c.root/'candidate_scene.yaml',s)
+    with pytest.raises(ValueError,match='historical|offset'):CandidateView(p.root,c.root/'candidate_scene.yaml',m,mapping)

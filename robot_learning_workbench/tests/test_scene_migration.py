@@ -33,3 +33,25 @@ def test_optional_urdf_import_copies_mesh_closure_and_missing_mesh_is_explicit(t
     mesh.unlink();urdf.unlink();assert saved.is_file()
     import xml.etree.ElementTree as ET
     assert (saved.parent/ET.parse(saved).find('.//mesh').get('filename')).is_file()
+
+
+def test_registered_package_keeps_identity_bytes_and_closure_without_source(tmp_path):
+    from robot_learning_workbench.scene_migration import register_package
+    from scene_contract.package import load_scene
+    root=Path(__file__).resolve().parents[2];source=root/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native'
+    project=Project.create(tmp_path/'scenes','package');result=register_package(project,source,tmp_path)
+    package=load_scene(Path(result['path'])/'scene.json');old=load_scene(source/'scene.json')
+    assert package.identity==old.identity
+    assert (package.root/'scene.json').read_bytes()==(source/'scene.json').read_bytes()
+    assert package.root.is_relative_to(tmp_path)and not package.root.is_relative_to(source)
+    assert project.info['execution_packages'][0]['manifest_sha256']==old.identity.manifest_sha256
+
+
+def test_runtime_residual_is_removed_from_new_authoring_revisions(tmp_path):
+    from test_candidate_pairs import candidate_fixture
+    from robot_learning_workbench.scene_migration import migrate_authoring
+    from real2sim_builder.scene import value
+    original,c,m,mapping=candidate_fixture(tmp_path);s=original.scene;s['robot_model']['simulation_joint_offsets_rad']=value([.01]*6,'estimated',['historical only']);write(original.root/'working/current_scene.yaml',s)
+    result=migrate_authoring(original.root,tmp_path/'new','new')
+    assert 'simulation_joint_offsets_rad'not in Project(result['project']).scene['robot_model']
+    archive=read(Path(result['project'])/'input/migration/source-scene.yaml');assert archive['robot_model']['simulation_joint_offsets_rad']==s['robot_model']['simulation_joint_offsets_rad']

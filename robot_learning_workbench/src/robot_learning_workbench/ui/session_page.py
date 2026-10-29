@@ -7,25 +7,26 @@ from PyQt6.QtGui import QImage,QPixmap
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFormLayout,QLabel,QPushButton,QComboBox,QFileDialog,QInputDialog,QPlainTextEdit,QTableWidget,QTableWidgetItem,QHeaderView,QDialog,QDialogButtonBox,QCheckBox,QScrollArea
 from .view import CameraView
 from .session_client import SessionClient
-from .session_settings import DeviceSettings
+from .device_setup import DeviceSetup
+from .scene_inputs import SceneInputs
 from .jobs import BackendJob
 
 
 class SessionPage(QWidget):
     def __init__(self,kind,python,modules,workspace,parent=None):
         super().__init__(parent);self.setObjectName('sessionPage');self.setStyleSheet('\nQWidget#sessionPage QLabel { background: transparent; }\nQWidget#sessionPage QLabel#jointCard { background: #242d3a; border-radius: 8px; padding: 8px 4px; }\nQWidget#sessionPage QPushButton { padding: 7px 10px; border-radius: 8px; }\nQWidget#sessionPage QLabel#dashboardTitle { font-size: 23px; padding: 0; }\nQWidget#sessionPage QPushButton#primaryAction:disabled { background: #263b37; color: #7c9690; border-color: #3d5550; }\n');self.kind=kind;self.workspace=Path(workspace);self.project=None;self.rows=[];self.proposal=None;self.last_progress={};self.finishing=False;self.approval_dialog=None;self.project_buttons=[]
-        self.client=SessionClient(python,modules,self);self.settings=DeviceSettings(workspace,self);self.job=BackendJob(python,self);self.job.finished.connect(self.project_result)
+        self.client=SessionClient(python,modules,self);self.settings=DeviceSetup(workspace,python,modules,self);self.job=BackendJob(python,self);self.job.finished.connect(self.project_result);self.job.process.stateChanged.connect(lambda _:self.buttons(self.client.running))
         self.client.progress.connect(self.update_progress);self.client.received.connect(self.event_received);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.terminal.connect(self.ended)
         layout=QVBoxLayout(self);layout.setSpacing(6)
         title=QLabel('1. Real2Sim Capture'if kind=='capture'else'2. Real / Sim');title.setObjectName('dashboardTitle');layout.addWidget(title)
         subtitle=QLabel('Scene 이전의 실측 자료를 Builder Project에 저장합니다.'if kind=='capture'else'Follower 측정 관절값을 기준으로 실제 영상과 Candidate 렌더를 비교합니다.');layout.addWidget(subtitle)
-        project_row=QHBoxLayout();layout.addLayout(project_row);project_row.addWidget(QLabel('Builder Project'))
+        project_row=QHBoxLayout();layout.addLayout(project_row);project_row.addWidget(QLabel('Scene'))
         self.project_combo=QComboBox();self.project_combo.setMinimumWidth(220);project_row.addWidget(self.project_combo,1)
         for label,fn in [('열기',self.choose_project),('새 프로젝트',self.new_project)]:
             button=QPushButton(label);button.clicked.connect(fn);project_row.addWidget(button);self.project_buttons.append(button)
         self.project_path=QLabel('Project를 선택하세요');self.project_path.setObjectName('mutedLabel');project_row.addWidget(self.project_path,1)
         self.project_combo.currentIndexChanged.connect(self.select_project)
-        body=QHBoxLayout();layout.addLayout(body,1);left=QVBoxLayout();left.setSpacing(6);body.addLayout(left,4);side=QWidget();side.setObjectName('navigationPanel');side.setMaximumWidth(310);right=QVBoxLayout(side);body.addWidget(side,1)
+        body=QHBoxLayout();layout.addLayout(body,1);left=QVBoxLayout();left.setSpacing(6);body.addLayout(left,4);side=QWidget();side.setObjectName('navigationPanel');side.setMaximumWidth(310);right=QVBoxLayout(side);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(side);scroll.setMinimumWidth(280);scroll.setMaximumWidth(330);body.addWidget(scroll,1)
         grid=QGridLayout();left.addLayout(grid,5);self.previews={};self.camera_labels={}
         names=('side','wrist')if kind=='capture'else('side','sim_side','wrist','sim_wrist')
         for i,name in enumerate(names):
@@ -52,9 +53,10 @@ class SessionPage(QWidget):
         self.snapshot_table=QTableWidget(0,len(headers));self.snapshot_table.setHorizontalHeaderLabels(headers);self.snapshot_table.setMaximumHeight(150);self.snapshot_table.setMinimumHeight(100);self.snapshot_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         for column in range(len(headers)):self.snapshot_table.setColumnWidth(column,70 if column in self.thumbnail_columns else 90)
         self.snapshot_table.setColumnWidth(0,35);self.snapshot_table.horizontalHeader().setSectionResizeMode(self.q_column,QHeaderView.ResizeMode.Stretch);self.snapshot_table.cellDoubleClicked.connect(self.details);left.addWidget(self.snapshot_table,2)
-        right.addWidget(QLabel('장치 설정'));self.configuration=QComboBox();right.addWidget(self.configuration);self.configuration.currentIndexChanged.connect(self.select_configuration)
-        self.settings_button=QPushButton('불러오기 · 편집 · 저장');self.settings_button.clicked.connect(self.edit_settings);right.addWidget(self.settings_button)
-        self.device_state=QLabel('Leader / Follower / Camera\n연결되지 않음');self.device_state.setWordWrap(True);right.addWidget(self.device_state)
+        self.settings_button=QPushButton('장치 설정');self.settings_button.clicked.connect(self.edit_settings);project_row.addWidget(self.settings_button)
+        self.device_state=QLabel('저장 구성 선택 · 자동 연결 없음');self.device_state.setWordWrap(True);left.insertWidget(0,self.device_state)
+        self.materials=SceneInputs(workspace,self);right.addWidget(self.materials,1);self.materials.saveRequested.connect(self.store_materials)
+        self.input_button=self.materials.add;self.notes=self.materials.notes;self.save_materials=self.materials.save
         self.candidate_combo=QComboBox();self.engine=QComboBox();self.engine.addItems(['isaaclab','mujoco'])
         if kind=='real_sim':
             right.addWidget(QLabel('Simulation · 검토 중 Candidate'));right.addWidget(self.candidate_combo);refresh=QPushButton('후보 새로고침');refresh.clicked.connect(self.refresh_project);right.addWidget(refresh);self.project_buttons.append(refresh);right.addWidget(QLabel('렌더 엔진'));right.addWidget(self.engine)
@@ -62,35 +64,27 @@ class SessionPage(QWidget):
         right.addStretch(1);self.session_label=QLabel('세션 없음');self.session_label.setWordWrap(True);right.addWidget(self.session_label)
         note=QLabel('원본 RGB 640×480 저장\n수신 시각 기준 정합\nScene/물리 Calibration 자동 승인 없음\n\n중지/해제: 새 Goal 차단, Torque 유지\n현장 전원 차단 수단을 확보하세요');note.setWordWrap(True);note.setObjectName('mutedLabel');right.addWidget(note)
         diagnostics=QPushButton('진단 로그');diagnostics.setCheckable(True);layout.addWidget(diagnostics);self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumHeight(100);self.log.hide();diagnostics.toggled.connect(self.log.setVisible);layout.addWidget(self.log)
-        self.refresh_configurations();self.buttons(False)
-    def active(self):return self.client.active()
-    def cancel_run(self):self.client.cancel()
+        self.buttons(False)
+        if any((self.workspace/'scenes').glob('*/project.yaml')):self.job.start('session_catalog',workspace=str(self.workspace))
+    def active(self):return self.client.active()or self.settings.calibration_client.active()
+    def cancel_run(self):self.client.cancel();self.settings.calibration_client.cancel()
     def buttons(self,connected):
-        self.connect_button.setEnabled(not self.active()and self.project is not None and self.settings.saved_recipe is not None)
+        from PyQt6.QtCore import QProcess
+        idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
+        self.connect_button.setEnabled(idle and self.project is not None and self.settings.saved_recipe is not None)
         for b in(self.start_teleop_button,self.capture_button,self.stop_teleop_button,self.disconnect_button,self.finish_button):b.setEnabled(connected)
-        for button in self.project_buttons:button.setEnabled(not self.active())
-        self.configuration.setEnabled(not self.active())
-        self.settings_button.setEnabled(not self.active());self.project_combo.setEnabled(not self.active());self.engine.setEnabled(not self.active());self.candidate_combo.setEnabled(not self.active())
-    def refresh_configurations(self):
-        selected=str(self.settings.saved_recipe)if self.settings.saved_recipe else None
-        self.configuration.blockSignals(True);self.configuration.clear()
-        for p in sorted((self.workspace/'configuration').glob('*.yaml')):self.configuration.addItem(p.stem,str(p))
-        if selected:
-            if self.configuration.findData(selected)<0:self.configuration.addItem(Path(selected).stem,selected)
-            self.configuration.setCurrentIndex(self.configuration.findData(selected))
-        self.configuration.blockSignals(False)
-    def select_configuration(self):
-        if self.active():return
-        path=self.configuration.currentData()
-        if path:
-            try:self.settings.load_recipe(path);self.buttons(False)
-            except Exception as error:self.show_error(str(error))
+        for button in self.project_buttons:button.setEnabled(idle)
+        self.settings.configuration.setEnabled(idle);self.materials.setEnabled(idle)
+        self.settings_button.setEnabled(idle);self.project_combo.setEnabled(idle);self.engine.setEnabled(idle);self.candidate_combo.setEnabled(idle)
     def edit_settings(self):
         if self.active():return
-        if self.configuration.currentData()and self.settings.saved_recipe is None:
-            try:self.settings.load_recipe(self.configuration.currentData())
-            except Exception as error:self.show_error(str(error))
-        self.settings.exec();self.refresh_configurations();self.buttons(False)
+        self.settings.exec();self.buttons(False)
+        if self.project and self.settings.saved_recipe and not self.settings.dirty:
+            self.job.start('session_bind',path=self.project['project'],configuration=str(self.settings.saved_recipe),workspace=str(self.workspace))
+    def store_materials(self,files,notes):
+        if self.active():return
+        if not self.project:self.show_error('먼저 빈 Scene을 만들거나 선택하세요');return
+        self.job.start('session_materials',path=self.project['project'],files=files,notes=notes,workspace=str(self.workspace))
     def choose_project(self):
         if self.active():return
         path=QFileDialog.getExistingDirectory(self,'Builder Project 선택',str(self.workspace/'scenes'))
@@ -101,7 +95,10 @@ class SessionPage(QWidget):
         if ok and name:self.job.start('session_new_project',directory=str(self.workspace/'scenes'),name=name)
     def load_project(self,path):
         if self.active():raise ValueError('연결 중 Project를 변경할 수 없습니다')
-        self.job.start('session_project',path=str(path))
+        self.project=None;self.settings.saved_recipe=None;self.rows=[];self.snapshot_table.setRowCount(0);self.materials.load({});self.candidate_combo.clear();self.project_path.setText('Scene 입력 검사 중…');self.buttons(False)
+        for control in(self.project_combo,self.settings_button,self.materials,*self.project_buttons):control.setEnabled(False)
+        try:self.job.start('session_project',path=str(path),workspace=str(self.workspace))
+        except Exception as error:self.buttons(False);self.show_error(str(error))
     def select_project(self,index):
         path=self.project_combo.itemData(index)
         if path and(self.project is None or path!=self.project['project']):self.load_project(path)
@@ -110,11 +107,21 @@ class SessionPage(QWidget):
         if self.project:self.load_project(self.project['project'])
     def project_result(self,response):
         if self.active():self.show_error('연결 중 Project 변경 결과를 적용하지 않습니다');return
-        if not response.get('ok'):self.show_error(response.get('error',{}).get('message','Project error'));return
+        if not response.get('ok'):self.buttons(False);self.show_error(response.get('error',{}).get('message','Project error'));return
         data=response['result']
+        if 'scenes'in data:
+            self.project_combo.blockSignals(True);self.project_combo.clear()
+            for row in data['scenes']:self.project_combo.addItem(row['name'],row['project'])
+            self.project_combo.blockSignals(False)
+            if self.project_combo.currentData():self.load_project(self.project_combo.currentData())
+            return
         if 'project'not in data:return
         changed=self.project is None or self.project['project']!=data['project']
-        self.project=data
+        self.project=data;self.materials.load(data)
+        if data.get('configuration_path'):
+            try:self.settings.load_recipe(data['configuration_path']);self.device_state.setText('장치 구성 자동 복원 · '+Path(data['configuration_path']).parent.name+' · 연결 전 USB identity 재검사')
+            except Exception as error:self.settings.saved_recipe=None;self.show_error(str(error))
+        elif changed:self.settings.saved_recipe=None;self.device_state.setText('장치 설정에서 로봇/카메라를 선택하세요')
         if changed:self.rows=[];self.snapshot_table.setRowCount(0)
         for row in data.get('snapshots',[]):self.add_snapshot(row)
         self.project_combo.blockSignals(True)
@@ -126,7 +133,7 @@ class SessionPage(QWidget):
     def connect_session(self):
         try:
             if any(p is not self and p.active()for p in getattr(self.window(),'sessions',{}).values())or any(p.active()for p in getattr(self.window(),'workflows',{}).values()):raise ValueError('다른 Worker를 먼저 종료하세요')
-            data=self.settings.recipe();data['stage']='capture_session'if self.kind=='capture'else'paired_session';data['inputs']['project']=self.project['project']
+            data=self.settings.recipe();data['stage']=('scene_capture'if data['stage']=='scene_capture'else'capture_session')if self.kind=='capture'else'paired_session';data['inputs']['project']=self.project['project']
             if self.kind=='real_sim':
                 if not self.candidate_combo.currentData():raise ValueError('검토할 Scene Candidate를 선택하세요')
                 data['inputs']['candidate']=self.candidate_combo.currentData();data['engine']=self.engine.currentText()
@@ -143,13 +150,20 @@ class SessionPage(QWidget):
             if 'snapshot'in progress:self.add_snapshot(progress['snapshot'])
             self.state.setText('Candidate 재렌더 · 장치 연결 없음');self.buttons(False);return
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText(state)
-        self.start_teleop_button.setEnabled(connected and not p.get('teleop_active',False));self.stop_teleop_button.setEnabled(connected and p.get('teleop_active',False));self.capture_button.setEnabled(connected and p.get('capture_ready',False));self.capture_hint.setText(p.get('capture_reason',''))
+        self.start_teleop_button.setEnabled(connected and p.get('teleoperation_available',True)and not p.get('teleop_active',False));self.stop_teleop_button.setEnabled(connected and p.get('teleop_active',False));self.capture_button.setEnabled(connected and p.get('capture_ready',False));self.capture_hint.setText(p.get('capture_reason',''))
         q=p.get('q_measured')
         if q:
             for label,value in zip(self.joint_labels,q):label.setText(label.text().split('\n')[0]+f'\n{value:.4f} rad\n{math.degrees(value):.2f}°')
-        source=p.get('device_source',self.settings.source.currentText());self.device_state.setText(('MEMORY · 합성 시험'if source=='memory'else'HARDWARE · 실측')+'\n'+state)
+        if getattr(self.client,'stage',None)=='scene_capture'and not p.get('sdk_feedback'):
+            for label in self.joint_labels:label.setText(label.text().split('\n')[0]+'\n로봇 미사용\n—')
+        if p.get('sdk_feedback'):
+            feedback=p['sdk_feedback']
+            for label,(name,value)in zip(self.joint_labels,feedback['native'].items()):label.setText(label.text().split('\n')[0]+f'\n{value:.2f} SDK'+(' %'if name=='gripper'else' °')+'\nmodel rad 미결합')
+        source=p.get('device_source',self.settings.recipe()['execution']['device_source']);self.device_state.setText(('MEMORY · 합성 시험'if source=='memory'else'HARDWARE · 실측')+'\n'+state)
         for n,timing in p.get('camera_timing',{}).items():
-            if timing:self.camera_labels[n].setText(('FAKE 'if source=='memory'else'REAL ')+n.upper()+f" · 640×480 · {timing.get('received_fps',0)or 0:.1f}FPS · age {timing['age_ms']:.0f}ms · Δt {timing['joint_skew_ms']:.0f}ms")
+            if timing:
+                skew=timing.get('joint_skew_ms');suffix=f' · Δt {skew:.0f}ms'if skew is not None else' · camera receipt'
+                self.camera_labels[n].setText(('FAKE 'if source=='memory'else'REAL ')+n.upper()+f" · 640×480 · {timing.get('received_fps',0)or 0:.1f}FPS · age {timing['age_ms']:.0f}ms"+suffix)
         if p.get('render_timing'):
             timing=p['render_timing']
             for name in ('sim_side','sim_wrist'):
@@ -181,13 +195,13 @@ class SessionPage(QWidget):
         for name,view in self.previews.items():view.clear();view.setText(name+' · 연결 종료')
         if self.finishing:self.session_label.setText('작업 종료 · '+str(len(self.rows))+' Snapshot 보존');self.finishing=False
     def add_snapshot(self,row):
-        if any(r['path']==row['path']for r in self.rows):return
+        if any((r['path'],r.get('id'))==(row['path'],row.get('id'))for r in self.rows):return
         self.rows.append(row);i=self.snapshot_table.rowCount();self.snapshot_table.insertRow(i)
         stamp=time.strftime('%H:%M:%S',time.localtime(row['unix_ns']/1e9))if row.get('unix_ns')else'시각 미기록'
         values={0:i+1,1:stamp,self.q_column:', '.join(f'{q:.4f}'for q in row.get('q_measured',[])),self.q_column+1:'경고'if row.get('quality')else'보정 미확인',self.q_column+2:'Pair 저장'if row.get('paired')else'Capture 저장'}
         for column,value in values.items():self.snapshot_table.setItem(i,column,QTableWidgetItem(str(value)))
         for column,name in self.thumbnail_columns.items():
-            images=list(Path(row['path']).glob('shots/*/'+name+'.png'))
+            images=[Path(row['images'][name])]if name in row.get('images',{})else list(Path(row['path']).glob('shots/*/'+name+'.png'))
             if images:
                 thumbnail=CameraView(minimum=(45,32));thumbnail.show_image(images[0]);self.snapshot_table.setCellWidget(i,column,thumbnail)
         self.snapshot_table.setRowHeight(i,38)

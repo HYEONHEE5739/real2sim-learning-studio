@@ -547,3 +547,29 @@ All new-run suggestions remain editable; old artifacts are never migrated.
 사용자 명령은 기존 ordered/idempotent ACK 계약을 유지한다. 주기 UI heartbeat는 `touch_session(handle, monotonic_ns)`의 최신 run-owned 값 하나이며 사용자 동작의 완료 ACK가 아니다. 숨김/종료/중지 시 Teleoperation 권한을 차단하고, 읽기 전용 장치의 권한을 flag로 승격하지 않는다. 실물 구동은 현재 proposal에 결합한 현장 승인이 필요하다.
 
 저장은 기존 `real2sim.snapshot/1` 및 `real2sim.paired-observation/1`이다. Raw/Native/model 측정값과 명령 목표를 구분하며, 정지 Capture는 학습 Action을 생성하지 않는다. 미확인 Base/Camera Calibration은 `NEEDS_MORE_DATA`로 등록한다. Pair는 frozen measured q 기준이며 하드웨어 동시 노출이나 물리 Calibration 승인이 아니다.
+
+
+## Scene preparation and local devices
+
+`scene_preparation.list_scenes(workspace)` locates named Builder Projects;
+`save_inputs(project, files, notes)` owns optional materials through existing
+Evidence/Brief APIs. Saving requires no Scene, Model, Calibration or Capture.
+Reconstruction and execution retain their separate strict readiness checks.
+
+`registration.bind_configuration` stores an owned `workspace/devices` configuration
+path and SHA in Project metadata. Selection restores configuration only. Connection
+resolves exact USB serial/VID/PID again; tty numbering does not establish roles.
+Same-identity configuration edits preserve calibration; a different unit does not
+inherit its mapping. JSON/YAML remains an explicit advanced interface.
+
+Mapped `capture_session`/`paired_session` retain Snapshot and Pair contracts.
+`scene_capture` is a separate RO SDK-native/camera reference path using Builder
+images/documents, with no fabricated model state or Action. `sdk_calibration` is a
+separate, explicit on-site procedure invoking official SDK calibration with R03
+prompt-ID responses, cancellation and deadline checks for both input and range
+completion. No hardware calibration runs automatically on connect or selection.
+
+Additional runtime `simulation_joint_offsets_rad` is retired and rejected. Existing
+baked Geometry uses an explicit Package/Mapping/Manifest binding; measured q is not
+adjusted again. Historical source metadata remains archived. See
+[validation and migration scope](scene-preparation-v8.md).

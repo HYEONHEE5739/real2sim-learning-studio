@@ -295,16 +295,9 @@ def observation_scene(scene, image, root, complete=True):
     model = result['robot_model']
     if image['joint_names'] != model['joint_names']:
         raise ValueError('Observation joint order differs')
-    from real2sim_builder.calibration.geometry import link_transforms, simulation_offsets
-    offsets = simulation_offsets(model)
-    if model.get('mapping', {}).get('schema') == 'so101.precision-joint-mapping/1' and np.any(abs(offsets) > 1e-12) and (not model['simulation_joint_offsets_rad'].get('precision_mapping_sha256')):
-        raise ValueError('Precision URDF observations cannot also apply historical simulation joint offsets')
-    reference = model.get('simulation_joint_offsets_rad', {}).get('precision_mapping_sha256')
-    if reference and image.get('capture_manifest'):
-        recorded = read(local_path(root, image['capture_manifest']))['joint_mapping']
-        if recorded.get('sha256') != reference:
-            raise ValueError('Simulation residual differs from capture Precision mapping')
-    q_model = np.asarray(image['q_measured']) + offsets
+    from real2sim_builder.calibration.geometry import link_transforms
+    if 'simulation_joint_offsets_rad'in model:raise ValueError('historical runtime joint offsets are unsupported; measured q is never adjusted')
+    q_model = np.asarray(image['q_measured'])
     fk = link_transforms(local_path(root, model['path']), dict(zip(image['joint_names'], q_model)))
     for link, pose in fk.items():
         result['frames']['robot_link_' + link] = {'parent': 'robot_base', 'transform': value(pose.tolist(), 'derived', ['measured joint FK'])}

@@ -113,26 +113,6 @@ def origin(node):
     return t
 
 
-def simulation_offsets(model):
-    node=model.get('simulation_joint_offsets_rad')
-    if node is None:return np.zeros(len(model['joint_names']))
-    from real2sim_builder.scene import checked_value
-    offsets=np.asarray(checked_value(node),float)
-    if offsets.shape!=(len(model['joint_names']),) or not np.isfinite(offsets).all() or np.any(abs(offsets)>.35):
-        raise ValueError('Finite bounded named simulation joint offsets required')
-    if node['provenance'] not in ('estimated','optimized') or not node.get('evidence'):
-        raise ValueError('Simulation joint offsets are an evidence-backed unvalidated hypothesis')
-    if 'precision_mapping_sha256' in node:
-        import re
-        reference = node['precision_mapping_sha256']
-        mapping = model.get('mapping', {})
-        if (not isinstance(reference, str) or not re.fullmatch(r'[0-9a-f]{64}', reference)
-                or mapping.get('schema') != 'so101.precision-joint-mapping/1'
-                or reference != mapping.get('sha256')):
-            raise ValueError('Simulation residual requires its recorded Precision mapping')
-    return offsets
-
-
 def link_transforms(urdf, joints):
     if Path(urdf).suffix.lower() in ('.xml','.mjcf'):
         import mujoco

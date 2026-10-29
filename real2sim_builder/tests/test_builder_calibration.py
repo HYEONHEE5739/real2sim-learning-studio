@@ -190,38 +190,11 @@ def test_full_pinhole_audit_and_reused_holdout_guard(tmp_path):
     assert report['status']=='NEEDS_MORE_DATA' and 'fresh holdout' in report['need']
 
 
-def test_precision_bound_model_residual_keeps_measured_q_and_rejects_other_mapping(tmp_path):
-    from real2sim_builder.calibration.geometry import link_transforms
-    from real2sim_builder.project import local_path
-    p, scene = fixture(tmp_path, wrist=True)
-    mapping = {'schema':'so101.precision-joint-mapping/1','sha256':'a'*64}
-    scene['robot_model']['mapping'] = mapping
-    scene['robot_model']['simulation_joint_offsets_rad'] = value([.02], 'estimated', ['contact residual'])
-    obs = p.evidence['images'][0]
-    original = copy.deepcopy(obs)
-    with pytest.raises(ValueError, match='historical'):
-        observation_scene(scene, obs, p.root, complete=False)
-    scene['robot_model']['simulation_joint_offsets_rad']['precision_mapping_sha256'] = mapping['sha256']
-    posed = observation_scene(scene, obs, p.root, complete=False)
-    expected = link_transforms(local_path(p.root, scene['robot_model']['path']),
-        dict(zip(obs['joint_names'], np.asarray(obs['q_measured']) + .02)))
-    for link, pose in expected.items():
-        assert np.allclose(posed['frames']['robot_link_'+link]['transform']['value'], pose)
-    assert obs == original
-    scene['robot_model']['mapping']['sha256'] = 'b'*64
-    with pytest.raises(ValueError, match='recorded Precision'):
-        observation_scene(scene, obs, p.root, complete=False)
-
-
-def test_bound_residual_rejects_different_recorded_capture_mapping(tmp_path):
-    p, scene = fixture(tmp_path, wrist=True)
-    scene['robot_model']['mapping'] = {'schema':'so101.precision-joint-mapping/1','sha256':'a'*64}
-    scene['robot_model']['simulation_joint_offsets_rad'] = {
-        **value([.02],'estimated',['contact residual']), 'precision_mapping_sha256':'a'*64}
-    write(p.root/'input/capture_reference.yaml', {'joint_mapping':{'sha256':'b'*64}})
-    obs=copy.deepcopy(p.evidence['images'][0]);obs['capture_manifest']='input/capture_reference.yaml'
-    with pytest.raises(ValueError,match='capture Precision mapping'):
-        observation_scene(scene,obs,p.root,complete=False)
+def test_historical_runtime_offsets_are_rejected_even_with_a_precision_hash(tmp_path):
+    p,scene=fixture(tmp_path,wrist=True)
+    scene['robot_model']['simulation_joint_offsets_rad']={**value([.02],'estimated',['historical residual']), 'precision_mapping_sha256':'a'*64}
+    with pytest.raises(ValueError,match='historical runtime joint offsets'):
+        observation_scene(scene,p.evidence['images'][0],p.root,complete=False)
 
 
 def test_segmented_cloud_full_coverage_required_before_dimensions_update(tmp_path,scene):
@@ -279,12 +252,6 @@ def test_b03_actual_camera_matrices_and_projection_direction(camera_id):
 def test_baked_runtime_calibration_is_not_reapplied_by_camera_fit(scene):
     # Geometry fitting sees the declared model state only. It never mutates q or
     # invokes motor calibration; the shared package validator owns apply graph.
-    from real2sim_builder.calibration.geometry import simulation_offsets
-    model={'joint_names':['hinge'],'simulation_joint_offsets_rad':value([.02],'estimated',['contact residual']),'mapping':{'schema':'so101.precision-joint-mapping/1','sha256':'a'*64}}
-    model['simulation_joint_offsets_rad']['precision_mapping_sha256']='b'*64
-    with pytest.raises(ValueError,match='recorded Precision'):simulation_offsets(model)
-    model['simulation_joint_offsets_rad']['precision_mapping_sha256']='a'*64
-    np.testing.assert_array_equal(simulation_offsets(model),[.02])
     scene['simulation_configuration']={'mode':'precision_bound_residual','application':'baked'}
     before=copy.deepcopy(scene);fitted,_=fit_cameras(scene,[])
     assert scene==before and fitted==before

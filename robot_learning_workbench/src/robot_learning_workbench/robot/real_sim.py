@@ -7,6 +7,26 @@ from ..data.native import digest,file_sha256,atomic_json
 from .calibration import JOINTS
 
 
+def checked_geometry_binding(package_path,calibration_id,measured_model,geometry_model,mapping):
+    """Use only an existing package's declared baked geometry; never adjust q."""
+    from scene_contract.package import load_scene
+    from .calibration import mapper_from_scene
+    from .registration import mapping_coordinates_equal
+    package=load_scene(package_path);record=package.calibration['records'][calibration_id]
+    if record['kind']!='robot_residual'or record['application']['mode']!='baked':raise ValueError('Explicit baked geometry record required')
+    if record['source_model_sha256']!=file_sha256(measured_model)or record['execution_model_sha256']!=file_sha256(geometry_model):raise ValueError('Geometry/measurement model identity mismatch')
+    dependencies=record['application'].get('input_calibration_ids',[])
+    matching=False
+    for name in dependencies:
+        previous=package.calibration['records'][name]
+        if previous['kind']=='encoder_mapping':
+            expected=mapper_from_scene(package,name,role='follower',phase='device_observation').metadata()
+            matching=mapping_coordinates_equal(expected,mapping)
+    if not matching:raise ValueError('Baked geometry mapping differs from measured coordinates')
+    return {'manifest_sha256':package.identity.manifest_sha256,'calibration_id':calibration_id,'measurement_model_sha256':record['source_model_sha256'],
+            'geometry_model_sha256':record['execution_model_sha256'],'physical_verified':False,'files':[str(package.root/'manifest.json'),*[str(package.root/f.path)for f in package.files]]}
+
+
 class CandidateView:
     def __init__(self,project,candidate,model,mapping):
         from real2sim_builder.project import Project
@@ -16,38 +36,47 @@ class CandidateView:
         if not self.path.is_relative_to(self.project.root):raise ValueError('Candidate must belong to selected Project')
         self.scene=read(self.path);validate(self.scene,self.project.root,complete=True)
         robot=self.scene.get('robot_model',{})
-        if robot.get('model_sha256')!=file_sha256(self.model):raise ValueError('Candidate robot model differs from measured model')
-        if robot.get('mapping')!=mapping or robot.get('joint_names')!=list(JOINTS):raise ValueError('Candidate joint mapping/order differs from measured feedback')
+        from .registration import mapping_coordinates_equal
+        self.geometry_binding=None
+        if robot.get('geometry_binding'):
+            from real2sim_builder.scene import local_path
+            binding=robot['geometry_binding'];self.geometry_binding=checked_geometry_binding(local_path(self.project.root,binding['package']),binding['calibration_id'],self.model,local_path(self.project.root,robot['path']),mapping)
+        elif robot.get('model_sha256')!=file_sha256(self.model):raise ValueError('Candidate robot model differs from measured model')
+        compatible=mapping_coordinates_equal(robot['mapping'],mapping)if robot.get('mapping',{}).get('schema')=='so101.precision-joint-mapping/1'else robot.get('mapping')==mapping
+        if not compatible or robot.get('joint_names')!=list(JOINTS):raise ValueError('Candidate joint mapping/order differs from measured feedback')
         cameras={c['id']:c for c in self.scene['cameras']}
         if set(cameras)!={'side','wrist'}or any(c['resolution']!=[640,480]for c in cameras.values()):raise ValueError('Explicit Candidate Side/Wrist640x480 required')
         from real2sim_builder.scene import local_path
         self.candidate_model=local_path(self.project.root,robot['path'])
-        if file_sha256(self.candidate_model)!=file_sha256(self.model):raise ValueError('Candidate FK URDF differs from measured model')
+        if file_sha256(self.candidate_model)!=robot['model_sha256'] or self.geometry_binding is None and file_sha256(self.candidate_model)!=file_sha256(self.model):raise ValueError('Candidate FK URDF differs from measured model')
         self.identity=self._identity()
         self.watched=[self.path,self.model,self.candidate_model,*[local_path(self.project.root,r['path'])for r in self.scene['assets'].values()]]
-        self.stats=self._stats()
+        self.watched+=self.geometry_binding['files']if self.geometry_binding else[]
+        self.watched=[Path(p)for p in self.watched];self.stats=self._stats()
 
     def _stats(self):
         return [(str(p),p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.stat().st_nlink)for p in self.watched]
 
     def verify(self):
+        if self.geometry_binding is not None:
+            from real2sim_builder.scene import local_path
+            model=self.scene['robot_model'];binding=model['geometry_binding']
+            current=checked_geometry_binding(local_path(self.project.root,binding['package']),binding['calibration_id'],self.model,self.candidate_model,self.mapping)
+            if {k:v for k,v in current.items()if k!='files'}!={k:v for k,v in self.geometry_binding.items()if k!='files'}:raise ValueError('Geometry package Manifest/revision changed during Session')
         if self._identity()!=self.identity:raise ValueError('Candidate/model/asset identity changed during session')
 
     def _identity(self):
         from real2sim_builder.scene import local_path
         return dict(project_id=self.project.info['id'],candidate_path=str(self.path.relative_to(self.project.root)),candidate_sha256=file_sha256(self.path),
-            model_sha256=file_sha256(self.model),candidate_model_sha256=file_sha256(self.candidate_model),camera_calibration_sha256=digest(self.scene['cameras']),
+            geometry_binding={k:v for k,v in self.geometry_binding.items()if k!='files'}if self.geometry_binding else None,model_sha256=file_sha256(self.model),candidate_model_sha256=file_sha256(self.candidate_model),camera_calibration_sha256=digest(self.scene['cameras']),
             assets={key:file_sha256(local_path(self.project.root,row['path']))for key,row in self.scene['assets'].items()})
 
     def pose(self,q):
         from real2sim_builder.capture import observation_scene
-        from real2sim_builder.calibration.geometry import simulation_offsets
         q=np.asarray(q,dtype=float)
         if q.shape!=(6,)or not np.isfinite(q).all():raise ValueError('Six finite measured joints required')
         if self._stats()!=self.stats:
             self.verify();self.stats=self._stats()
-        binding=self.scene['robot_model'].get('simulation_joint_offsets_rad',{}).get('precision_mapping_sha256')
-        if binding and binding!=self.mapping.get('sha256'):raise ValueError('Candidate simulation residual mapping differs')
         return observation_scene(self.scene,dict(session_id='measured_session',eligible=True,q_measured=q.tolist(),joint_names=list(JOINTS)),self.project.root)
 
 
@@ -56,7 +85,6 @@ class CandidateRenderer:
         self.view=view;self.engine=engine;self.directory=Path(directory);self.directory.mkdir(parents=True,exist_ok=True);self.isaac=None
     def render(self,q,*,source_capture=None):
         from real2sim_builder.scene import world_pose
-        from real2sim_builder.calibration.geometry import simulation_offsets
         begin=time.monotonic_ns();posed=self.view.pose(q);observations=[];geometry={}
         if source_capture is not None:
             from real2sim_builder.capture import load_session
@@ -80,8 +108,8 @@ class CandidateRenderer:
             if self.isaac is None:self.isaac=StaticRenderer(posed,self.view.project.root,self.directory)
             images=self.isaac.render(posed)
         else:raise ValueError('Actual MuJoCo or Isaac engine required')
-        return dict(images=images,measured_q_rad=np.asarray(q,dtype=float).tolist(),applied_sim_joint_rad=(np.asarray(q)+simulation_offsets(posed['robot_model'])).tolist(),
-            geometry=geometry,geometry_status='PROVIDED_EVIDENCE_DIAGNOSTICS'if geometry else'UNMEASURED',sim_joint_delta_rad=simulation_offsets(posed['robot_model']).tolist(),candidate_identity=self.view.identity,engine=self.engine,physics_steps=0,state_application='builder_measured_joint_fk',
+        return dict(images=images,measured_q_rad=np.asarray(q,dtype=float).tolist(),applied_sim_joint_rad=np.asarray(q,dtype=float).tolist(),
+            geometry=geometry,geometry_status='PROVIDED_EVIDENCE_DIAGNOSTICS'if geometry else'UNMEASURED',sim_joint_delta_rad=[0.]*6,candidate_identity=self.view.identity,engine=self.engine,physics_steps=0,state_application='builder_measured_joint_fk',
             sim_timestamp={'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},render_ms=(time.monotonic_ns()-begin)/1e6,
             sim_cameras={c['id']:{'resolution':c['resolution'],'K':c['K']['value'],'T_world_optical':world_pose(posed,c).tolist()}for c in posed['cameras']},joint_mapping=self.view.mapping)
     def close(self):

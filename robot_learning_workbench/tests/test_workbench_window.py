@@ -1,6 +1,6 @@
 import os,subprocess
 from pathlib import Path
-UI='/home/hyeonhee/soarm_isaaclab/soarm101_lab/.venv-real2sim-ui/bin/python3.11'
+UI=str(Path(__file__).resolve().parents[2]/'workbench_runs/runtime/qt/bin/python3.11')
 
 
 def test_real_qt_stage_page_has_no_loss_or_pose_seed_and_dirty_disables_run(tmp_path):

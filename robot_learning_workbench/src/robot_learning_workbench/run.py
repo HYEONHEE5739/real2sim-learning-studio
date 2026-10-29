@@ -295,12 +295,14 @@ _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear
 _SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':set(),'teleop_stop':set(),
                    'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque'},'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
+_COMMANDS['calibration_response']={'prompt_id','response'}
 
 
 def _command(command):
     if not isinstance(command,dict) or set(command)-{'command_id','kind','payload','episode_id','env_index'}:_fail('PROTOCOL_INVALID','command','unknown envelope fields')
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
+    if kind=='calibration_response'and(set(payload)!={'prompt_id','response'}or not all(isinstance(payload[k],str)for k in payload)):_fail('PROTOCOL_INVALID',kind,'current prompt ID and text response required')
     if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
     if kind=='session_import':_identifier(payload['snapshot_id'])
     if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
@@ -338,7 +340,7 @@ def send_command(handle,command):
 def touch_session(handle,timestamp_ns):
     """Latest UI liveness only. User commands still use durable ACK transactions."""
     root=Path(handle.run_dir);record=_read(root/'run.json')
-    if type(timestamp_ns)is not int or timestamp_ns<=0 or handle.run_id!=root.name or handle.request_id!=record.get('request_id') or record.get('stage')not in('capture_session','paired_session'):
+    if type(timestamp_ns)is not int or timestamp_ns<=0 or handle.run_id!=root.name or handle.request_id!=record.get('request_id') or record.get('stage')not in('scene_capture','capture_session','paired_session'):
         _fail('PROTOCOL_INVALID','heartbeat','Current session handle and monotonic timestamp required')
     _atomic(root/'session-heartbeat.json',{'run_id':handle.run_id,'timestamp_ns':timestamp_ns})
 
@@ -354,7 +356,8 @@ def _poll_commands(root,state,stage):
             rows.append(row)
     rows.sort(key=lambda row:row['seq']);out=[]
     allowed={'cancel'}|({'pause','resume','step'} if stage in ('source','annotation','datagen','simulation_evaluation','real_sim') else set())|({'mark','skip'} if stage=='annotation' else set())|({'save','discard'} if stage=='source' else set())
-    if stage in('capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
+    if stage in('scene_capture','capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
+    if stage=='sdk_calibration':allowed.add('calibration_response')
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')
         command=_command(row['payload']);cid=command['command_id']
@@ -369,7 +372,7 @@ def _poll_commands(root,state,stage):
         if reason:_ack(root,state,cid,'rejected',reason=reason);continue
         _ack(root,state,cid,'accepted');out.append(command)
         if command['kind']=='cancel':_append_event(root,state,'status',{'status':'running','phase':'stopping'})
-    if stage in('capture_session','paired_session')and(root/'session-heartbeat.json').is_file():
+    if stage in('scene_capture','capture_session','paired_session')and(root/'session-heartbeat.json').is_file():
         heartbeat=_read(root/'session-heartbeat.json')
         if heartbeat.get('run_id')!=root.name or type(heartbeat.get('timestamp_ns'))is not int:_fail('PROTOCOL_INVALID','heartbeat','Invalid session liveness')
         out.append({'kind':'session_heartbeat','command_id':'liveness','payload':{'timestamp_ns':heartbeat['timestamp_ns']}})
@@ -406,6 +409,8 @@ def _run_stage(plan,*,events,commands):
         filename='evaluation' if plan.stage=='simulation_evaluation' else plan.stage
         module=f'engines.{plan.engine}.{filename}';function='run'
     elif plan.stage=='paired_rerender':module='robot.real_sim';function='rerender'
+    elif plan.stage=='scene_capture':module='robot.scene_observation';function='run'
+    elif plan.stage=='sdk_calibration':module='robot.sdk_calibration';function='run'
     elif plan.stage in('capture_session','paired_session'):module='robot.session';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'

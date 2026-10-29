@@ -54,6 +54,17 @@ def close_devices(devices):
     return results
 
 
+def serial_lease(port):
+    """Process-scoped OS lock shared by all concrete SDK connection paths."""
+    import os,fcntl
+    key=hashlib.sha256(str(Path(port).resolve()).encode()).hexdigest()
+    fd=os.open('/tmp/rlw-'+str(os.getuid())+'-serial-'+key+'.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+    lock=os.fdopen(fd,'r+b')
+    try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BaseException:lock.close();raise
+    return lock
+
+
 class Follower:
     """Read-only connect, explicit hold/configure activation and native commands."""
     role='follower'
@@ -88,6 +99,9 @@ class Follower:
         self._port_lock=None
 
     def _check_identity(self, *, hardware=False):
+        if getattr(self,'usb_identity',None):
+            from .registration import resolve_serial
+            if Path(resolve_serial(self.usb_identity)).resolve()!=Path(self.bus.port).resolve():raise ValueError('Connected USB identity changed')
         if self.identity != self.profile['identity'] or self.identity.get('role') != self.role or self.profile.get('role') != self.role:
             raise ValueError('Precision device/role identity mismatch')
         identifier=self.calibration_path.name if self.role=='leader' else self.device.id
@@ -112,10 +126,7 @@ class Follower:
         if self._connected or self._closed: raise DeviceError('connect','Already connected or closed',effect='not_applied')
         try:
             if self.read_only:
-                import os,fcntl
-                key=hashlib.sha256(str(Path(self.bus.port).resolve()).encode()).hexdigest()
-                fd=os.open('/tmp/rlw-'+str(os.getuid())+'-serial-'+key+'.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
-                self._port_lock=os.fdopen(fd,'r+b');fcntl.flock(self._port_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                self._port_lock=serial_lease(self.bus.port)
             self.bus.connect()  # Official device.connect would configure/calibrate.
             self._check_identity(hardware=True)
             if self.role=='follower' and set(self.device.action_features) != {n+'.pos' for n in JOINTS}: raise ValueError('Unexpected action schema')

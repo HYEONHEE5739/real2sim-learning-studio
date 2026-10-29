@@ -5,7 +5,7 @@ import sys
 
 
 def stage_support(stage: str) -> dict:
-    if stage in ('paired_rerender','capture_session','paired_session','teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
+    if stage in ('scene_capture','sdk_calibration','paired_rerender','capture_session','paired_session','teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
     if stage=='source':return {'runnable':True,'reason':'Recorded Target Stream 또는 Live Leader 읽기 → Simulation Source. 실제 Follower 명령 없음.'}
@@ -28,6 +28,14 @@ def prepared(path: str,modules: str) -> dict:
     from ..cli import prepare
     plan=prepare(path,task_modules=modules);support=stage_support(plan.stage)
     if not support['runnable']:return {**support,'state':'prepared','plan':plan.summary()}
+    if plan.stage=='scene_capture':
+        from ..robot.scene_observation import construct
+        construct(plan)  # Identity resolution and constructors only, never connect.
+        return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+    if plan.stage=='sdk_calibration':
+        from ..robot.sdk_calibration import validate
+        validate(plan)
+        return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage in ('capture_session','paired_session'):
         from ..robot.session_devices import construct
         devices,cameras,bounds=construct(plan)  # Constructors only, never connect.

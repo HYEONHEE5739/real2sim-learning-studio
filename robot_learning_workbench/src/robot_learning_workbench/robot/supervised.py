@@ -15,6 +15,7 @@ from ..data.native import digest
 class Teleoperation:
     def __init__(self,leader,follower,*,model_bounds,session_id,max_step_rad,max_follow_error_rad):
         for value in (max_step_rad,max_follow_error_rad):
+            if value is None:continue
             if type(value)not in(int,float)or not np.isfinite(value)or value<=0:raise ValueError('Explicit positive command/follow budgets required')
         self.leader=leader;self.follower=follower;self.bounds=model_bounds;self.session_id=session_id
         self.max_step=max_step_rad;self.max_follow=max_follow_error_rad;self.active=False;self.proposal=None;self.consumed=set()
@@ -46,6 +47,7 @@ class Teleoperation:
                     follower_identity=self.follower.identity,leader_identity=self.leader.identity,follower_mapping=self.follower.precision_mapper.metadata()['sha256'],leader_mapping=self.leader.precision_mapper.metadata()['sha256'])
 
     def propose(self):
+        if self.max_step is None or self.max_follow is None:raise ValueError('Explicit reviewed command/follow budget required before motion; observation needs none')
         if self.active:raise ValueError('Teleoperation already active')
         state=self._start_state();now=time.monotonic_ns()
         self.proposal={'session_id':self.session_id,'nonce':uuid.uuid4().hex,'state':state,'expires_ns':now+30_000_000_000,

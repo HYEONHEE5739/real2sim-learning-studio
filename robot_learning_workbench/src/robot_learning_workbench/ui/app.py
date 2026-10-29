@@ -140,7 +140,7 @@ class Window(QMainWindow):
         if self.scene.builder.state()!=QProcess.ProcessState.NotRunning:
             self.scene.builder.terminate();event.ignore();QTimer.singleShot(500,self.close);return
         for page in self.workflows.values():page.timer.stop()
-        for page in self.sessions.values():page.client.timer.stop()
+        for page in self.sessions.values():page.client.timer.stop();page.settings.calibration_client.timer.stop()
         import shutil
         for page in (self.source,self.curation):
             page.stop_playback();shutil.rmtree(page.preview_directory,ignore_errors=True)

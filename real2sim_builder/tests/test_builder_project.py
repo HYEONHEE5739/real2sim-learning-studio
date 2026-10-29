@@ -236,8 +236,8 @@ def test_object_holdout_and_missing_view_block_global_gain():
     b['images'] = []
     assert not nonregression(a, b)['passed']
 
-def test_sim_only_offsets_do_not_rewrite_recorded_joint_evidence(tmp_path, scene):
-    from real2sim_builder.calibration.geometry import link_transforms, simulation_offsets
+def test_measured_q_is_not_rewritten_by_retired_offset_workflow(tmp_path, scene):
+    from real2sim_builder.calibration.geometry import link_transforms
     from real2sim_builder.project import observation_scene
     from real2sim_builder.project import validate
     p = project(tmp_path, scene)
@@ -249,12 +249,12 @@ def test_sim_only_offsets_do_not_rewrite_recorded_joint_evidence(tmp_path, scene
     o = {'session_id': 'synthetic', 'eligible': True, 'joint_names': ['j'], 'q_measured': [0.3]}
     old = copy.deepcopy(o)
     digest = sha(urdf)
-    posed = observation_scene(s, o, p.root)
-    assert np.allclose(posed['frames']['robot_link_arm']['transform']['value'], link_transforms(urdf, {'j': 0.4})['arm'])
+    with pytest.raises(ValueError,match='historical runtime joint offsets'):observation_scene(s,o,p.root)
+    s['robot_model'].pop('simulation_joint_offsets_rad')
+    posed=observation_scene(s,o,p.root)
+    assert np.allclose(posed['frames']['robot_link_arm']['transform']['value'],link_transforms(urdf,{'j':.3})['arm'])
     assert o == old and sha(urdf) == digest
-    s['robot_model']['simulation_joint_offsets_rad']['value'] = [2.0]
-    with pytest.raises(ValueError, match='bounded'):
-        validate(s, p.root)
+    validate(s,p.root)
 
 def test_invalid_scope_does_not_leave_candidate_directory(tmp_path, scene):
     p = project(tmp_path, scene)

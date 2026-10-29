@@ -77,8 +77,7 @@ def validate(scene, root=None, complete=False):
     if scene.get('coordinates') != convention:
         raise ValueError('Unsupported coordinate convention; explicitly convert to metre/+Z/optical frames')
     if scene.get('robot_model', {}).get('simulation_joint_offsets_rad') is not None:
-        from real2sim_builder.calibration.geometry import simulation_offsets
-        simulation_offsets(scene['robot_model'])
+        raise ValueError('historical runtime joint offsets are unsupported; archive the calibration and use explicit validated geometry')
     frames = scene.get('frames', {})
     if 'world' not in frames or frames['world']['parent'] is not None:
         raise ValueError('Missing world root')

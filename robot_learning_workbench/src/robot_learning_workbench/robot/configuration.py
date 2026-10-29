@@ -12,6 +12,11 @@ def create_observer(spec: dict, profile: dict) -> 'Follower':
     import hashlib
     from .devices import Follower,Leader
     from .offline import sdk_configuration
+    import copy
+    spec=copy.deepcopy(spec);profile=copy.deepcopy(profile)
+    if spec.get('usb_identity'):
+        from .registration import resolve_serial
+        port=resolve_serial(spec['usb_identity']);spec['sdk']['port']=port;profile['identity']['port']=str(Path(port).resolve())
     role=spec['role'];path=Path(spec['calibration_path'])
     if not path.is_absolute() or not path.is_file():raise ValueError('Explicit existing SDK calibration path required')
     if hashlib.sha256(path.read_bytes()).hexdigest()!=profile['identity']['calibration_sha256']:raise ValueError('SDK calibration identity differs from Precision profile')
@@ -23,7 +28,9 @@ def create_observer(spec: dict, profile: dict) -> 'Follower':
     if path.name!=str(cfg.id)+'.json' or Path(cfg.calibration_dir or path.parent).resolve()!=path.parent:raise ValueError('SDK config must load the explicit calibration file')
     cfg.calibration_dir=path.parent
     cls=Leader if role=='leader' else Follower
-    return cls.from_config(cfg,profile=profile,calibration_path=path,identity=profile['identity'],model_hash=profile['urdf_sha256'])
+    device=cls.from_config(cfg,profile=profile,calibration_path=path,identity=profile['identity'],model_hash=profile['urdf_sha256'])
+    device.usb_identity=spec.get('usb_identity')
+    return device
 
 
 def bind_gripper_command(device: 'Follower', scene: 'ScenePackage', calibration_id: str) -> dict:

@@ -217,3 +217,16 @@ Read-only comparison baseline: Studio8a8210d, original Builderad018a0, SO101875e
 - [x] Phase6: actual engine1/4 flows, official consumers/train/Resume/evaluation, full suite/wheels/reviews/preservation; feature-state report.
 
 Each Phase precedes the next; isolate thin slices, run focused checks, preserve SDK/original/evidence. Status meanings: VERIFIED(actual), CODE_READY(wired/unexecuted), PARTIAL, UNSUPPORTED, EXCLUDED. Hardware, uploads, newv9/real calibration are not executed by smoke validation.
+
+
+## Scene preparation and owned v8 (2026-10-29)
+
+- [x] Optional Input Data and free-form notes; remove replaced primary Profile UI.
+- [x] Recreate `pickplace_colorblock` with owned inputs, revision history, v8 assets and separate device binding.
+- [x] Stable USB discovery, same-unit configuration preservation, supervised SDK setup and unbound camera/SDK reference Capture.
+- [x] Retire runtime residual offsets; preserve and explicitly bind existing baked Geometry.
+- [x] Hide old project tree and verify Builder, native engines, Candidate render and Qt restoration; real Camera-only and mapped Memory E2E.
+- [x] Regression, wheel, independent review, original preservation and local report; no push/merge or unattended motor writes.
+
+Actual new-unit calibration, measured physical accuracy and approved real arm
+Teleoperation remain unverified; see `docs/scene-preparation-v8.md`.
