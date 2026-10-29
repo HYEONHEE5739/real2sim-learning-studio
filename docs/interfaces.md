@@ -538,3 +538,12 @@ Inspection worker completion is not real Calibration or real Policy success.
 rewritten on load. Source/DataGen same-path Resume keeps closed Native segments;
 the UI's Continue action edits an append request for the selected existing root.
 All new-run suggestions remain editable; old artifacts are never migrated.
+
+
+## 지속 Capture / Paired Session
+
+`capture_session`과 `paired_session`은 Project·명시 장치/Precision/Camera/Robot Model 입력으로 기존 R03 Worker를 사용한다. Project identity는 project.yaml, Candidate와 자산/실행 코드는 불변 입력으로 고정하며 추가 Capture 때문에 mutable Evidence 전체를 고정하지 않는다. `paired_rerender`는 보존 Capture와 다른 Candidate의 파생 결과를 저장하며 장치를 연결하지 않는다. 상세 계약과 사용자 흐름은 [지속 Session 보고서](capture-paired-sessions.md)에 있다.
+
+사용자 명령은 기존 ordered/idempotent ACK 계약을 유지한다. 주기 UI heartbeat는 `touch_session(handle, monotonic_ns)`의 최신 run-owned 값 하나이며 사용자 동작의 완료 ACK가 아니다. 숨김/종료/중지 시 Teleoperation 권한을 차단하고, 읽기 전용 장치의 권한을 flag로 승격하지 않는다. 실물 구동은 현재 proposal에 결합한 현장 승인이 필요하다.
+
+저장은 기존 `real2sim.snapshot/1` 및 `real2sim.paired-observation/1`이다. Raw/Native/model 측정값과 명령 목표를 구분하며, 정지 Capture는 학습 Action을 생성하지 않는다. 미확인 Base/Camera Calibration은 `NEEDS_MORE_DATA`로 등록한다. Pair는 frozen measured q 기준이며 하드웨어 동시 노출이나 물리 Calibration 승인이 아니다.

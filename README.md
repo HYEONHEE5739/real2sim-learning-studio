@@ -39,8 +39,9 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Official LeRobot Dataset materialization with existing encoded video sharing.
 - Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
 - Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
-- Torque-preserving live Leader/Follower observation, Camera Capture and real-policy Observe Only.
-  Full-axis teleoperation/Policy execution is tested with memory devices; physical arm commands stay blocked.
+- Project-based persistent Capture and measured-state Real/Sim pairing with Builder registration and Candidate rerendering.
+- Hardware connections begin read-only. Supervised six-axis Teleoperation requires fresh on-site approval and runtime guards; autonomous real Policy control remains disabled. Physical motion is unverified.
+  Six-axis Teleoperation is verified with memory devices; actual movement awaits on-site approval and hardware preconditions. Real Policy motor writes remain disabled.
   Gripper-only one-shot code requires a separate command binding and supervised motion approval; no physical motion is verified.
 - Qt workflow pages and selected-environment Side/Wrist 640×480 latest-frame Preview.
 
@@ -103,7 +104,8 @@ paths stay authoritative; collection Resume appends to the selected existing Dat
 
 Review and adapt the [Recipe/config examples](examples/README.md) first. They are
 copies of exercised settings with local paths replaced; external inputs must be
-provided before `prepare` or execution. Do not enable real hardware.
+provided before `prepare` or execution. Physical motion requires explicit on-site approval;
+see the Capture session report for read-only operation and remaining hardware limits.
 
 ## Current limitations
 
@@ -127,6 +129,7 @@ provided before `prepare` or execution. Do not enable real hardware.
 - [Saturation recovery](docs/position-saturation-recovery.md)
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
+- [Persistent Capture / Real-Sim sessions](docs/capture-paired-sessions.md)
 - [Architecture completion and feature transfer](docs/architecture-completion.md)
 - [Live observation, Capture and gripper approval boundary](docs/hardware-read-gripper.md)
 - [Four code-review fixes and verification](docs/code-review-followup.md)
