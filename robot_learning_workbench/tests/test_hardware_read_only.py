@@ -52,9 +52,9 @@ def test_reference_collection_cannot_release_any_arm_joint(tmp_path):
 
 
 def test_second_observer_cannot_share_an_active_serial_identity(tmp_path):
-    one,_,_=make(tmp_path)
+    port=tmp_path/'shared-memory-follower';one,_,_=make(tmp_path,port=port)
     # Separate file/profile fixture, same canonical serial identity.
-    other_dir=tmp_path/'other';other_dir.mkdir();two,_,_=make(other_dir)
+    other_dir=tmp_path/'other';other_dir.mkdir();two,_,_=make(other_dir,port=port)
     one.read_only=two.read_only=True
     one.connect()
     try:

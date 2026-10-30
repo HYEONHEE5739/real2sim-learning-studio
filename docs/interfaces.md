@@ -542,15 +542,19 @@ All new-run suggestions remain editable; old artifacts are never migrated.
 
 ## Capture와 Real/Sim 연결
 
-`capture_session`은 Project·Leader/Follower·명시 Model/Precision/Camera 입력으로 관측과 별도 승인 Teleoperation을 제공한다. `paired_session`은 별도 읽기 전용 Follower/Camera Session이며 등록된 닫힌 Scene Package·engine_config를 요구한다. Leader·명령 budget·Candidate 입력을 받지 않는다. 두 UI는 각각 CapturePage/RealSimPage가 소유하며 Snapshot 목록만 같은 표시 컴포넌트를 사용한다. Real/Sim은 Scene/엔진 선택과 연결·Capture·중단만 제공한다.
+`capture_session`은 Project·Leader/Follower·명시 Model/Precision/Camera 입력으로 관측과 별도 승인 Teleoperation을 제공한다. `paired_session`은 등록된 닫힌 Scene Package·engine_config와 Follower/Camera를 요구하며, Leader device/Precision은 함께 선택하는 선택 입력이다. 저장 구성의 Leader와 명령 제한을 버리지 않는다. CapturePage/RealSimPage는 별도 화면이며 승인/이동 제한 UI와 Snapshot 목록은 각각 한 구현을 공유한다. Real/Sim은 Scene/엔진 선택과 연결·Capture·중단을 제공하고, Scene 준비 뒤 현장 승인을 요청한다. 승인 취소 후에는 같은 연결에서 다시 승인할 수 있다. Input/메모·Candidate 편집은 이 화면에 없다.
 
-Project 등록 Scene identity와 실제 Manifest를 설정 복원·prepare에서 대조하고, 장치 연결 뒤 Prepared 입력을 재검사한다. render child 시작 직전에도 Scene·엔진 설정 SHA를 Prepared 값과 비교한다. NativeRenderer는 실제 MuJoCo/Isaac Scene의 관절 **상태**를 Follower 측정값으로 갱신한다. 추가 runtime offset·Policy/Position Target·실물 Goal/Torque·Physics rollout을 사용하지 않는다. Isaac 상태의 float32 표현 차이는 applied_sim_joint_rad/delta로 보존한다.
+명령 제한은 `max_command_step_rad`와 `max_follow_error_rad`이며 자동 승인 기본값은 없다. 장치 설정의 기본 폼과 JSON/YAML은 같은 편집 버퍼를 사용한다. 누락 시 Capture 시작/RealSim 연결에서 직접 입력하고 현재 연결의 `teleop_prepare`에 전달하므로 YAML 수정·재연결을 강제하지 않는다. 저장 구성은 새 파일로 만들며 원본 보정/Scene 파일을 수정하지 않는다.
 
-구형 Candidate 기반 paired_rerender Stage와 전용 런타임을 제거했다. 기존 real_sim Stage는 보존 입력의 명시 offline 검사만 허용한다. 새 Scene 비교를 구형 유한 observer에 mode 분기로 추가하지 않는다. 과거 Snapshot/Pair 원본과 Reader는 유지한다.
+`Teleoperation`은 승인된 Model/SDK/Precision/모터 교집합·Encoding·Saturation을 계산한다. 제안 SHA는 두 장치와 Mapping, 관절 범위, 현재 Raw/Goal/Mode/Torque 및 제한에 결합한다. 토크가 켜진 축의 Goal 불일치는 거부한다. 미구동 축은 명시 `initialize_goal` 승인 뒤 현재 Raw를 Goal에 정렬하고 readback 확인 후 Torque를 켠다. Leader Torque 해제도 같은 제안/승인에 포함한다. ±1count 측정 흔들림만 허용하며 인코딩 뒤와 Torque 직전에 자세/범위를 다시 검사한다. 초기화/제어200ms·feedback100ms·heartbeat1.5s 제한은 유지한다. 이 **세션 전용 감독 Teleop 권한**은 `device_command` Calibration·Gripper·자율 Policy 권한을 만들거나 physical_verified로 승격하지 않는다.
 
-사용자 명령은 기존 ordered/idempotent R03 ACK 계약을 유지한다. 주기 heartbeat는 최신 run-owned 값 하나이며 완료 ACK가 아니다. Real/Sim은 teleop 명령을 거부한다. 준비 중 중단이면 Worker를 시작하지 않고, start 응답 대기 중 중단이면 반환된 owned handle에 cancel을 보낸다. Stop은 요청·저장을 우선 중지하고 실제 port/camera/render child 정리를 기다린다. Torque 상태를 바꾸지 않는다.
+`TeleoperationLoop`가 활성 중 Serial SDK를30Hz로 단독 소유한다. Camera/렌더/파일 저장·R03 Preview는 이 루프 밖에 있다. 관측은 함께 고정된 Raw/Native/model q/시각을 읽고, 비활성일 때만 직접 Follower를 읽는다. 기존 Native Recorder는 실제 제어 행을 받아 저장하며300행 대기 queue가 가득 차면 다음 Goal을 중단한다. 기록 실패도 제어를 중단하고 같은 연결의 재승인을 거부한다. 실패한 미수락 행은 기존 session-report.json의 bounded 진단으로 남기며 재전송·Resume하지 않는다. 저장 장치 자체의 오류로 보고서도 기록할 수 없으면 그 오류를 전파한다. 실패를 정상 기록으로 바꾸지 않는다.
 
-저장은 기존 real2sim.snapshot/1 + real2sim.paired-observation/1이다. 같은 frozen 관측 q에 대한 Real2/Sim2 원본을 게시하고 네 경로를 목록에 반환한다. SDK/Raw/model 측정과 실제 Sim 적용 dtype을 구분하며 학습 Action은 만들지 않는다. Camera/joint skew100ms·age200ms·안정성·새 sequence 조건은 유지한다. Capture 버튼의 요청 가능 상태와 그 순간 데이터의 저장 적격성은 별개다. Pair는 hardware 동시 노출·물리 Calibration 승인이 아니다. 상세는 [Real/Sim](real-sim-observation.md), [Capture 피드백](capture-feedback.md) 참조.
+Project 등록 Scene identity와 실제 Manifest를 설정 복원·prepare에서 대조하고, 장치 연결 뒤 Prepared 입력을 재검사한다. render child 시작 직전에도 Scene·엔진 설정 SHA를 Prepared 값과 비교한다. NativeRenderer는 실제 MuJoCo/Isaac Scene의 관절 **상태**를 Follower 측정값으로 갱신한다. Leader 요청을 Sim 실측으로 대신 쓰거나 추가 runtime offset·IK·Physics rollout을 사용하지 않는다. Isaac 상태의 float32 표현 차이는 applied_sim_joint_rad/delta로 보존한다. 구형 Candidate 기반 paired_rerender Stage/전용 런타임은 제거된 상태이며 기존 real_sim Stage는 명시 offline 검사만 허용한다.
+
+사용자 명령은 기존 ordered/idempotent R03 ACK 계약을 유지한다. 주기 heartbeat는 최신 run-owned 값 하나이며 완료 ACK가 아니다. Stop/cancel은 같은 batch의 시작/Capture보다 우선하고 Goal 전송 직전에도 취소를 확인한다. 제어 thread 종료 뒤 port를 닫는다. 종료가 불명일 때 SDK를 동시에 disconnect하지 않으며 나머지 소유 Camera/렌더/Writer 정리는 계속하고 실패/unknown을 남긴다. 준비 중 중단이면 Worker를 시작하지 않고, start 응답 대기 중 중단이면 반환된 owned handle에 cancel을 보낸다. Stop/Close는 Torque를 임의 해제하지 않는다.
+
+저장은 기존 real2sim.snapshot/1 + real2sim.paired-observation/1이다. 같은 frozen 측정 q에 대한 Real2/Sim2 원본을 게시하고 네 경로를 목록에 반환한다. Snapshot은 학습 Action을 만들지 않으며 별도 Native Teleop 기록도 training_ready=false다. Camera/joint skew100ms·age200ms·안정성·새 sequence 조건은 유지한다. Capture 요청 가능 상태와 그 순간 데이터의 저장 적격성은 별개다. Pair는 hardware 동시 노출·물리 Calibration 승인이 아니다. 현재 결과와 전체 이관 공백은 [Teleop 복구·감사](leader-teleop-recovery.md), 이전 UI 피드백은 [Capture 피드백](capture-feedback.md) 참조.
 
 
 ## Scene preparation and local devices
@@ -566,7 +570,7 @@ resolves exact USB serial/VID/PID again; tty numbering does not establish roles.
 Same-identity configuration edits preserve calibration; a different unit does not
 inherit its mapping. JSON/YAML remains an explicit advanced interface.
 
-Mapped `capture_session` and read-only `paired_session` retain Snapshot and Pair contracts; paired_session uses the registered executable Scene and has no Leader/Teleoperation capability.
+Mapped `capture_session` and `paired_session` retain Snapshot/Pair contracts and share the supervised Leader control loop; paired_session uses a registered executable Scene and mirrors measured Follower state.
 `scene_capture` is a separate RO SDK-native/camera reference path using Builder
 images/documents, with no fabricated model state or Action. `sdk_calibration` is a
 separate, explicit on-site procedure invoking official SDK calibration with R03

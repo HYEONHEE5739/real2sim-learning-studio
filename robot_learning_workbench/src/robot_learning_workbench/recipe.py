@@ -67,7 +67,7 @@ _INPUTS={
  'scene_capture':({'project','camera_config'},{'device_profile','leader_device_profile'}),
  'sdk_calibration':({'device_profile'},set()),
  'capture_session':({'project','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
- 'paired_session':({'project','scene','engine_config','device_profile','calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
+ 'paired_session':({'project','scene','engine_config','device_profile','calibration_profile','camera_config','robot_model'},{'source_robot_model','leader_device_profile','leader_calibration_profile'}),
  'teleoperation':({'device_profile','calibration_profile'},{'leader_device_profile','leader_calibration_profile','scene','camera_config'}),
  'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
  'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
@@ -79,7 +79,7 @@ _EXEC={
  'scene_capture':({'device_source'},set()),
  'sdk_calibration':({'confirm_on_site'},{'timeout_s'}),
  'capture_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
- 'paired_session':({'device_source'},set()),
+ 'paired_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
@@ -116,6 +116,7 @@ def _validate(data,path):
         if data.get('engine') not in ('isaaclab','mujoco'):_fail('engine','isaaclab or mujoco required',path)
     elif 'engine' in data:_fail('engine','not used by this stage',path)
     req,opt=_INPUTS[stage];_mapping(data['inputs'],req|opt,req,'inputs',path)
+    if stage=='paired_session'and('leader_device_profile'in data['inputs'])!=('leader_calibration_profile'in data['inputs']):_fail('inputs','Leader device and Precision profile must be selected together',path)
     for key,value in data['inputs'].items():
         values=value if key=='datasets' else [value]
         if not isinstance(values,list) or not values or any(not isinstance(v,str) or not v.strip() for v in values):_fail('inputs.'+key,'nonempty explicit path/ID required',path)
@@ -488,8 +489,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):code_names += ['robot/teleoperation.py','robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     if spec.stage=='capture_session':code_names += ['robot/session.py','robot/supervised.py','robot/pairs.py','robot/snapshots.py','robot/session_devices.py','robot/telemetry.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py']
     if spec.stage in('scene_capture','sdk_calibration'):code_names+=['robot/scene_observation.py','robot/sdk_calibration.py','robot/registration.py','robot/devices.py','robot/offline.py','ui/session_operations.py']
+    if spec.stage in('capture_session','paired_session'):code_names+=['robot/teleop_loop.py']
     if spec.stage=='capture_session':code_names+=['robot/registration.py']
-    if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
+    if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','robot/supervised.py','robot/control.py','robot/telemetry.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation','scene_capture','capture_session','paired_session'):
         from .robot.offline import capture_reader

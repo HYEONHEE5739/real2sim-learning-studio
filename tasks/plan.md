@@ -242,3 +242,19 @@ Teleoperation remain unverified; see `docs/scene-preparation-v8.md`.
 
 New physical Follower hand-motion E2E, exposure synchronization and physical accuracy
 remain unverified. See `docs/real-sim-observation.md` and `docs/capture-feedback.md`.
+
+
+## Leader Teleoperation recovery and workflow audit — 2026-10-30
+
+- [x] Reproduce missing Leader/config/Worker commands, unpowered stale Goal and approval-jitter blocks; correct both Session workflows.
+- [x] Expose reviewed motion limits and one on-site approval UI; preserve explicit initialization/encoding/stop guards.
+- [x] Separate30Hz serial control from Camera/render/storage/Preview; retain bounded diagnostics and cleanup on recording failure.
+- [x] Verify Memory Leader→Follower→actual MuJoCo/Isaac state/RGB/four-image capture, actual Qt→R03 and full regression; no physical motor writes.
+- [x] Audit original and new workflow callers; document missing transfer paths instead of claiming full parity.
+- [ ] Transfer new-angle Precision acquisition/fit/review/activation workflow (SDK calibration is separate).
+- [ ] Connect ordinary Builder Export registration to the runtime Scene selection workflow.
+- [ ] Support explicitly approved first upload to a new empty Hub repository.
+- [ ] Complete separately approved autonomous real Policy deployment; current Observe/Fake/Gripper boundaries remain.
+
+See `docs/leader-teleop-recovery.md`. These unchecked gaps are findings, not features
+implemented or automatically started by this bug-fix task.

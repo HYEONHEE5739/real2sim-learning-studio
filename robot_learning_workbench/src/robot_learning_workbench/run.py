@@ -5,6 +5,7 @@ from types import MappingProxyType
 import fcntl
 import importlib
 import json
+import math
 import os
 import re
 import struct
@@ -292,8 +293,8 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
 
 
 _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
-_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':set(),'teleop_stop':set(),
-                   'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque'},'session_import':{'snapshot_id'}}
+_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':{'max_command_step_rad','max_follow_error_rad'},'teleop_stop':set(),
+                   'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque','initialize_goal'},'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
 _COMMANDS['calibration_response']={'prompt_id','response'}
 
@@ -303,7 +304,8 @@ def _command(command):
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
     if kind=='calibration_response'and(set(payload)!={'prompt_id','response'}or not all(isinstance(payload[k],str)for k in payload)):_fail('PROTOCOL_INVALID',kind,'current prompt ID and text response required')
-    if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
+    if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]and not(kind=='teleop_prepare'and not payload):_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
+    if kind=='teleop_prepare'and any(type(v)not in(int,float)or not math.isfinite(v)or v<=0 for v in payload.values()):_fail('PROTOCOL_INVALID',kind,'positive finite motion limits required')
     if kind=='session_import':_identifier(payload['snapshot_id'])
     if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
     if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')
@@ -356,8 +358,7 @@ def _poll_commands(root,state,stage):
             rows.append(row)
     rows.sort(key=lambda row:row['seq']);out=[]
     allowed={'cancel'}|({'pause','resume','step'} if stage in ('source','annotation','datagen','simulation_evaluation','real_sim') else set())|({'mark','skip'} if stage=='annotation' else set())|({'save','discard'} if stage=='source' else set())
-    if stage in('scene_capture','capture_session'):allowed|=set(_SESSION_COMMANDS)
-    if stage=='paired_session':allowed|={'session_snapshot','session_disconnect','session_finish','session_heartbeat'}
+    if stage in('scene_capture','capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
     if stage=='sdk_calibration':allowed.add('calibration_response')
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')

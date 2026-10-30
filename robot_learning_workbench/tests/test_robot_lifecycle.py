@@ -61,12 +61,12 @@ class SDK:
         return packet
 
 
-def make(tmp_path,role='follower'):
+def make(tmp_path,role='follower',*,port=None):
     saved,mapper=bound(role);trace=[];sdk=SDK(mapper.profile,trace)
     path=tmp_path/(saved['identity']['id'] if role=='leader' else role+'.json');path.write_text('{}')
     # Distinct, controlled file identity; profile fit evidence remains untouched.
     profile=copy.deepcopy(mapper.profile);identity=copy.deepcopy(profile['identity']);identity['calibration_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
-    profile['identity']=identity
+    identity['port']=str(port or tmp_path/('memory-'+role));profile['identity']=identity
     for e in profile['joints'].values():
         e['motor']['calibration_hash']=identity['calibration_sha256']
         for ref in e['references']:ref['calibration_hash']=identity['calibration_sha256']

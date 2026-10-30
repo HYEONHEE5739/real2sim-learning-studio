@@ -1,5 +1,7 @@
 # Real/Sim — Scene 기반 Follower 읽기 전용 관측
 
+> 현재 동작은 [Leader Teleoperation 복구·워크플로우 감사](leader-teleop-recovery.md)를 따릅니다. 아래는 이전 구현 당시의 결과이며, Real/Sim의 Leader 제어 누락·Capture 제한값 UI·제어 주기 분리는 후속 작업에서 수정했습니다.
+
 2026-10-30. 기준 `c7c6ef1`(Capture 피드백 수정), 브랜치 `scene-preparation-v8`. **Real/Sim을 Scene·엔진 선택, 읽기 전용 연결, 네 이미지 Capture, 중단의 전용 화면으로 교체했다.** Input Data/Scene 메모·Candidate/재렌더·Leader/Teleoperation UI와 구형 Candidate 기반 실행 경로를 제거했다. 기존 Capture 화면과 공용 mode 분기로 처리하지 않는다.
 
 ## 사용 흐름과 의미

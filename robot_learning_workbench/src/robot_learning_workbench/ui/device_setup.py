@@ -18,12 +18,15 @@ class DeviceSetup(QDialog):
         for key,label in(('leader','Leader'),('follower','Follower'),('side','Side Camera'),('wrist','Wrist Camera')):
             combo=QComboBox();setattr(self,key,combo);form.addRow(label,combo);combo.currentIndexChanged.connect(self.changed)
         self.robot.currentIndexChanged.connect(self.changed)
+        from .teleop_controls import MotionLimits
+        self.motion_limits=MotionLimits(self);box.addWidget(self.motion_limits)
+        for field in self.motion_limits.fields.values():field.valueChanged.connect(self.motion_changed)
         self.status=QLabel('장치 검색은 포트를 열거나 모터를 활성화하지 않습니다.');self.status.setWordWrap(True);box.addWidget(self.status)
         row=QHBoxLayout();box.addLayout(row)
         for label,fn in(('장치 검색',self.search),('선택 구성 저장',self.save_selected),('SDK Calibration',self.calibration)):
             button=QPushButton(label);button.clicked.connect(fn);row.addWidget(button)
         advanced=QPushButton('고급 설정 · JSON/YAML');advanced.setCheckable(True);box.addWidget(advanced)
-        self.advanced=RecipeEditor(self);box.addWidget(self.advanced,1);self.advanced.hide();advanced.toggled.connect(self.advanced.setVisible);self.advanced.changed.connect(self.changed)
+        self.advanced=RecipeEditor(self);box.addWidget(self.advanced,1);self.advanced.hide();advanced.toggled.connect(self.advanced.setVisible);self.advanced.changed.connect(self.buffer_changed)
         advrow=QHBoxLayout();box.addLayout(advrow)
         for label,fn in(('구성 불러오기',self.load_file),('고급 구성 새 파일 저장',self.save_advanced),('닫기',self.accept)):
             button=QPushButton(label);button.clicked.connect(fn);advrow.addWidget(button)
@@ -31,6 +34,22 @@ class DeviceSetup(QDialog):
         self.calibration_client=SessionClient(python,modules,self);self.calibration_client.progress.connect(self.calibration_progress);self.calibration_client.error.connect(self.status.setText);self.calibration_client.terminal.connect(lambda state:self.status.setText('Calibration Worker '+state+' · 연결 전에 파일/장치 identity를 다시 검사합니다'))
         self.refresh_configurations()
     def changed(self,*_):self.dirty=True
+    def buffer_changed(self):
+        self.changed()
+        try:
+            settings=self.advanced.data().get('execution',{})
+            if isinstance(settings,dict):self.motion_limits.load(settings)
+        except(ValueError,TypeError,yaml.YAMLError):pass  # Preserve incomplete text while typing.
+    def motion_changed(self):
+        self.changed()
+        try:data=self.advanced.data()
+        except(ValueError,yaml.YAMLError):return
+        execution=data.setdefault('execution',{})
+        if not isinstance(execution,dict):self.status.setText('고급 구성의 execution을 mapping으로 수정하세요.');return
+        for key,field in self.motion_limits.fields.items():
+            if field.value():execution[key]=field.value()
+            else:execution.pop(key,None)
+        self.advanced.text.setPlainText(yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
     def refresh_configurations(self):
         selected=str(self.saved_recipe)if self.saved_recipe else None;self.configuration.blockSignals(True);self.configuration.clear();self.configuration.addItem('저장 구성 선택',None)
         for p in sorted((self.workspace/'devices').glob('*/capture.yaml')):self.configuration.addItem(p.parent.name,str(p))
@@ -56,7 +75,8 @@ class DeviceSetup(QDialog):
                 combo.setCurrentIndex(index)
             combo.blockSignals(False)
     def save_selected(self):
-        self.request('session_device_configure',workspace=str(self.workspace),name=self.name.text(),existing=str(self.saved_recipe)if self.saved_recipe else None,choices={k:getattr(self,k).currentData()for k in('robot','leader','follower','side','wrist')})
+        try:self.request('session_device_configure',workspace=str(self.workspace),name=self.name.text(),existing=str(self.saved_recipe)if self.saved_recipe else None,choices={**{k:getattr(self,k).currentData()for k in('robot','leader','follower','side','wrist')},'motion_limits':self.motion_limits.values()})
+        except Exception as error:self.status.setText(str(error))
     def result(self,response):
         if not response.get('ok'):self.status.setText(response.get('error',{}).get('message','장치 설정 오류'));return
         result=response['result']
@@ -78,6 +98,7 @@ class DeviceSetup(QDialog):
         if data.get('stage')not in('scene_capture','capture_session'):raise ValueError('Capture 장치 구성을 선택하세요. Real/Sim은 Scene에서 구성을 복원합니다.')
         for k,v in data['inputs'].items():data['inputs'][k]=str((path.parent/v).resolve())
         self.advanced.text.setPlainText(yaml.safe_dump(data,sort_keys=False,allow_unicode=True));self.saved_recipe=path
+        self.motion_limits.load(data['execution'])
         for key,spec_key in(('leader','leader_device_profile'),('follower','device_profile')):
             combo=getattr(self,key);combo.blockSignals(True);combo.clear()
             if spec_key in data['inputs']:

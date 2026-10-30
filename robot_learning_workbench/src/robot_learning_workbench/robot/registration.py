@@ -1,6 +1,6 @@
 """Local SO101 configuration ownership and USB identity discovery, never activation."""
 from pathlib import Path
-import copy,re,uuid
+import copy,math,re,uuid
 from ..data.native import file_sha256
 
 
@@ -61,6 +61,8 @@ def configure_selected(workspace,name,choices,*,existing=None):
     from real2sim_builder.files import write,read
     if choices.get('robot')not in('so101','cameras'):raise ValueError('Unsupported robot; register its model and SDK before use')
     if not choices.get('side')or not choices.get('wrist')or choices['side']==choices['wrist']:raise ValueError('Choose distinct Side/Wrist cameras')
+    limits=choices.get('motion_limits',{})
+    if limits and(set(limits)!={'max_command_step_rad','max_follow_error_rad'}or any(type(v)not in(int,float)or not math.isfinite(v)or v<=0 for v in limits.values())):raise ValueError('Both positive finite Teleoperation limits required')
     previous=read(existing)if existing else None;unchanged={}
     if choices['robot']=='so101':
         serials=[]
@@ -77,6 +79,9 @@ def configure_selected(workspace,name,choices,*,existing=None):
         recipe=copy.deepcopy(previous);recipe.pop('engine',None);recipe['inputs'].pop('project',None);recipe['inputs'].pop('candidate',None)
         recipe['stage']='capture_session'if previous['stage']!='scene_capture'else'scene_capture'
         recipe['inputs']={k:str((Path(existing).parent/v).resolve())for k,v in recipe['inputs'].items()}
+    if limits:
+        if recipe['stage']!='capture_session':raise ValueError('Model/Precision binding is required before configuring Teleoperation')
+        recipe['execution'].update(limits)
     path=save_configuration(workspace,name,recipe);root=path.parent
     cameras={n:{'index_or_path':choices[n],'width':640,'height':480,'fps':30}for n in('side','wrist')};write(root/'cameras.json',{'cameras':cameras});recipe['inputs']['camera_config']=str(root/'cameras.json')
     if choices['robot']=='so101':

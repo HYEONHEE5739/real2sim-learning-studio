@@ -86,8 +86,10 @@ def test_fake_supervised_cycle_records_native_targets_and_next_feedback(tmp_path
         s.command({'kind':'teleop_stop','command_id':'stop','payload':{}});assert not s.teleoperation.active
     finally:s.close()
     catalog=load_catalog(plan.output_path/'teleoperation');assert len(catalog.episodes)==1
-    assert read_array(catalog.episodes[0],'joint_targets').shape==(3,6)
-    assert read_array(catalog.episodes[0],'states/joint_pos').shape==(3,6)
+    targets=read_array(catalog.episodes[0],'joint_targets');post=read_array(catalog.episodes[0],'states/joint_pos');pre=read_array(catalog.episodes[0],'obs/policy/joint_pos')
+    assert targets.shape==post.shape==pre.shape and targets.shape[0]>=3 and targets.shape[1]==6
+    import numpy as np
+    np.testing.assert_array_equal(post[:-1],pre[1:])
     assert catalog.execution['hardware_connected']is False and catalog.execution['training_ready']is False
 
 

@@ -1,4 +1,4 @@
-"""Scene/engine selection and passive Follower→Sim observation, no authoring/control UI."""
+"""Scene/engine selection, supervised Leader control and measured Follower→Sim views."""
 from pathlib import Path
 import time,uuid,yaml
 from PyQt6.QtGui import QImage,QPixmap
@@ -11,11 +11,11 @@ from .view import CameraView
 
 class RealSimPage(QWidget):
     def __init__(self,python,modules,workspace,parent=None):
-        super().__init__(parent);self.workspace=Path(workspace);self.template=None;self.project=None;self.last_progress={}
+        super().__init__(parent);self.workspace=Path(workspace);self.template=None;self.project=None;self.last_progress={};self.request_control=False;self.approval_dialog=None
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         box=QVBoxLayout(self);title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');box.addWidget(title)
-        hint=QLabel('Follower를 손으로 움직이면 측정 관절값을 선택한 Scene에 반영합니다. 실물 모터 명령은 보내지 않습니다.');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('연결 후 현장 승인하면 Leader가 실제 Follower를 제어하고, Follower 측정 자세를 Sim에 반영합니다.');hint.setWordWrap(True);box.addWidget(hint)
         selection=QHBoxLayout();box.addLayout(selection);selection.addWidget(QLabel('Scene'));self.scene_combo=QComboBox();selection.addWidget(self.scene_combo,1)
         selection.addWidget(QLabel('Simulation'));self.engine=QComboBox();self.engine.addItem('MuJoCo','mujoco');self.engine.addItem('Isaac Lab','isaaclab');selection.addWidget(self.engine)
         self.scene_combo.currentIndexChanged.connect(self.load_selected);self.engine.currentIndexChanged.connect(self.load_selected)
@@ -42,7 +42,9 @@ class RealSimPage(QWidget):
     def buttons(self):
         from PyQt6.QtCore import QProcess
         idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
-        self.scene_combo.setEnabled(idle);self.engine.setEnabled(idle);self.connect_button.setEnabled(idle and self.template is not None)
+        ready=self.client.running and not self.client.cancel_requested and self.last_progress.get('session_state')in('OBSERVING','TELEOP_READY')and self.last_progress.get('teleoperation_available',False)
+        self.scene_combo.setEnabled(idle);self.engine.setEnabled(idle);self.connect_button.setEnabled(idle and self.template is not None or bool(ready))
+        self.connect_button.setText('Teleoperation 승인'if ready else'Real/Sim 연결')
         self.capture_button.setEnabled(self.client.running and not self.client.cancel_requested and self.last_progress.get('capture_request_allowed',False))
         self.capture_button.setText('Capture 처리 중…'if self.last_progress.get('capture_pending')else'Capture');self.stop_button.setEnabled(self.active())
     def load_selected(self):
@@ -64,17 +66,32 @@ class RealSimPage(QWidget):
             self.capture_hint.setText('Scene·Follower·Camera 설정 복원 완료 · 연결 시 identity를 다시 검사합니다.');self.operation_message.hide();self.buttons()
     def connect_session(self):
         try:
+            if self.client.running:self.prepare_teleoperation();return
             if any(p is not self and p.active()for p in getattr(self.window(),'sessions',{}).values())or any(p.active()for p in getattr(self.window(),'workflows',{}).values()):raise ValueError('다른 장치/Simulation Session을 먼저 중단하세요.')
             if self.template is None:raise ValueError('실행 Scene을 선택하세요.')
             import copy
-            data=copy.deepcopy(self.template);key='real_sim_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/'real_sim';root.mkdir(parents=True,exist_ok=True)
+            from .teleop_controls import request_limits
+            data=copy.deepcopy(self.template);self.request_control='leader_device_profile'in data['inputs']
+            if self.request_control:
+                limits=request_limits(self,data['execution'])
+                if limits is None:self.request_control=False;return
+                data['execution'].update(limits)
+            key='real_sim_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/'real_sim';root.mkdir(parents=True,exist_ok=True)
             data['output']={'directory':str(root/key)};path=root/(key+'.yaml');path.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
             self.last_progress={};self.operation_message.hide();self.client.connect_session(path);self.state.setText('CONNECTING · Scene/Follower/Camera 준비 중');self.buttons()
         except Exception as error:self.show_error(str(error))
-    def send(self,kind):
-        try:self.operation_message.hide();self.client.send(kind)
+    def send(self,kind,payload=None):
+        try:self.operation_message.hide();self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
-    def cancel_run(self):self.client.cancel();self.buttons()
+    def prepare_teleoperation(self):
+        from .teleop_controls import request_limits
+        if not self.isVisible():return
+        limits=request_limits(self,self.last_progress.get('motion_limits',{}))
+        if limits:self.send('teleop_prepare',limits)
+    def cancel_run(self):
+        self.request_control=False
+        if self.approval_dialog:self.approval_dialog.reject()
+        self.client.cancel();self.buttons()
     def update_progress(self,progress):
         self.last_progress.update(progress);p=self.last_progress;self.state.setText(('MEMORY · 합성 시험 / 'if p.get('device_source')=='memory'else'')+p.get('session_state','CONNECTING'));self.buttons()
         self.capture_hint.setText(p.get('capture_reason','실제 관측과 Scene 렌더를 기다립니다.'))
@@ -85,6 +102,12 @@ class RealSimPage(QWidget):
             for n in('sim_side','sim_wrist'):self.camera_labels[n].setText('SIM '+n[4:].upper()+f" · render {p['render_timing']['render_ms']:.0f}ms · age {p['render_timing']['age_ms']:.0f}ms")
         if progress.get('snapshot'):self.snapshot_table.append(progress['snapshot'])
         if progress.get('error'):self.show_error(progress['error'])
+        if self.request_control and p.get('session_state')=='OBSERVING'and p.get('teleoperation_available'):
+            self.request_control=False;self.send('teleop_prepare')
+        if progress.get('teleop_proposal'):
+            from .teleop_controls import approve
+            approval=approve(self,progress['teleop_proposal'])
+            self.send('teleop_start',approval)if approval else self.send('teleop_stop')
     def event_received(self,event):
         if event['kind']=='error'or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':self.show_error(event['payload'].get('reason')or event['payload'].get('message')or str(event['payload']))
     def show_preview(self,name,raw):
@@ -93,5 +116,12 @@ class RealSimPage(QWidget):
             if not image.isNull():self.previews[name].setPixmap(QPixmap.fromImage(image))
     def show_error(self,message):self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
+        self.request_control=False
+        if self.approval_dialog:self.approval_dialog.reject()
         self.last_progress={};self.state.setText('DISCONNECTED · '+status);self.capture_hint.setText('Real/Sim 연결 종료 · 저장된 Capture는 보존됩니다.');self.buttons()
         for name,view in self.previews.items():view.clear();view.setText('연결 종료');self.camera_labels[name].setText(('SIM 'if name.startswith('sim_')else'REAL ')+name.removeprefix('sim_').upper()+' · 연결 종료')
+    def hideEvent(self,event):
+        self.request_control=False
+        if self.approval_dialog:self.approval_dialog.reject()
+        if self.client.running:self.send('teleop_stop')
+        super().hideEvent(event)

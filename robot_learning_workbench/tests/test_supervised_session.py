@@ -23,7 +23,7 @@ def devices(tmp_path):
 
 
 def approval(proposal):
-    return {'proposal_sha256':proposal['sha256'],**dict.fromkeys(('supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque'),True)}
+    return {'proposal_sha256':proposal['sha256'],**dict.fromkeys(('supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque','initialize_goal'),True)}
 
 
 def controller(tmp_path):
@@ -54,7 +54,7 @@ def test_unsafe_start_stale_session_or_unknown_send_blocks_further_commands(tmp_
     c,l,f,lt,ft,registers=controller(tmp_path)
     try:
         if fault=='goal':
-            f.bus.goal['wrist_flex']+=20
+            f.bus.goal['wrist_flex']+=20;registers['Torque_Enable']['wrist_flex']=1
             with pytest.raises(Exception,match='Goal'):c.propose()
         elif fault=='mode':
             registers['Operating_Mode']['gripper']=1

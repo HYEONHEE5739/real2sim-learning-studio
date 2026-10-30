@@ -37,11 +37,11 @@ def prepared(path: str,modules: str) -> dict:
         validate(plan)
         return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage=='paired_session':
-        from ..robot.session_devices import construct_observation
+        from ..robot.session_devices import construct
         from ..robot.scene_render import SceneView
-        devices,cameras=construct_observation(plan)
+        devices,cameras,_=construct(plan)
         SceneView(plan.resolved_inputs['scene']['path'],plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
-        return {**support,'state':'runtime_ready','reason':'Follower/Camera 읽기 전용 → 선택 Scene 관측. 실물 모터 명령 없음','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+        return {**support,'state':'runtime_ready','reason':'Leader/Follower·Camera·Scene 준비 · 현장 승인 후 Teleoperation, 측정 자세를 Sim에 반영','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage=='capture_session':
         from ..robot.session_devices import construct
         construct(plan)

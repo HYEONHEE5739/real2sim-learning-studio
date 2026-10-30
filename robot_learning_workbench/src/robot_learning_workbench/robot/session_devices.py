@@ -45,22 +45,15 @@ def device(spec,profile,memory,initial=None,*,memory_port=None):
 def construct(plan):
     from .calibration import PrecisionMapper
     model=Path(plan.resolved_inputs['robot_model']['path']);bounds={n:e['limits']for n,e in joint_specs(model).items()}
-    memory=plan.effective_settings['execution']['device_source']=='memory';bindings={r:binding(plan,r)for r in('leader','follower')};initial=None
+    memory=plan.effective_settings['execution']['device_source']=='memory'
+    roles=('leader','follower')if 'leader_device_profile'in plan.resolved_inputs else('follower',)
+    bindings={r:binding(plan,r)for r in roles};initial=None
     if memory:
         limits={r:PrecisionMapper(p).command_limits(bounds)for r,(_,p)in bindings.items()}
-        initial={n:(max(limits['follower'][n][0],limits['leader'][n][0])+min(limits['follower'][n][1],limits['leader'][n][1]))/2 for n in JOINTS}
+        initial={n:(max(limits[r][n][0]for r in roles)+min(limits[r][n][1]for r in roles))/2 for n in JOINTS}
     devices={r:device(spec,profile,memory,initial,memory_port=plan.output_path/('memory-'+r))for r,(spec,profile)in bindings.items()}
-    if Path(devices['leader'].bus.port).resolve()==Path(devices['follower'].bus.port).resolve():raise ValueError('Leader/Follower cannot share a serial port')
+    if len({Path(d.bus.port).resolve()for d in devices.values()})!=len(devices):raise ValueError('Leader/Follower cannot share a serial port')
     return devices,construct_cameras(plan),bounds
-
-
-def construct_observation(plan):
-    from .calibration import PrecisionMapper
-    spec,profile=binding(plan,'follower');memory=plan.effective_settings['execution']['device_source']=='memory';initial=None
-    if memory:
-        limits=PrecisionMapper(profile).command_limits({n:e['limits']for n,e in joint_specs(plan.resolved_inputs['robot_model']['path']).items()})
-        initial={n:(low+high)/2 for n,(low,high)in limits.items()}
-    return {'follower':device(spec,profile,memory,initial,memory_port=plan.output_path/'memory-follower')},construct_cameras(plan)
 
 
 def construct_cameras(plan):

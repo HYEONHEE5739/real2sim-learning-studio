@@ -22,7 +22,7 @@ def test_slow_frame_still_rejected_but_request_can_wait_for_next_frame(monkeypat
     assert '119'in s.capture_error and '100'in s.capture_error and 'Wrist'in s.capture_error
     emitted=[];s.events=emitted.append;s.emit(capture_ready=False,capture_reason=s.capture_error)
     p=emitted[-1]['payload']['progress'];assert p['capture_request_allowed']and not p['capture_pending']
-    assert not p['teleoperation_available']and '제한'in p['teleoperation_reason']
+    assert p['teleoperation_available']and '제한'in p['teleoperation_reason']
     s.acquiring=object();s.state='CAPTURING';s.emit()
     assert not emitted[-1]['payload']['progress']['capture_request_allowed']
     s.acquiring=None;s.state='OBSERVING';s.packets['wrist']['read_end']['monotonic_ns']=990000000

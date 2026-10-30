@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage,QPixmap
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QFileDialog,QInputDialog,QPlainTextEdit,QDialog,QDialogButtonBox,QCheckBox,QScrollArea
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QFileDialog,QInputDialog,QPlainTextEdit,QScrollArea
 from .view import CameraView
 from .session_client import SessionClient
 from .device_setup import DeviceSetup
@@ -39,7 +39,7 @@ class CapturePage(QWidget):
             label=QLabel(name+'\n— rad\n—°');label.setAlignment(Qt.AlignmentFlag.AlignCenter);label.setObjectName('jointCard');joints.addWidget(label,1);self.joint_labels.append(label)
         actions=QGridLayout();left.addLayout(actions)
         self.connect_button=QPushButton('로봇 연결');self.connect_button.setObjectName('primaryAction');self.connect_button.clicked.connect(self.connect_session)
-        self.start_teleop_button=QPushButton('▶ Teleoperation 시작');self.start_teleop_button.clicked.connect(lambda:self.send('teleop_prepare'))
+        self.start_teleop_button=QPushButton('▶ Teleoperation 시작');self.start_teleop_button.clicked.connect(self.prepare_teleoperation)
         self.stop_teleop_button=QPushButton('■ Teleoperation 중지');self.stop_teleop_button.clicked.connect(lambda:self.send('teleop_stop'))
         self.capture_button=QPushButton('현재 자세 Capture');self.capture_button.setObjectName('primaryAction');self.capture_button.clicked.connect(lambda:self.send('session_snapshot'))
         self.disconnect_button=QPushButton('연결 해제');self.disconnect_button.clicked.connect(lambda:self.send('session_disconnect'))
@@ -141,6 +141,10 @@ class CapturePage(QWidget):
             if kind in('teleop_prepare','session_snapshot'):self.operation_message.clear();self.operation_message.hide()
             return self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
+    def prepare_teleoperation(self):
+        from .teleop_controls import request_limits
+        limits=request_limits(self,self.last_progress.get('motion_limits',{}))
+        if limits:self.send('teleop_prepare',limits)
     def finish(self):self.finishing=True;self.send('session_finish')
     def update_progress(self,progress):
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText(state)
@@ -164,17 +168,9 @@ class CapturePage(QWidget):
         if 'teleop_proposal'in progress:self.approve(progress['teleop_proposal'])
         if progress.get('error'):self.show_error(progress['error'])
     def approve(self,proposal):
-        if not self.isVisible():self.send('teleop_stop');return
-        self.proposal=proposal;dialog=QDialog(self);self.approval_dialog=dialog;dialog.setWindowTitle('현장 감독 Teleoperation 승인');box=QVBoxLayout(dialog)
-        label=QLabel('6축 구동 권한을 현재 연결에만 부여합니다. 중지/해제는 새 Goal을 차단하고 Torque를 유지합니다.\n현재 자세·Goal·방향·범위 및 전원 차단 수단을 현장에서 확인하세요.');label.setWordWrap(True);box.addWidget(label)
-        detail=QPlainTextEdit(json.dumps(proposal,ensure_ascii=False,indent=2));detail.setReadOnly(True);box.addWidget(detail);checks={}
-        for key,text in [('supervised','현장에서 직접 감독합니다'),('clear','충돌 위험과 주변 장애물을 확인했습니다'),('stop_ready','즉시 전원 차단 수단이 준비됐습니다'),('direction_checked','Leader/Follower 명령 방향을 확인했습니다'),('ranges_checked','현재 관절과 승인 이동 범위를 확인했습니다'),('preserve_torque','중지 시 Torque 유지 정책을 확인했습니다')]:
-            check=QCheckBox(text);checks[key]=check;box.addWidget(check)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False);box.addWidget(buttons)
-        for c in checks.values():c.toggled.connect(lambda:buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(all(c.isChecked()for c in checks.values())))
-        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject)
-        if dialog.exec()==QDialog.DialogCode.Accepted and self.isVisible():self.send('teleop_start',{'proposal_sha256':proposal['sha256'],**{k:c.isChecked()for k,c in checks.items()}})
-        self.approval_dialog=None
+        from .teleop_controls import approve
+        self.proposal=proposal;approval=approve(self,proposal)
+        self.send('teleop_start',approval)if approval else self.send('teleop_stop')
     def event_received(self,event):
         if event['kind']in('error','log')or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':
             payload=event['payload'];self.show_error(payload.get('reason')or payload.get('message')or json.dumps(payload,ensure_ascii=False))
@@ -184,6 +180,7 @@ class CapturePage(QWidget):
             if not image.isNull():self.previews[camera].setPixmap(QPixmap.fromImage(image))
     def show_error(self,message):self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
+        if self.approval_dialog:self.approval_dialog.reject()
         self.state.setText('DISCONNECTED · Worker '+status);self.last_progress={};self.proposal=None;self.buttons(False)
         self.teleop_hint.hide();self.capture_hint.setText('연결 종료 · 저장된 Capture는 보존됩니다')
         for name,view in self.previews.items():view.clear();view.setText(name+' · 연결 종료')

@@ -1,5 +1,7 @@
 # Capture 조작·정합 상태 표시 수정
 
+> 현재 동작은 [Leader Teleoperation 복구·워크플로우 감사](leader-teleop-recovery.md)를 따릅니다. 아래는 이전 구현 당시의 결과이며, Real/Sim의 Leader 제어 누락·Capture 제한값 UI·제어 주기 분리는 후속 작업에서 수정했습니다.
+
 2026-10-30. 기준 `c3bff2a`, 브랜치 `scene-preparation-v8`. 사용자가 실행 중인 Session의 로그를 읽고 Qt 재현 시험으로 Capture 점멸·Teleoperation 오류 덮어쓰기를 확인했다. 기존 Session을 종료하거나 실물 장치에 새로 접속하지 않았다.
 
 - Capture 버튼은 매 status마다 True→False로 바뀌던 구현을 제거하고 한 번에 최종 상태만 적용한다. 프레임별 저장 적격성과 촬영 요청 가능 여부를 분리한다. 연결 중 요청은 가능하고 대기/저장/종료 중에는 차단한다. 실제 저장은 기존 최대5초 대기와 안정성·100ms skew·200ms age·새 Camera sequence 검사를 그대로 통과해야 한다.
