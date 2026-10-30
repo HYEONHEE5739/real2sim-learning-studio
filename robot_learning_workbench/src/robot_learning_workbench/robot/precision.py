@@ -1,8 +1,8 @@
 """Reference-angle workflow; observation only, immutable profiles and explicit activation."""
 from pathlib import Path
-import copy,hashlib,math,time,uuid
+import copy,math,time,uuid
 import yaml
-from .calibration import JOINTS,SCHEMA,LEGACY_MAPPER,joint_specs,joint_angle,fit_joint,review_joint,validate_joint,load_profile,profile_for_model,PrecisionMapper
+from .calibration import JOINTS,SCHEMA,LEGACY_MAPPER,joint_specs,joint_angle,fit_joint,review_joint,validate_joint,load_profile,profile_for_model,PrecisionMapper,fingerprint
 from .devices import serial_lease
 from ..data.native import atomic_json,file_sha256
 
@@ -80,14 +80,18 @@ class PrecisionSession:
         profile.update(schema=SCHEMA,id='profile_'+uuid.uuid4().hex,role=self.role,identity=copy.deepcopy(self.identity),urdf_sha256=self.model_hash,joints=joints,created_ns=time.time_ns(),physical_verified=False)
         profile.pop('runtime_model_binding',None)
         if self.source_profile:profile.update(parent_sha256=self.source_hash,parent_path=str(self.source_profile))
-        PrecisionMapper(profile);path=self.workspace/'calibration'/self.role/(profile['id']+'.json');path.parent.mkdir(parents=True,exist_ok=True);atomic_json(path,profile,exclusive=True);self.saved[str(path)]=file_sha256(path)
-        return {'path':str(path),'sha256':self.saved[str(path)],'physical_verified':False}
+        PrecisionMapper(profile);path=self.workspace/'calibration'/self.role/(profile['id']+'.json');path.parent.mkdir(parents=True,exist_ok=True);atomic_json(path,profile,exclusive=True);self.saved[str(path)]={'sha256':file_sha256(path),'draft_sha256':self.draft_identity()}
+        return {'path':str(path),'sha256':self.saved[str(path)]['sha256'],'physical_verified':False}
+
+    def draft_identity(self):return fingerprint({'references':self.references,'candidates':self.candidates})
 
     def activate(self,path,approved):
         if approved is not True:raise ValueError('Explicit user approval required before applying a Precision profile')
         path=Path(path).resolve()
-        if str(path)not in self.saved or file_sha256(path)!=self.saved[str(path)]:raise ValueError('Choose an unchanged profile saved by this session')
-        load_profile(path,expected_sha256=self.saved[str(path)],role=self.role,identity=self.identity)
+        saved=self.saved.get(str(path))
+        if not saved or file_sha256(path)!=saved['sha256']:raise ValueError('Choose an unchanged profile saved by this session')
+        if self.draft_identity()!=saved['draft_sha256']:raise ValueError('Stale saved profile: reference/fit/review draft changed; save the current reviewed revision')
+        load_profile(path,expected_sha256=saved['sha256'],role=self.role,identity=self.identity)
         from .registration import save_configuration
         configuration=copy.deepcopy(self.config);configuration['inputs']={k:str((self.configuration.parent/v).resolve())for k,v in configuration['inputs'].items()}
         key='calibration_profile'if self.role=='follower'else'leader_calibration_profile';configuration['inputs'][key]=str(path)
@@ -108,15 +112,17 @@ def construct(plan,*,events):
     calibration=Path(spec['calibration_path']).resolve()
     if not calibration.is_relative_to(workspace)or not calibration.is_file():raise ValueError('Existing workspace-owned SDK Calibration required before reference-angle calibration')
     memory=plan.effective_settings['execution']['device_source']=='memory'
+    if not memory:
+        from .registration import resolve_serial
+        spec['sdk']['port']=resolve_serial(spec['usb_identity'])
+    from .configuration import observation_configuration
+    cfg=observation_configuration(spec)
     if memory:
         from .teleoperation import fake_device
         if 'calibration_profile'not in plan.resolved_inputs:raise ValueError('Memory SDK arithmetic needs an explicit reference Profile fixture')
         profile=load_profile(plan.resolved_inputs['calibration_profile']['path'],role=role);spec['sdk']['port']=str(plan.output_path/('memory-'+role));profile['identity']['port']=spec['sdk']['port']
         observer=fake_device(spec,profile);sdk=observer.device;identity=observer.identity
     else:
-        from .offline import sdk_configuration
-        from .registration import resolve_serial
-        spec['sdk']['port']=resolve_serial(spec['usb_identity']);cfg=sdk_configuration(spec)
         if role=='follower':
             from lerobot.robots.so101_follower.so101_follower import SO101Follower
             sdk=SO101Follower(cfg)
@@ -151,7 +157,7 @@ def run(plan,*,events,commands):
                     verify_prepared_inputs(plan)
                     if c['kind']=='precision_select':joint=c['payload']['joint'];result={'joint':joint}
                     else:result=session.command(c['kind'],c['payload'])
-                    emit(precision_result={'kind':c['kind'],'result':result,'references':session.references[joint]});ack(c)
+                    emit(precision_result={'kind':c['kind'],'result':result,'joint':joint,'references':session.references[joint],'candidate':session.candidates.get(joint)});ack(c)
                 except Exception as failure:ack(c,'rejected',str(failure));emit(error=str(failure))
             if not running:break
             if time.monotonic_ns()-heartbeat>3_000_000_000:raise TimeoutError('Precision UI heartbeat lost; closing read-only device')

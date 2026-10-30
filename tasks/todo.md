@@ -321,10 +321,21 @@ remain unverified. See `docs/real-sim-observation.md` and `docs/capture-feedback
 - [x] Separate30Hz serial control from Camera/render/storage/Preview; retain bounded diagnostics and cleanup on recording failure.
 - [x] Verify Memory Leader→Follower→actual MuJoCo/Isaac state/RGB/four-image capture, actual Qt→R03 and full regression; no physical motor writes.
 - [x] Audit original and new workflow callers; document missing transfer paths instead of claiming full parity.
-- [ ] Transfer new-angle Precision acquisition/fit/review/activation workflow (SDK calibration is separate).
-- [ ] Connect ordinary Builder Export registration to the runtime Scene selection workflow.
+- [x] Transfer new-angle Precision acquisition/fit/review/activation workflow; see `docs/precision-export-integration.md` for Memory validation and hardware limits.
+- [x] Connect ordinary Builder Export registration to runtime Scene selection and authored measured-FK rendering.
 - [ ] Support explicitly approved first upload to a new empty Hub repository.
 - [ ] Complete separately approved autonomous real Policy deployment; current Observe/Fake/Gripper boundaries remain.
 
 See `docs/leader-teleop-recovery.md`. These unchecked gaps are findings, not features
 implemented or automatically started by this bug-fix task.
+
+
+## Precision / Export integration — 2026-10-30
+
+- [x] Remove manual Teleoperation budgets and retired UI/Worker branches; preserve existing safety math/Stop/watchdogs and explicitly block unverified physical control.
+- [x] Implement read-only reference calibration in one R03 session and a dedicated Qt tab; immutable Profile/config revisions and explicit approval.
+- [x] Register verified Builder exports and refresh Real/Sim selection; keep existing v8 files/calibration unchanged.
+- [x] Focused regression and small Memory/actual-engine render checks; no hardware motion, main edits or remote writes.
+- [ ] Verify device dynamic control specifications and supervised physical Calibration/Teleoperation separately.
+
+See `docs/precision-export-integration.md` for exact test scope and the remaining Isaac SDK shutdown limitation.

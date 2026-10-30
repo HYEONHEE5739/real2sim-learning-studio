@@ -1,5 +1,7 @@
 # Scene 준비·v8 데이터 소유권 이관·장치 설정
 
+후속 변경: [수동 Teleoperation 설정 제거·Precision 기준각·일반 Builder Export 연결](precision-export-integration.md). 아래 내용은 당시 검증 기록이며 현재 실물 Teleoperation 차단 상태는 후속 문서를 따릅니다.
+
 2026-10-29. 기준 `8b565968542fcfbe8df37a71dd70ff1e2274c336`, 브랜치 `scene-preparation-v8`. **`pickplace_colorblock`을 현재 Workspace에 실제 생성하고, 이전 프로젝트 폴더 접근을 차단한 환경에서 Builder·보존 자료·양 엔진·Qt 설정 복원을 확인했다.** Capture의 기본 수동 Profile 폼과 추가 runtime joint offset 경로는 제거했다. 선택 Input/자유 메모와 장치 선택 중심의 한 구현으로 교체했다. 기존 공통 SDK·Precision·Encoding·Builder·R03 계약은 유지한다.
 
 ## 실제 위치와 사용

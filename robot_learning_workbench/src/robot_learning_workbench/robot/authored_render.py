@@ -88,4 +88,8 @@ class StaticIsaacRenderer:
         for _ in range(3):self.sim.render()
         for sensor in self.cameras.values():sensor.update(1/30,force_recompute=True)
         return {n:s.data.output['rgb'][0,:,:,:3].detach().cpu().numpy().copy()for n,s in self.cameras.items()}
-    def close(self):self.sim.stop();self.cameras.clear();self.sim.clear_all_callbacks();self.sim.clear_instance()
+    def close(self):
+        # Isaac Lab's public build_simulation_context uses this cleanup order.
+        # stop() here invokes its standalone STOP callback's render-until-resume
+        # loop, preventing a headless child from ever returning to app.close().
+        self.cameras.clear();self.sim.clear_all_callbacks();self.sim.clear_instance()

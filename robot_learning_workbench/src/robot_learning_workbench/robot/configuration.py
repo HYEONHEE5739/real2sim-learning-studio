@@ -7,11 +7,20 @@ if TYPE_CHECKING:
     from scene_contract.package import ScenePackage
 
 
+def observation_configuration(spec: dict):
+    """Official SDK config must load exactly the selected calibration bytes."""
+    from .offline import sdk_configuration
+    path=Path(spec['calibration_path']);cfg=sdk_configuration(spec)
+    if not path.is_absolute()or not path.is_file():raise ValueError('Explicit existing SDK calibration path required')
+    if path.name!=str(cfg.id)+'.json'or Path(cfg.calibration_dir or path.parent).resolve()!=path.parent.resolve():raise ValueError('SDK config must load the explicit calibration file')
+    cfg.calibration_dir=path.parent
+    return cfg
+
+
 def create_observer(spec: dict, profile: dict) -> 'Follower':
     """Construct a pinned SDK observation device; never connect/configure/calibrate."""
     import hashlib
     from .devices import Follower,Leader
-    from .offline import sdk_configuration
     import copy
     spec=copy.deepcopy(spec);profile=copy.deepcopy(profile)
     if spec.get('usb_identity'):
@@ -20,13 +29,11 @@ def create_observer(spec: dict, profile: dict) -> 'Follower':
     role=spec['role'];path=Path(spec['calibration_path'])
     if not path.is_absolute() or not path.is_file():raise ValueError('Explicit existing SDK calibration path required')
     if hashlib.sha256(path.read_bytes()).hexdigest()!=profile['identity']['calibration_sha256']:raise ValueError('SDK calibration identity differs from Precision profile')
-    cfg=sdk_configuration(spec)
+    cfg=observation_configuration(spec)
     if role!=profile['role'] or str(Path(cfg.port).resolve())!=profile['identity']['port']:raise ValueError('Device role/port differs from approved identity')
     if role=='follower' and cfg.id!=profile['identity']['id']:raise ValueError('Follower ID differs from approved identity')
     expected=path.name if role=='leader' else cfg.id
     if expected!=profile['identity']['id']:raise ValueError('SDK calibration filename/device identity differs')
-    if path.name!=str(cfg.id)+'.json' or Path(cfg.calibration_dir or path.parent).resolve()!=path.parent:raise ValueError('SDK config must load the explicit calibration file')
-    cfg.calibration_dir=path.parent
     cls=Leader if role=='leader' else Follower
     device=cls.from_config(cfg,profile=profile,calibration_path=path,identity=profile['identity'],model_hash=profile['urdf_sha256'])
     device.usb_identity=spec.get('usb_identity')

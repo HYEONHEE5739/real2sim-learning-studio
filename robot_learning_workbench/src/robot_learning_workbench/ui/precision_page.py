@@ -9,7 +9,7 @@ from .session_client import SessionClient
 class PrecisionPage(QWidget):
     activated=pyqtSignal(object)
     def __init__(self,python,modules,workspace,parent=None):
-        super().__init__(parent);self.workspace=Path(workspace);self.saved_profile=None;self.current_candidate=None
+        super().__init__(parent);self.workspace=Path(workspace);self.saved_profile=None
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.error.connect(self.error);self.client.received.connect(self.received);self.client.terminal.connect(self.ended)
         box=QVBoxLayout(self);title=QLabel('4. Precision Calibration');title.setObjectName('dashboardTitle');box.addWidget(title)
         hint=QLabel('사용자가 지지한 로봇을 기준 자세로 직접 맞추고 Raw Encoder ↔ 모델 기준각을 기록합니다. SDK Motor Calibration과 별개이며 Goal/Torque 명령을 보내지 않습니다.');hint.setWordWrap(True);box.addWidget(hint)
@@ -53,15 +53,15 @@ class PrecisionPage(QWidget):
                 if source in data['inputs']:inputs[key]=str((path.parent/data['inputs'][source]).resolve())
             root=self.workspace/'calibration/sessions';root.mkdir(parents=True,exist_ok=True);key='precision_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
             recipe={'schema_version':1,'stage':'precision_session','inputs':inputs,'execution':{'role':role,'device_source':data['execution']['device_source']},'output':{'directory':str(root/key)}}
-            target=root/(key+'.yaml');target.write_text(yaml.safe_dump(recipe,sort_keys=False));self.saved_profile=None;self.current_candidate=None;self.references.setRowCount(0);self.client.connect_session(target);self.state.setText('CONNECTING');self.buttons()
+            target=root/(key+'.yaml');target.write_text(yaml.safe_dump(recipe,sort_keys=False));self.saved_profile=None;self.references.setRowCount(0);self.client.connect_session(target);self.state.setText('CONNECTING');self.buttons()
         except Exception as error:self.error(str(error))
     def send(self,kind,**payload):
         try:
-            if kind in('precision_record','precision_remove','precision_fit'):self.saved_profile=None;self.current_candidate=None
+            if kind in('precision_record','precision_remove','precision_fit','precision_review'):self.saved_profile=None
             self.client.send(kind,payload);self.buttons()
         except Exception as error:self.error(str(error))
     def select_joint(self,joint):
-        self.current_candidate=None
+        self.references.setRowCount(0);self.fit_result.setText('선택 관절 결과를 기다립니다.');self.measurement.setText('선택 관절 측정 대기')
         if self.client.running:self.send('precision_select',joint=joint)
     def remove_reference(self):
         item=self.references.item(self.references.currentRow(),0)
@@ -73,18 +73,18 @@ class PrecisionPage(QWidget):
         if QMessageBox.question(self,'Precision 적용 승인',text)==QMessageBox.StandardButton.Yes:self.send('precision_activate',path=self.saved_profile,approved=True)
     def update_progress(self,progress):
         if progress.get('error'):self.error(progress['error'])
-        if progress.get('current_measurement'):
+        if progress.get('current_measurement',{}).get('joint')==self.joint.currentText():
             m=progress['current_measurement'];self.state.setText('CONNECTED · '+self.role.currentText()+' / '+m['joint']);self.measurement.setText(f"Raw {m['raw']} / Native {m['legacy_position']:.4f} / 이전 {m.get('before_model_rad')} rad / 새 보정 {m.get('after_model_rad')} rad / Torque {m['torque']}")
         if progress.get('precision_result'):
             p=progress['precision_result'];result=p['result'];kind=p['kind'];rows=p['references']
-            if kind in('precision_fit','precision_review'):
-                self.current_candidate=result;self.fit_result.setText(result['status']+' · '+str(result.get('validation',result.get('review',{})))+' · physical_verified=false')
-            self.references.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                before=r.get('before_model_rad');after=None
-                if self.current_candidate and i<len(self.current_candidate.get('errors_rad',[])):after=r['angle_rad']+self.current_candidate['errors_rad'][i]
-                values=(r['reference_id'],r['raw'],math.degrees(r['angle_rad']),r['split'],math.degrees(before-r['angle_rad'])if before is not None else'미결합',math.degrees(after-r['angle_rad'])if after is not None else'—')
-                for col,value in enumerate(values):self.references.setItem(i,col,QTableWidgetItem(str(value)))
+            if p['joint']==self.joint.currentText():
+                candidate=p['candidate'];self.fit_result.setText((candidate['status']+' · '+str(candidate.get('validation',candidate.get('review',{})))if candidate else'선택 관절의 Fit/Review 결과 없음')+' · physical_verified=false')
+                self.references.setRowCount(len(rows))
+                for i,r in enumerate(rows):
+                    before=r.get('before_model_rad');after=None
+                    if candidate and i<len(candidate.get('errors_rad',[])):after=r['angle_rad']+candidate['errors_rad'][i]
+                    values=(r['reference_id'],r['raw'],math.degrees(r['angle_rad']),r['split'],math.degrees(before-r['angle_rad'])if before is not None else'미결합',math.degrees(after-r['angle_rad'])if after is not None else'—')
+                    for col,value in enumerate(values):self.references.setItem(i,col,QTableWidgetItem(str(value)))
             if kind=='precision_save':self.saved_profile=result['path'];self.fit_result.setText('저장됨 · '+result['path'])
             if kind=='precision_activate':self.activated.emit(result);self.fit_result.setText('새 장치 구성 적용 · '+result['configuration_path'])
         self.buttons()

@@ -39,10 +39,10 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Official LeRobot Dataset materialization with existing encoded video sharing.
 - Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
 - Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
-- Project-based Capture and a separate Real/Sim screen: choose an executable Scene and MuJoCo/Isaac, approve supervised Leader→Follower Teleoperation, mirror measured Follower state, capture four images and stop. Builder Candidate editing stays in Builder.
-- Hardware connections begin read-only. Supervised six-axis Teleoperation requires fresh on-site approval and runtime guards; autonomous real Policy control remains disabled. Physical motion is unverified.
-  Six-axis Teleoperation is verified with memory devices; actual movement awaits on-site approval and hardware preconditions. Real Policy motor writes remain disabled.
-  Gripper-only one-shot code requires a separate command binding and supervised motion approval; no physical motion is verified.
+- Project-based Capture and Real/Sim with measured Follower state, four-image capture and registered Builder Export revisions. General authored exports use measured FK rendering; preserved v8 keeps its native renderer.
+- Manual reference-angle Precision Calibration: Raw collection, Fit, separate-pose review, immutable Profile save and explicitly approved device configuration revision. SDK Motor Calibration is a separate procedure.
+- Hardware connections remain read-only. Manual Teleoperation budget inputs have been removed; physical six-axis Teleoperation is blocked (`ARM_CONTROL_SPEC_UNVERIFIED`) until verified device control specifications are available. Memory control and existing safety/encoding/watchdog checks remain. Physical motion is unverified.
+  Gripper-only one-shot code requires its separate command binding and supervised approval; autonomous real Policy motor control remains disabled.
 - Qt workflow pages and selected-environment Side/Wrist 640×480 latest-frame Preview.
 
 The SmolVLA path explicitly compiles one SHA-pinned LeRobot 0.4.1 module with a
@@ -143,6 +143,7 @@ requires separately provisioned assets and SDK/Qt environments.
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
 - [Scene preparation, owned v8 and device setup](docs/scene-preparation-v8.md)
+- [Precision Calibration and Builder Export integration](docs/precision-export-integration.md)
 - [Leader Teleoperation recovery and workflow audit](docs/leader-teleop-recovery.md)
 - [Earlier read-only Real/Sim implementation](docs/real-sim-observation.md)
 - [Capture status and button fixes](docs/capture-feedback.md)

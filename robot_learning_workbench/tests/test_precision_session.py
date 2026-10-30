@@ -75,6 +75,8 @@ def test_zero_reference_fit_independent_review_save_and_explicit_activation(tmp_
         assert result['source_configuration_path']==str(configuration)
         assert configuration.read_bytes()==original_config and old_profile.read_bytes()==original_profile
         assert session.command('precision_save',{})['path']!=str(old_profile)
+        device.raw['shoulder_pan']=2001;session.command('precision_record',{'joint':'shoulder_pan','angle_rad':.8,'split':'validation'})
+        with pytest.raises(ValueError,match='[Ss]tale|[Dd]raft|[Cc]hanged'):session.command('precision_activate',{'path':str(path),'approved':True})
         assert set(device.trace)<={'connect','sample'}
     finally:session.close()
     assert not device.connected and device.torque==0
@@ -112,6 +114,9 @@ def test_precision_recipe_and_worker_commands_pin_owned_inputs_without_connectin
     path=workspace/'precision.yaml';path.write_text(yaml.safe_dump({'schema_version':1,'stage':'precision_session','inputs':{'configuration':str(configuration),'device_profile':data['inputs']['device_profile'],'calibration_profile':data['inputs']['calibration_profile'],'robot_model':data['inputs']['robot_model']},'execution':{'device_source':'memory','role':'follower'},'output':{'directory':str(workspace/'precision-output')}}))
     plan=prepare_recipe(read_recipe(path));prepared=construct(plan,events=lambda e:None)
     assert not prepared.connected
+    spec_path=Path(data['inputs']['device_profile']);spec=json.loads(spec_path.read_text());outside=tmp_path/'unexpected-sdk-cache';spec['sdk']['calibration_dir']=str(outside);spec_path.write_text(json.dumps(spec))
+    with pytest.raises(ValueError,match='[Cc]alibration|SDK config'):construct(prepare_recipe(read_recipe(path)),events=lambda e:None)
+    assert not outside.exists()
     assert _command({'command_id':'zero','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':0.,'split':'train'}})['kind']=='precision_record'
     with pytest.raises(Exception):_command({'command_id':'bad','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':float('nan'),'split':'train'}})
 

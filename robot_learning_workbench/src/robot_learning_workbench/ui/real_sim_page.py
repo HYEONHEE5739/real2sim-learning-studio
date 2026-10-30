@@ -82,8 +82,8 @@ class RealSimPage(QWidget):
                 for i in range(self.scene_combo.count()):
                     if self.scene_combo.itemData(i)['scene']==selected:self.scene_combo.setCurrentIndex(i);break
             self.scene_combo.blockSignals(False)
-            if self.scene_combo.currentData():self.load_selected()
-            else:self.capture_hint.setText('등록된 실행 Scene이 없습니다. Builder에서 Scene Package를 준비하세요.')
+            self.load_selected()
+            if not self.scene_combo.currentData():self.capture_hint.setText('등록된 실행 Scene이 없습니다. Builder에서 Scene Package를 준비하세요.')
         else:
             self.template=result['recipe'];self.project={'project':result['project'],'name':result['name']};self.snapshot_table.reset()
             for row in result['snapshots']:self.snapshot_table.append(row)

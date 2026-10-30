@@ -1,5 +1,7 @@
 # Leader Teleoperation 복구와 기존 워크플로우 이관 감사
 
+후속 변경: [수동 Teleoperation 설정 제거·Precision 기준각·일반 Builder Export 연결](precision-export-integration.md). 아래 내용은 당시 검증 기록이며 현재 실물 Teleoperation 차단 상태는 후속 문서를 따릅니다.
+
 2026-10-30. 기준 `3b6250038ca42e68fad5b682c261a9b4a27e59df`, 브랜치 `scene-preparation-v8`. **Real/Sim에서 빠진 Leader→Follower 경로와 Capture의 시작 차단을 수정했다.** 영상/저장이 제어 주기를 멈추던 문제도 실제 Qt 시험으로 찾아 별도30Hz Serial 제어 루프로 교체했다. 원본 프로젝트·Scene·Calibration·Dataset·Checkpoint·SDK를 변경하지 않았으며 실제 로봇 Goal/Torque는 보내지 않았다. 아래 Memory 시험을 실물 성공으로 해석하지 않는다.
 
 ## 원인과 바뀐 동작
