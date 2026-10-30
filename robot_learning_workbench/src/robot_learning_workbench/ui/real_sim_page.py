@@ -70,12 +70,7 @@ class RealSimPage(QWidget):
             if any(p is not self and p.active()for p in getattr(self.window(),'sessions',{}).values())or any(p.active()for p in getattr(self.window(),'workflows',{}).values()):raise ValueError('다른 장치/Simulation Session을 먼저 중단하세요.')
             if self.template is None:raise ValueError('실행 Scene을 선택하세요.')
             import copy
-            from .teleop_controls import request_limits
             data=copy.deepcopy(self.template);self.request_control='leader_device_profile'in data['inputs']
-            if self.request_control:
-                limits=request_limits(self,data['execution'])
-                if limits is None:self.request_control=False;return
-                data['execution'].update(limits)
             key='real_sim_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/'real_sim';root.mkdir(parents=True,exist_ok=True)
             data['output']={'directory':str(root/key)};path=root/(key+'.yaml');path.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
             self.last_progress={};self.operation_message.hide();self.client.connect_session(path);self.state.setText('CONNECTING · Scene/Follower/Camera 준비 중');self.buttons()
@@ -84,10 +79,7 @@ class RealSimPage(QWidget):
         try:self.operation_message.hide();self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
     def prepare_teleoperation(self):
-        from .teleop_controls import request_limits
-        if not self.isVisible():return
-        limits=request_limits(self,self.last_progress.get('motion_limits',{}))
-        if limits:self.send('teleop_prepare',limits)
+        if self.isVisible():self.send('teleop_prepare')
     def cancel_run(self):
         self.request_control=False
         if self.approval_dialog:self.approval_dialog.reject()

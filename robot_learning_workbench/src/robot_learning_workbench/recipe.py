@@ -78,8 +78,8 @@ _INPUTS={
 _EXEC={
  'scene_capture':({'device_source'},set()),
  'sdk_calibration':({'confirm_on_site'},{'timeout_s'}),
- 'capture_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
- 'paired_session':({'device_source'},{'max_command_step_rad','max_follow_error_rad'}),
+ 'capture_session':({'device_source'},set()),
+ 'paired_session':({'device_source'},set()),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
@@ -125,8 +125,6 @@ def _validate(data,path):
         where='execution.'+key
         if key=='device_source':
             if value not in('hardware','memory'):_fail(where,'explicit hardware or memory required',path)
-        elif key in('max_command_step_rad','max_follow_error_rad'):
-            if type(value)not in(int,float)or not math.isfinite(value)or value<=0:_fail(where,'explicit positive finite budget required',path)
         elif key in ('episodes','target_successes','max_attempts','env_num','num_envs','num_episodes','batch_size','max_batches','max_episode_steps','max_frames','max_gripper_delta_raw'):
             if type(value) is not int or value<1:_fail(where,'positive integer required',path)
         elif key=='repo_type':

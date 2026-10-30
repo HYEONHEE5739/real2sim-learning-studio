@@ -8,12 +8,11 @@ class TeleoperationLoop:
     def __init__(self,control):
         self.control=control;self.lock=threading.RLock();self.stopped=threading.Event();self.thread=None
         self.rows=deque();self.error=None;self.recording_error=None;self.latest=None;control.cancelled=self.stopped.is_set
-    def prepare(self,limits):
+    def prepare(self):
         if self.recording_error:raise ValueError('Control recording failed; close this session before reconnecting')
         if self.control.active:raise ValueError('Stop Teleoperation before preparing another approval')
         self.stop()
         with self.lock:
-            if limits:self.control.configure(limits['max_command_step_rad'],limits['max_follow_error_rad'])
             self.error=None;return self.control.propose()
     def start(self,approval):
         if self.thread and self.thread.is_alive():raise ValueError('Teleoperation already active')

@@ -39,7 +39,7 @@ class CapturePage(QWidget):
             label=QLabel(name+'\n— rad\n—°');label.setAlignment(Qt.AlignmentFlag.AlignCenter);label.setObjectName('jointCard');joints.addWidget(label,1);self.joint_labels.append(label)
         actions=QGridLayout();left.addLayout(actions)
         self.connect_button=QPushButton('로봇 연결');self.connect_button.setObjectName('primaryAction');self.connect_button.clicked.connect(self.connect_session)
-        self.start_teleop_button=QPushButton('▶ Teleoperation 시작');self.start_teleop_button.clicked.connect(self.prepare_teleoperation)
+        self.start_teleop_button=QPushButton('▶ Teleoperation 시작');self.start_teleop_button.clicked.connect(lambda:self.send('teleop_prepare'))
         self.stop_teleop_button=QPushButton('■ Teleoperation 중지');self.stop_teleop_button.clicked.connect(lambda:self.send('teleop_stop'))
         self.capture_button=QPushButton('현재 자세 Capture');self.capture_button.setObjectName('primaryAction');self.capture_button.clicked.connect(lambda:self.send('session_snapshot'))
         self.disconnect_button=QPushButton('연결 해제');self.disconnect_button.clicked.connect(lambda:self.send('session_disconnect'))
@@ -141,10 +141,6 @@ class CapturePage(QWidget):
             if kind in('teleop_prepare','session_snapshot'):self.operation_message.clear();self.operation_message.hide()
             return self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
-    def prepare_teleoperation(self):
-        from .teleop_controls import request_limits
-        limits=request_limits(self,self.last_progress.get('motion_limits',{}))
-        if limits:self.send('teleop_prepare',limits)
     def finish(self):self.finishing=True;self.send('session_finish')
     def update_progress(self,progress):
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText(state)

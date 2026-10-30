@@ -20,7 +20,7 @@ class HardwareSession:
         self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.acquiring=None;self.acquire_deadline=0
         self.project=Project(plan.resolved_inputs['project']['root']);self.session_id=plan.output_path.name.replace('-','_')
         self.store=SnapshotStore(self.project,session_id=self.session_id,model=plan.resolved_inputs['robot_model']['path'],mapping=devices['follower'].precision_mapper.metadata())
-        settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,max_step_rad=settings.get('max_command_step_rad'),max_follow_error_rad=settings.get('max_follow_error_rad'))
+        settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,hardware=settings['device_source']=='hardware')
         self.control=TeleoperationLoop(self.teleoperation)
 
     def emit(self,**progress):
@@ -28,7 +28,7 @@ class HardwareSession:
         reason=self.teleoperation.configuration_issue()
         allowed=not self.terminal and not self.closing and self.state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE')and not pending
         self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'teleop_active':self.teleoperation.active,
-            'teleoperation_available':True,'teleoperation_reason':reason,'motion_limits':{'max_command_step_rad':self.teleoperation.max_step,'max_follow_error_rad':self.teleoperation.max_follow},'capture_request_allowed':allowed,'capture_pending':pending,'snapshots':len(self.snapshots),**progress}}})
+            'teleoperation_available':True,'teleoperation_reason':reason,'capture_request_allowed':allowed,'capture_pending':pending,'snapshots':len(self.snapshots),**progress}}})
 
     def ack(self,command,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':status,**({'reason':reason}if reason else{})}})
@@ -89,7 +89,7 @@ class HardwareSession:
             if kind in('cancel','session_disconnect','session_finish'):
                 self.cancelled=kind=='cancel';self.finished=kind=='session_finish';self.close()
             elif kind=='teleop_prepare':
-                proposal=self.control.prepare(payload)
+                proposal=self.control.prepare()
                 from .telemetry import Recorder
                 if not hasattr(self,'recorder'):self.recorder=Recorder(self.plan,self.devices['follower'])
                 self.state='TELEOP_READY';self.emit(teleop_proposal=proposal)

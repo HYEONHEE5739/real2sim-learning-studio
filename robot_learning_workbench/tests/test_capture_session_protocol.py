@@ -12,7 +12,7 @@ def session_recipe(tmp_path):
     from test_precision_calibration import INV,CURRENT
     data=dict(schema_version=1,stage='capture_session',inputs={'project':str(project.root),'device_profile':str(e/'follower-device.json'),'calibration_profile':INV['roles']['follower']['profile_path'],
         'leader_device_profile':str(e/'leader-device.json'),'leader_calibration_profile':INV['roles']['leader']['profile_path'],'camera_config':str(e/'cameras.json'),'robot_model':str(CURRENT)},
-        execution={'device_source':'memory','max_command_step_rad':.05,'max_follow_error_rad':.2},output={'directory':str(tmp_path/'session-output')})
+        execution={'device_source':'memory'},output={'directory':str(tmp_path/'session-output')})
     path=tmp_path/'session.yaml';path.write_text(yaml.safe_dump(data));return path,project,data
 
 

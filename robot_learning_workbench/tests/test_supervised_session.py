@@ -29,7 +29,7 @@ def approval(proposal):
 def controller(tmp_path):
     from robot_learning_workbench.robot.supervised import Teleoperation
     l,f,lt,ft,registers=devices(tmp_path)
-    control=Teleoperation(l,f,model_bounds={n:e['limits']for n,e in f.profile['joints'].items()},session_id='session',max_step_rad=.1,max_follow_error_rad=.5)
+    control=Teleoperation(l,f,model_bounds={n:e['limits']for n,e in f.profile['joints'].items()},session_id='session',hardware=False)
     return control,l,f,lt,ft,registers
 
 
@@ -128,14 +128,4 @@ def test_initial_feedback_outside_approved_intersection_does_not_enable_torque(t
         monkeypatch.setattr(c,'feedback',lambda:(None,interval,q));monkeypatch.setattr(c,'_target',lambda:(target,command,details,interval))
         with pytest.raises(Exception,match='bounds|range'):c.propose()
         assert not any(x.startswith('write_')for x in ft)
-    finally:l.close();f.close()
-
-
-def test_read_only_session_does_not_invent_a_motion_budget(tmp_path):
-    from robot_learning_workbench.robot.supervised import Teleoperation
-    c,l,f,lt,ft,_=controller(tmp_path)
-    try:
-        unapproved=Teleoperation(l,f,model_bounds=c.bounds,session_id='read-only',max_step_rad=None,max_follow_error_rad=None)
-        with pytest.raises(ValueError,match='budget'):unapproved.propose()
-        assert not unapproved.active and not any(x.startswith('write_')for x in ft)
     finally:l.close();f.close()

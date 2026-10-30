@@ -14,7 +14,7 @@ def test_usb_resolution_requires_unique_serial_identity_not_tty_number(tmp_path)
 def test_scene_device_binding_is_owned_and_reloads_without_old_profile_locations(tmp_path):
     from robot_learning_workbench.robot.registration import save_configuration,bind_configuration,bound_configuration
     from robot_learning_workbench.scene_preparation import create_scene
-    spec={'schema_version':1,'stage':'capture_session','inputs':{},'execution':{'device_source':'hardware','max_command_step_rad':.01,'max_follow_error_rad':.1},'output':{'directory':'new-session'}}
+    spec={'schema_version':1,'stage':'capture_session','inputs':{},'execution':{'device_source':'hardware'},'output':{'directory':'new-session'}}
     file=save_configuration(tmp_path,'my SO101',spec);p=create_scene(tmp_path,'new Scene');bind_configuration(p['project'],file,tmp_path)
     assert bound_configuration(p['project'],tmp_path)==file
     file.unlink()

@@ -26,14 +26,13 @@ class RealSimSession:
         if 'leader'in devices:
             from .calibration import joint_specs
             bounds={n:e['limits']for n,e in joint_specs(plan.resolved_inputs['robot_model']['path']).items()};settings=plan.effective_settings['execution']
-            self.teleoperation=Teleoperation(devices['leader'],self.follower,model_bounds=bounds,session_id=plan.output_path.name,max_step_rad=settings.get('max_command_step_rad'),max_follow_error_rad=settings.get('max_follow_error_rad'))
+            self.teleoperation=Teleoperation(devices['leader'],self.follower,model_bounds=bounds,session_id=plan.output_path.name,hardware=settings['device_source']=='hardware')
             self.control=TeleoperationLoop(self.teleoperation)
     def emit(self,**progress):
         busy=self.acquiring is not None or self.pending is not None or self.future is not None
         self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'device_source':self.plan.effective_settings['execution']['device_source'],
             'teleop_active':bool(self.teleoperation and self.teleoperation.active),'teleoperation_available':self.teleoperation is not None,
             'teleoperation_reason':''if self.teleoperation else'Leader/Precision 구성이 없어 관측만 가능합니다. Capture의 장치 설정에서 Leader를 선택하세요.',
-            'motion_limits':{'max_command_step_rad':self.teleoperation.max_step,'max_follow_error_rad':self.teleoperation.max_follow}if self.teleoperation else{},
             'capture_request_allowed':self.state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE')and not busy and not self.closing,'capture_pending':busy,'snapshots':len(self.snapshots),**progress}}})
     def ack(self,c,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':c['command_id'],'status':status,**({'reason':reason}if reason else{})}})
@@ -69,7 +68,7 @@ class RealSimSession:
                     if self.teleoperation is None:raise ValueError('Leader and its Precision profile are required for Teleoperation')
                     if self.state not in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE'):raise ValueError('Wait for Scene connection or Capture completion')
                     if c['kind']=='teleop_prepare':
-                        proposal=self.control.prepare(c['payload'])
+                        proposal=self.control.prepare()
                         from .telemetry import Recorder
                         if not hasattr(self,'recorder'):self.recorder=Recorder(self.plan,self.follower)
                         self.state='TELEOP_READY';self.emit(teleop_proposal=proposal)

@@ -64,7 +64,7 @@ def real_sim_setup(workspace,project,scene,engine):
     settings=(project.root/matches[0]['engine_config'][engine_key]).resolve()
     if not settings.is_relative_to(project.root):raise ValueError('Scene engine settings escaped selected Project')
     inputs.update(project=str(project.root),scene=str(scene),engine_config=str(settings))
-    recipe={'schema_version':1,'stage':'paired_session','engine':engine,'inputs':inputs,'execution':{k:v for k,v in data['execution'].items()if k in('device_source','max_command_step_rad','max_follow_error_rad')},'output':{'directory':'new-real-sim'}}
+    recipe={'schema_version':1,'stage':'paired_session','engine':engine,'inputs':inputs,'execution':{'device_source':data['execution']['device_source']},'output':{'directory':'new-real-sim'}}
     details=catalog(project.root,workspace)
     return {'project':str(project.root),'name':project.info['name'],'recipe':recipe,'snapshots':[r for r in details['snapshots']if r.get('paired')],'configuration':str(config)}
 

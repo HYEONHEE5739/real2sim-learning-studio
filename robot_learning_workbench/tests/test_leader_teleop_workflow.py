@@ -19,13 +19,13 @@ R=Path(__file__).resolve().parents[2]
 def configured_scene(tmp_path):
     path,project,data=observation_recipe(tmp_path)
     config=yaml.safe_load((R/'workbench_runs/devices/so101-pickplace-0b794e7c/capture.yaml').read_text())
-    config['execution'].update(device_source='memory',max_command_step_rad=.05,max_follow_error_rad=.2)
+    config['execution'].update(device_source='memory')
     stored=save_configuration(tmp_path,'Reviewed Leader and Follower',config)
     bind_configuration(project.root,stored,tmp_path)
     return path,project,data,config
 
 
-def test_real_sim_setup_preserves_reviewed_leader_mapping_and_motion_limits(tmp_path):
+def test_real_sim_setup_preserves_reviewed_leader_mapping(tmp_path):
     _,project,data,config=configured_scene(tmp_path)
     result=real_sim_setup(tmp_path,project.root,data['inputs']['scene'],'mujoco')['recipe']
     for name in('leader_device_profile','leader_calibration_profile'):
@@ -34,15 +34,14 @@ def test_real_sim_setup_preserves_reviewed_leader_mapping_and_motion_limits(tmp_
     assert 'candidate'not in result['inputs']
 
 
-def test_paired_recipe_prepares_leader_and_limits_without_connecting_devices(tmp_path):
+def test_paired_recipe_prepares_leader_without_connecting_devices(tmp_path):
     path,project,data,config=configured_scene(tmp_path)
     for name in('leader_device_profile','leader_calibration_profile'):data['inputs'][name]=config['inputs'][name]
     data['execution']=copy.deepcopy(config['execution']);path.write_text(yaml.safe_dump(data))
     plan=prepare_recipe(read_recipe(path))
     assert plan.resolved_inputs['leader_device_profile']['files']
     assert plan.resolved_inputs['leader_calibration_profile']['files']
-    assert plan.effective_settings['execution']['max_command_step_rad']==.05
-    assert plan.effective_settings['execution']['max_follow_error_rad']==.2
+    assert plan.effective_settings['execution']=={'device_source':'memory'}
 
 
 def test_paired_worker_accepts_current_session_teleoperation_commands(tmp_path,monkeypatch):
@@ -167,7 +166,7 @@ def test_leader_torque_is_released_only_by_explicit_session_approval(tmp_path,mo
     finally:c.stop();leader.close();follower.close()
 
 
-def test_capture_missing_limits_can_start_in_place_and_follow_leader(tmp_path):
+def test_capture_can_start_and_follow_leader(tmp_path):
     import time
     from test_capture_session_protocol import session_recipe
     from test_precision_calibration import OLD
@@ -178,7 +177,7 @@ def test_capture_missing_limits_can_start_in_place_and_follow_leader(tmp_path):
     path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD);data['execution']={'device_source':'memory'};path.write_text(yaml.safe_dump(data))
     plan=prepare_recipe(read_recipe(path));devices,cameras,bounds=construct(plan);s=HardwareSession(plan,devices,cameras,bounds,events=lambda e:None)
     try:
-        s.connect();s.command({'kind':'teleop_prepare','command_id':'limits','payload':{'max_command_step_rad':.05,'max_follow_error_rad':.2}})
+        s.connect();s.command({'kind':'teleop_prepare','command_id':'limits','payload':{}})
         assert s.teleoperation.proposal
         s.command({'kind':'teleop_start','command_id':'start','payload':approval(s.teleoperation.proposal)});assert s.teleoperation.active
         s.read_observation();before=s.history[-1]['q_measured'][0];target=dict(zip(JOINTS,s.history[-1]['q_measured']));target['shoulder_pan']+=.03

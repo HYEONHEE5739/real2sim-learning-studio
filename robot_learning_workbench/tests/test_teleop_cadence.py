@@ -35,7 +35,7 @@ def test_stop_during_leader_read_blocks_goal_before_transmission(tmp_path):
         return read()
     l.read=blocked
     try:
-        proposal=loop.prepare({});loop.start(approval(proposal));assert entered.wait(1)
+        proposal=loop.prepare();loop.start(approval(proposal));assert entered.wait(1)
         loop.stopped.set();release.set();loop.stop()
         assert not c.active and 'send'not in trace
     finally:release.set();loop.stop();l.close();f.close()
@@ -46,7 +46,7 @@ def test_undrained_command_record_queue_stops_without_silent_loss(tmp_path):
     from robot_learning_workbench.robot.teleop_loop import TeleoperationLoop
     c,l,f,_,trace,_=controller(tmp_path);loop=TeleoperationLoop(c)
     try:
-        proposal=loop.prepare({});loop.rows.extend([{'preserved':True}for _ in range(300)]);loop.start(approval(proposal))
+        proposal=loop.prepare();loop.rows.extend([{'preserved':True}for _ in range(300)]);loop.start(approval(proposal))
         deadline=time.monotonic()+1
         while loop.thread.is_alive():time.sleep(.01);assert time.monotonic()<deadline
         from types import SimpleNamespace

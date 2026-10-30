@@ -13,20 +13,15 @@ from ..data.native import digest
 
 
 class Teleoperation:
-    def __init__(self,leader,follower,*,model_bounds,session_id,max_step_rad,max_follow_error_rad):
-        for value in (max_step_rad,max_follow_error_rad):
-            if value is None:continue
-            if type(value)not in(int,float)or not np.isfinite(value)or value<=0:raise ValueError('Explicit positive command/follow budgets required')
-        self.leader=leader;self.follower=follower;self.bounds=model_bounds;self.session_id=session_id
-        self.max_step=max_step_rad;self.max_follow=max_follow_error_rad;self.active=False;self.proposal=None;self.consumed=set()
-        self.last_heartbeat_ns=time.monotonic_ns();self.last_tick_ns=None;self.last_target=None;self.last_raw_goal=None;self.sequence=0;self.last_attempt=None;self.last_activation=None;self.last_feedback=None;self.cancelled=lambda:False
+    def __init__(self,leader,follower,*,model_bounds,session_id,hardware=True):
+        self.leader=leader;self.follower=follower;self.bounds=model_bounds;self.session_id=session_id;self.hardware=hardware
+        self.active=False;self.proposal=None;self.consumed=set()
+        self.last_heartbeat_ns=time.monotonic_ns();self.last_tick_ns=None;self.last_raw_goal=None;self.sequence=0;self.last_attempt=None;self.last_activation=None;self.last_feedback=None;self.cancelled=lambda:False
 
     def heartbeat(self):self.last_heartbeat_ns=time.monotonic_ns()
 
     def configuration_issue(self):
-        if self.max_step is None or self.max_follow is None:
-            return 'Teleoperation 시작에서 목표 변화·추종 오차 제한을 설정하세요. YAML 편집이나 재연결은 필요하지 않습니다.'
-        return ''
+        return 'ARM_CONTROL_SPEC_UNVERIFIED: 급격한 명령 변화·추종 실패 판정에 필요한 장치 제어 사양이 검증되지 않아 실물 구동을 허용하지 않습니다. 관측/Capture/Precision 측정은 가능합니다.'if self.hardware else''
 
     def feedback(self):
         native,interval=self.follower.read();q=observed_positions(self.follower.precision_mapper,native,raw=self.follower.last_raw,motor_specs=self.follower.motor_specs)
@@ -51,27 +46,22 @@ class Teleoperation:
         target,_,details,leader_interval=self._target()
         bounds=np.asarray(details['bounds_rad'])
         if np.any(q<bounds[:,0])or np.any(q>bounds[:,1]):raise DeviceError('teleop_preflight','Actual initial feedback outside approved model/motor bounds',effect='not_applied')
-        if np.max(abs(target-q))>self.max_step:raise DeviceError('teleop_preflight','Leader initial target is too far from Follower feedback',effect='not_applied')
-        return dict(raw=raw,goal=goal,mode=mode,torque=torque,leader_torque=leader_torque,feedback_end_ns=interval['end']['monotonic_ns'],leader_end_ns=leader_interval['end']['monotonic_ns'],measured_model_rad=q.tolist(),initial_target_rad=target.tolist(),bounds_rad=details['bounds_rad'],
+        target_raw={n:self.follower.last_encoded_goal_raw[self.follower.bus.motors[n].id]for n in JOINTS}
+        if any(abs(target_raw[n]-raw[n])>1 for n in JOINTS):raise DeviceError('teleop_preflight','Leader/Follower initial poses differ at SDK encoder resolution; align poses before approval',effect='not_applied')
+        return dict(raw=raw,initial_target_raw=target_raw,goal=goal,mode=mode,torque=torque,leader_torque=leader_torque,feedback_end_ns=interval['end']['monotonic_ns'],leader_end_ns=leader_interval['end']['monotonic_ns'],measured_model_rad=q.tolist(),initial_target_rad=target.tolist(),bounds_rad=details['bounds_rad'],
                     follower_identity=self.follower.identity,leader_identity=self.leader.identity,follower_mapping=self.follower.precision_mapper.metadata()['sha256'],leader_mapping=self.leader.precision_mapper.metadata()['sha256'])
 
     def propose(self):
-        if self.configuration_issue():raise ValueError('Explicit reviewed command/follow budget required before motion; observation needs none')
+        if self.configuration_issue():raise DeviceError('teleop_preflight',self.configuration_issue(),effect='not_applied')
         if self.active:raise ValueError('Teleoperation already active')
         state=self._start_state();now=time.monotonic_ns()
         self.proposal={'session_id':self.session_id,'nonce':uuid.uuid4().hex,'state':state,'expires_ns':now+30_000_000_000,
-                       'max_step_rad':self.max_step,'max_follow_error_rad':self.max_follow,'stop_policy':'preserve_torque_no_new_goal',
+                       'stop_policy':'preserve_torque_no_new_goal',
                        'authorization':'supervised_leader_teleoperation_only',
                        'initialize_goal':{n:state['raw'][n]for n in JOINTS if not state['torque'][n]},
                        'release_leader_torque':[n for n in JOINTS if state['leader_torque'][n]],
                        'physical_verified':False}
         self.proposal['sha256']=digest(self.proposal);return self.proposal.copy()
-
-    def configure(self,max_step_rad,max_follow_error_rad):
-        if self.active:raise ValueError('Stop Teleoperation before changing motion limits')
-        for value in(max_step_rad,max_follow_error_rad):
-            if type(value)not in(int,float)or not np.isfinite(value)or value<=0:raise ValueError('Explicit positive command/follow budgets required')
-        self.max_step=max_step_rad;self.max_follow=max_follow_error_rad;self.proposal=None
 
     def _activation_feedback(self,approved):
         _,interval,q=self.feedback();raw=dict(self.follower.last_raw);bounds=np.asarray(approved['bounds_rad'])
@@ -90,7 +80,7 @@ class Teleoperation:
         current=self._start_state();original=p['state']
         fixed=('goal','mode','torque','leader_torque','bounds_rad','follower_identity','leader_identity','follower_mapping','leader_mapping')
         if any(digest(current[k])!=digest(original[k])for k in fixed)or any(abs(current['raw'][n]-original['raw'][n])>1 for n in JOINTS):raise ValueError('Feedback/Goal/Calibration changed; fresh approval required')
-        if np.max(abs(np.array(current['initial_target_rad'])-original['initial_target_rad']))>self.max_step:raise ValueError('Leader changed; fresh approval required')
+        if any(abs(current['initial_target_raw'][n]-original['initial_target_raw'][n])>1 for n in JOINTS):raise ValueError('Leader changed; fresh approval required')
         self.consumed.add(key);self.proposal=None
         self.last_activation={'proposal_sha256':key,'goal_initialized':False,'leader_torque_released':False,'follower_torque_enabled':False,'effect':'not_applied','state':current}
         try:
@@ -127,7 +117,7 @@ class Teleoperation:
                 if any(v!=1 for v in self.follower.bus.sync_read('Torque_Enable',normalize=False).values()):raise ValueError('Torque activation readback differs')
                 self.last_activation['follower_torque_enabled']=True
             if time.monotonic_ns()-begin>200_000_000:raise ValueError('Torque activation deadline exceeded; no Goal commands')
-            self.last_target=np.array(current['measured_model_rad']);self.last_raw_goal={self.follower.bus.motors[n].id:(current['raw'][n]if n in p['initialize_goal']else current['goal'][n])for n in JOINTS};self.last_tick_ns=time.monotonic_ns();self.heartbeat();self.active=True
+            self.last_raw_goal={self.follower.bus.motors[n].id:(current['raw'][n]if n in p['initialize_goal']else current['goal'][n])for n in JOINTS};self.last_tick_ns=time.monotonic_ns();self.heartbeat();self.active=True
             self.last_activation['effect']='sdk_returned'
         except Exception as error:
             self.last_activation['error']=str(error);self.stop();raise DeviceError('teleop_activate',str(error),effect=self.last_activation['effect'])from error
@@ -143,8 +133,6 @@ class Teleoperation:
             if now-self.last_heartbeat_ns>1_500_000_000 or now-self.last_tick_ns>200_000_000:raise ValueError('Stale session heartbeat/control cycle')
             self.leader._check_identity();self.follower._check_identity()
             _,feedback,q=self.feedback();target,command,details,leader_interval=self._target()
-            if np.max(abs(target-self.last_target))>self.max_step:raise ValueError('Previous applied target jump exceeds approved budget')
-            if np.max(abs(q-self.last_target))>self.max_follow:raise ValueError('Follower tracking error exceeds approved budget')
             begin=time.monotonic_ns()
             if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:raise ValueError('Stale feedback/Leader command')
             raw=dict(self.follower.last_encoded_goal_raw);duplicate=raw==self.last_raw_goal
@@ -158,7 +146,7 @@ class Teleoperation:
                 if returned!={n+'.pos':command[n]for n in JOINTS}:raise ValueError('SDK changed the preflighted target')
             end=time.monotonic_ns();attempt.update(send_end_ns=end,send_latency_s=(end-begin)/1e9,command_sent=not duplicate,effect='sdk_returned'if not duplicate else'not_applied')
             if end-now>200_000_000:raise ValueError('Control/send deadline exceeded; no further goals')
-            self.last_tick_ns=end;self.sequence+=1;self.last_target=target;self.last_raw_goal=raw
+            self.last_tick_ns=end;self.sequence+=1;self.last_raw_goal=raw
             return dict(sequence=self.sequence,timestamp_ns=feedback['end']['monotonic_ns'],measured_model_rad=q.tolist(),requested_model_rad=details['requested_model_rad'],
                         applied_model_rad=target.tolist(),saturation=details['saturation'],sdk_goal_raw=raw,command_sent=not duplicate,duplicate_suppressed=duplicate,
                         feedback_interval=feedback,leader_interval=leader_interval,send_latency_s=(end-begin)/1e9,follow_error_rad=(q-target).tolist())
