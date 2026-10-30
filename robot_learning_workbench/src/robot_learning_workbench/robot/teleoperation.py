@@ -89,10 +89,13 @@ def fake_device(spec: dict, profile: dict, *, initial_model_q: dict|None=None) -
     def disconnect(disable_torque=True):bus.is_connected=False
     def read(name,normalize=False):return dict(present if name=='Present_Position'else goal if name=='Goal_Position'else registers[name])
     def write(name,packet,normalize=False,**kwargs):(goal if name=='Goal_Position'else registers[name]).update(packet)
+    def read_one(name,joint,normalize=False):
+        raw=read(name)[joint]
+        return bus._normalize({motors[joint].id:raw})[motors[joint].id]if normalize else raw
     def send(packet):
         normalized={motors[n].id:packet[n+'.pos']for n in JOINTS};encoded=bus._unnormalize(normalized)
         present.update({n:encoded[m.id]for n,m in motors.items()});goal.update(present);return packet
-    bus.connect=connect;bus.disconnect=disconnect;bus.sync_read=read;bus.sync_write=write;bus.disable_torque=lambda:None;bus.port_handler=NS(closePort=disconnect)
+    bus.connect=connect;bus.disconnect=disconnect;bus.sync_read=read;bus.read=read_one;bus.sync_write=write;bus.disable_torque=lambda:None;bus.port_handler=NS(closePort=disconnect)
     sdk=NS(id=spec['sdk']['id'],bus=bus,is_calibrated=True,action_features={n+'.pos':float for n in JOINTS},configure=lambda:None,send_action=send)
     cls=Leader if spec['role']=='leader'else Follower
     return cls(sdk,profile=profile,calibration_path=spec['calibration_path'],identity=profile['identity'],model_hash=profile['urdf_sha256'])

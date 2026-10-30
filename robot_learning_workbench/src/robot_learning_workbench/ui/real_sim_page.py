@@ -2,6 +2,7 @@
 from pathlib import Path
 import time,uuid,yaml
 from PyQt6.QtGui import QImage,QPixmap
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit
 from .jobs import BackendJob
 from .session_client import SessionClient
@@ -15,7 +16,7 @@ class RealSimPage(QWidget):
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         box=QVBoxLayout(self);title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');box.addWidget(title)
-        hint=QLabel('연결 후 현장 승인하면 Leader가 실제 Follower를 제어하고, Follower 측정 자세를 Sim에 반영합니다.');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('Follower 측정 자세로 Real/Sim 영상을 비교합니다. 실물 Teleoperation은 장치 제어 사양 미검증으로 차단됩니다.');hint.setWordWrap(True);box.addWidget(hint)
         selection=QHBoxLayout();box.addLayout(selection);selection.addWidget(QLabel('Scene'));self.scene_combo=QComboBox();selection.addWidget(self.scene_combo,1)
         selection.addWidget(QLabel('Simulation'));self.engine=QComboBox();self.engine.addItem('MuJoCo','mujoco');self.engine.addItem('Isaac Lab','isaaclab');selection.addWidget(self.engine)
         self.scene_combo.currentIndexChanged.connect(self.load_selected);self.engine.currentIndexChanged.connect(self.load_selected)
@@ -34,11 +35,22 @@ class RealSimPage(QWidget):
         box.addWidget(QLabel('Paired Capture · Real Side / Sim Side / Real Wrist / Sim Wrist'))
         self.snapshot_table=SnapshotTable(paired=True,parent=self);self.snapshot_table.error.connect(self.show_error);box.addWidget(self.snapshot_table,1)
         self.log=QPlainTextEdit();self.log.hide();box.addWidget(self.log);self.buttons()
-        if any((self.workspace/'scenes').glob('*/project.yaml')):self.job.start('session_execution_scenes',workspace=str(self.workspace))
+        self.catalog_signature=None;self.catalog_timer=QTimer(self);self.catalog_timer.setInterval(1500);self.catalog_timer.timeout.connect(self.refresh_scenes);self.catalog_timer.start()
+        self.refresh_scenes()
     @property
     def rows(self):return self.snapshot_table.rows
     def active(self):return self.client.active()
-    def stop_timers(self):self.client.timer.stop()
+    def stop_timers(self):self.client.timer.stop();self.catalog_timer.stop()
+    def refresh_scenes(self,force=False):
+        from PyQt6.QtCore import QProcess
+        if self.active()or self.job.process.state()!=QProcess.ProcessState.NotRunning:return
+        signature=tuple((str(p),p.stat().st_mtime_ns,p.stat().st_size)for p in sorted((self.workspace/'scenes').glob('*/project.yaml')))
+        if not force and signature==self.catalog_signature:return
+        self.catalog_signature=signature
+        if signature or self.scene_combo.count():self.job.start('session_execution_scenes',workspace=str(self.workspace))
+    def showEvent(self,event):
+        super().showEvent(event)
+        if hasattr(self,'catalog_timer'):self.refresh_scenes(force=True)
     def buttons(self):
         from PyQt6.QtCore import QProcess
         idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
@@ -50,13 +62,25 @@ class RealSimPage(QWidget):
     def load_selected(self):
         if self.active():return
         self.template=None;self.project=None;self.last_progress={};self.snapshot_table.reset();self.buttons();row=self.scene_combo.currentData()
-        if row:self.job.start('session_real_setup',workspace=str(self.workspace),project=row['project'],scene=row['scene'],engine=self.engine.currentData())
+        if row:
+            allowed=row.get('engines',[])
+            self.engine.blockSignals(True)
+            for i in range(self.engine.count()):self.engine.model().item(i).setEnabled(('isaac'if self.engine.itemData(i)=='isaaclab'else self.engine.itemData(i))in allowed)
+            if ('isaac'if self.engine.currentData()=='isaaclab'else self.engine.currentData())not in allowed:
+                self.engine.setCurrentIndex(next((i for i in range(self.engine.count())if self.engine.model().item(i).isEnabled()),-1))
+            self.engine.blockSignals(False)
+            if self.engine.currentIndex()<0:self.capture_hint.setText('등록된 엔진 설정이 없습니다.');return
+            self.job.start('session_real_setup',workspace=str(self.workspace),project=row['project'],scene=row['scene'],engine=self.engine.currentData())
     def loaded(self,response):
         if not response.get('ok'):self.show_error(response.get('error',{}).get('message','Scene 설정 오류'));self.buttons();return
         result=response['result']
         if 'scenes'in result:
+            selected=self.scene_combo.currentData();selected=selected['scene']if selected else None
             self.scene_combo.blockSignals(True);self.scene_combo.clear()
-            for row in result['scenes']:self.scene_combo.addItem(row['name']+' · '+row['revision'],row)
+            for row in result['scenes']:self.scene_combo.addItem(row['name']+' · '+row['revision']+' · '+row['project_id']+' / '+', '.join(row['engines']),row)
+            if selected:
+                for i in range(self.scene_combo.count()):
+                    if self.scene_combo.itemData(i)['scene']==selected:self.scene_combo.setCurrentIndex(i);break
             self.scene_combo.blockSignals(False)
             if self.scene_combo.currentData():self.load_selected()
             else:self.capture_hint.setText('등록된 실행 Scene이 없습니다. Builder에서 Scene Package를 준비하세요.')

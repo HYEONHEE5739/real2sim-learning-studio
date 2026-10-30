@@ -85,8 +85,6 @@ class WorkflowPage(QWidget):
             for key in (('gripper_target_rad','max_gripper_delta_raw')if stage=='teleoperation'else('max_gripper_delta_raw',)):
                 line=QLineEdit();line.setPlaceholderText('동작 기본값 없음');line.editingFinished.connect(lambda k=key,w=line:self.edit_gripper_parameter(k,w.text()));self.gripper_fields[key]=line
                 field(self.advanced_form,'Gripper 목표 (rad)'if key.endswith('_rad')else'승인된 Gripper 변위 상한 (encoder count)',line)
-        if stage=='precision_calibration':
-            review=QPushButton('기존 근거 재검토 → 새 Profile Revision');review.clicked.connect(self.review_precision);self.form.addWidget(review)
         self.task_info=QLabel();self.task_info.setWordWrap(True);self.advanced_form.addWidget(self.task_info)
         self.advanced_form.addWidget(self.editor)
         if stage=='train':
@@ -144,7 +142,6 @@ class WorkflowPage(QWidget):
             self.viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus);self.shortcuts=[]
             for key,kind in [('Right','save'),('Left','discard')]:
                 shortcut=QShortcut(QKeySequence(key),self.viewer);shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut);shortcut.setAutoRepeat(False);shortcut.activated.connect(lambda k=kind:self.commands[k].click()if self.commands[k].isEnabled()else None);self.shortcuts.append(shortcut)
-        if stage=='precision_calibration':self.build_observation_view(box,outer)
         support=stage_support(stage)
         self.mode.currentTextChanged.connect(self.sync_input_visibility);self.sync_input_visibility()
         if self.source_kind is not None:self.change_source_kind(self.source_kind.currentIndex())
@@ -156,41 +153,9 @@ class WorkflowPage(QWidget):
         if self.stage=='source':
             show=self.counts['env_num'].value()>1;self.preview_env_label.setVisible(show);self.preview_env.setVisible(show)
 
-    def build_observation_view(self,box,outer):
-        # Original real2sim.ui: cameras above actions, shared bottom log.
-        box.removeWidget(self.action_card);box.addWidget(self.action_card)
-        self.readiness=QLabel('최근 완료 관측 없음 · 실물 팔 Goal/Torque 금지');self.readiness.setWordWrap(True);box.addWidget(self.readiness)
-        self.log_card.setMaximumHeight(140);outer.addWidget(self.log_card)
-        if self.stage=='precision_calibration':
-            from ..robot.calibration import JOINTS
-            self.precision_names=JOINTS;self.precision_joint=QComboBox();self.precision_joint.addItems(JOINTS);box.insertWidget(0,self.precision_joint)
-            self.applied_angle=QLabel('최근 완료 측정 없음');self.applied_angle.setWordWrap(True);self.applied_angle.setStyleSheet('font-size:22px; font-weight:bold; padding:8px;');box.insertWidget(1,self.applied_angle)
-            self.precision_table=QTableWidget(6,4);self.precision_table.setHorizontalHeaderLabels(['관절','Raw','Native','Model rad']);self.precision_table.setMaximumHeight(210);self.precision_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers);box.insertWidget(2,self.precision_table)
-            for row,name in enumerate(JOINTS):
-                for col,value in enumerate((name,'—','—','—')):self.precision_table.setItem(row,col,QTableWidgetItem(value))
-            self.reference_table=QTableWidget(0,6);self.reference_table.setHorizontalHeaderLabels(['관절','Raw','기준각 rad','Split','근거','Reference ID']);self.reference_table.setMaximumHeight(180);self.reference_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers);box.insertWidget(3,self.reference_table)
-            inspect=QPushButton('기존 Profile 근거 보기 · 새 물리 보정 아님');inspect.clicked.connect(self.inspect_precision_profile);box.insertWidget(4,inspect)
-            self.precision_joint.currentTextChanged.connect(self.show_measured_joint)
-
-    def inspect_precision_profile(self):
-        if self.editor.path is None or self.busy:return
-        path=self.editor.path.parent/self.inputs['calibration_profile'].text()
-        self.operation='precision_profile';self.busy=True;self.job.start('precision_profile',path=str(path.resolve()))
-
-    def show_measured_joint(self,*_):
-        row=self.precision_joint.currentIndex()
-        value=self.precision_table.item(row,3).text();self.applied_angle.setText(self.precision_joint.currentText()+' · '+value+' model rad · 최근 완료 측정')
-
     def display_hardware_result(self,data):
         if hasattr(self,'readiness'):
             self.readiness.setText('최근 Run '+str(data.get('status'))+' · 측정 '+str(data.get('frames',0))+' frame · command_sent='+str(data.get('command_sent',False)))
-        if self.stage=='precision_calibration':
-            last=data.get('last_observation',{});names=last.get('joint_order',[]);q=last.get('q_measured',[])
-            for row,name in enumerate(self.precision_names):
-                values=[last.get('raw',{}).get(name,'—'),last.get('native',{}).get(name,'—'),q[names.index(name)]if name in names and len(q)==len(names)else'—']
-                for col,value in enumerate(values,1):self.precision_table.setItem(row,col,QTableWidgetItem(str(value)))
-            self.show_measured_joint()
-
     def show_loss(self):
         if self.stage!='train':return
         if not hasattr(self,'loss_dialog'):
@@ -404,12 +369,6 @@ class WorkflowPage(QWidget):
         h=self.handle
         receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),{'command_id':uuid.uuid4().hex,'kind':'gripper_approve','payload':{'proposal_sha256':fingerprint(proposal),'target_raw':proposal['target_raw'],'supervised':True,'clear':True,'stop_ready':True}})
         self.gripper_button.setEnabled(False);self.log.appendPlainText('Gripper 승인 요청 '+receipt.status+' · 실제 ACK/feedback 확인 필요')
-    def review_precision(self):
-        if self.editor.path is None or self.active():return
-        source=(self.editor.path.parent/self.inputs['calibration_profile'].text()).resolve()
-        output,_=QFileDialog.getSaveFileName(self,'새 검토 Revision (독립 실측 검증 아님)',str(self.workspace/'evaluation'/'profile-review.json'),'JSON (*.json)')
-        if output:
-            self.operation='precision_revision';self.busy=True;self.job.start('precision_revision',source=str(source),output=output)
     def check_recipe(self):
         if self.busy:self.state.setText('현재 입력 작업 종료를 기다리세요');return
         if self.edit_error:self.state.setText('화면 편집 오류를 수정하거나 저장 Recipe를 다시 여세요');return
@@ -447,14 +406,6 @@ class WorkflowPage(QWidget):
                 self.ready=None;self.start_button.setEnabled(False);self.recipe_status.setText('검사 중 편집됨 · 저장하고 다시 검사하세요');return
             self.ready=data if data['runnable'] and data['state']=='runtime_ready' else None
             self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None);self.recipe_status.setText('저장 입력 검사 통과'if self.ready else'검사 완료 · 실행 차단')
-        elif self.operation=='precision_revision':
-            self.state.setText('새 검토 Revision · '+data['path']+' · physical_verified=false');self.log.appendPlainText(json.dumps(data,ensure_ascii=False))
-        elif self.operation=='precision_profile':
-            if hasattr(self,'reference_table'):
-                self.reference_table.setRowCount(len(data['references']))
-                for row,reference in enumerate(data['references']):
-                    for col,key in enumerate(('joint','raw','angle_rad','split','evidence','reference_id')):self.reference_table.setItem(row,col,QTableWidgetItem(str(reference.get(key))))
-                self.readiness.setText('보존 '+data['role']+' Profile · '+data['source_sha256'][:12]+' · physical_verified='+str(data['physical_verified'])+' · 독립 각도 측정 미수행')
         elif self.operation=='terminal_hardware':
             self.dataset_state='실물 결과 재개방 확인 · 측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)));self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
             self.display_hardware_result(data)

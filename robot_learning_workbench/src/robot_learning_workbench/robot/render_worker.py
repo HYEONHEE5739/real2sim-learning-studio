@@ -6,7 +6,7 @@ from ..data.native import atomic_json,file_sha256
 
 
 def run(root):
-    from .scene_render import SceneView,NativeRenderer
+    from .scene_render import SceneView,create_renderer
     root=Path(root);config=json.loads((root/'config.json').read_text());launcher=None;seen={};generation=0
     try:
         if config['engine']=='isaac':
@@ -14,7 +14,7 @@ def run(root):
             launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
         view=SceneView(config['scene'],config['engine'],config['settings'],config['mapping'])
         if view.identity!=config['identity']:raise ValueError('Scene changed before render child startup')
-        with NativeRenderer(view,root/'runtime')as renderer:
+        with create_renderer(view,root/'runtime')as renderer:
             atomic_json(root/'ready.json',{'ready':True,'identity':view.identity})
             while not(root/'stop').exists():
                 request=None;capture=False

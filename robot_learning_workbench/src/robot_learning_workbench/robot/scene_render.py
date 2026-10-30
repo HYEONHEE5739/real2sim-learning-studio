@@ -14,16 +14,22 @@ class SceneView:
         self.path=Path(scene).resolve();self.engine=engine;self.settings_path=Path(settings).resolve();self.mapping=copy.deepcopy(mapping)
         self.package=load_scene(self.path);self.scene_identity=asdict(self.package.identity)
         if engine not in self.package.scene['engines']:raise ValueError('Selected Scene does not declare this engine')
+        self.settings_sha256=file_sha256(self.settings_path);self.settings=json.loads(self.settings_path.read_text());self.settings.pop('package_root',None)
+        self.render_type=self.settings.pop('render_type','native')
+        if self.render_type not in('native','authored'):raise ValueError('Unsupported Scene render settings')
         matches=[]
         for name,record in self.package.calibration['records'].items():
             if record['kind']!='encoder_mapping'or record['application'].get('phase')!='device_observation':continue
             parameters=json.loads((self.package.root/record['parameters_file']).read_text())if 'parameters_file'in record else record['parameters']
             profile=parameters.get('profile',parameters)
             if profile.get('role')=='follower':matches.append(name)
-        if len(matches)!=1:raise ValueError('Scene requires one unambiguous Follower observation Calibration')
-        expected=mapper_from_scene(self.package,matches[0],role='follower',phase='device_observation').metadata()
-        if not mapping_coordinates_equal(expected,self.mapping):raise ValueError('Follower measured coordinates differ from selected Scene Calibration')
-        self.settings_sha256=file_sha256(self.settings_path);self.settings=json.loads(self.settings_path.read_text());self.settings.pop('package_root',None)
+        if self.render_type=='native'or matches:
+            if len(matches)!=1:raise ValueError('Scene requires one unambiguous Follower observation Calibration')
+            expected=mapper_from_scene(self.package,matches[0],role='follower',phase='device_observation').metadata()
+            if not mapping_coordinates_equal(expected,self.mapping):raise ValueError('Follower measured coordinates differ from selected Scene Calibration')
+        if self.render_type=='authored':
+            from .authored_render import validate_binding
+            validate_binding(self)
         self.watched=[self.path,self.package.root/'manifest.json',self.settings_path,*[self.package.root/f.path for f in self.package.files]]
         self.stats=self._stats();self.identity={'scene':self.scene_identity,'settings_sha256':self.settings_sha256,'mapping_sha256':mapping['sha256'],'engine':engine}
     def _stats(self):return [(str(p),p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns)for p in self.watched]
@@ -84,3 +90,10 @@ class NativeRenderer:
         if self.env is not None:self.env.close();self.env=None
     def __enter__(self):return self
     def __exit__(self,*_):self.close()
+
+
+def create_renderer(view,directory):
+    if view.render_type=='authored':
+        from .authored_render import AuthoredRenderer
+        return AuthoredRenderer(view,directory)
+    return NativeRenderer(view,directory)

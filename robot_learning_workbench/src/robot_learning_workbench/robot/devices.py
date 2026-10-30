@@ -307,11 +307,11 @@ def send_gripper_once(follower: Follower, proposal: dict, *, approved: bool=Fals
 
 class CalibrationDevice:
     """Exclusive read-only reference collection; approved joint release is explicit."""
-    def __init__(self, device, *, role, identity, calibration_path):
+    def __init__(self, device, *, role, identity, calibration_path, kernel_exclusive=True):
         if role not in ('leader','follower'): raise ValueError('Unknown calibration role')
         self.device=device; self.bus=device.bus; self.role=role
         self.identity=copy.deepcopy(identity);self.calibration_path=Path(calibration_path)
-        self.exclusive=False;self._closed=False;self.cleanup=None
+        self.exclusive=False;self._closed=False;self.cleanup=None;self.kernel_exclusive=kernel_exclusive
 
     def unchanged(self):
         motors={n:{'id':m.id,'model':m.model} for n,m in self.bus.motors.items()}
@@ -325,7 +325,8 @@ class CalibrationDevice:
         try:
             import fcntl,termios
             self.bus.connect()
-            fcntl.ioctl(self.bus.port_handler.ser.fileno(),termios.TIOCEXCL);self.exclusive=True
+            if self.kernel_exclusive:fcntl.ioctl(self.bus.port_handler.ser.fileno(),termios.TIOCEXCL)
+            self.exclusive=True
             if not self.unchanged(): raise ValueError('Device/calibration identity mismatch')
         except BaseException as exc:
             try:self.close()
@@ -365,7 +366,7 @@ class CalibrationDevice:
         if self._closed:return self.cleanup
         errors=[]
         try:
-            if self.exclusive:
+            if self.exclusive and self.kernel_exclusive:
                 import fcntl,termios
                 fcntl.ioctl(self.bus.port_handler.ser.fileno(),termios.TIOCNXCL)
         except BaseException as exc:errors.append(str(exc))

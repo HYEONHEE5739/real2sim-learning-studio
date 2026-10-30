@@ -60,7 +60,7 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
         return gripper_trial(plan,events=events,commands=commands)
     if opts.get('enable_motion') or mode not in ('observe_only','live_capture'):
         raise DataError('ARM_MOTION_NOT_APPROVED','execution','ARM_MOTION_NOT_APPROVED: live workers collect observations only')
-    if plan.stage not in('capture','precision_calibration','real_evaluation'):raise ValueError('Live Real/Sim uses paired_session; real_sim is offline inspection only')
+    if plan.stage not in('capture','real_evaluation'):raise ValueError('Live Real/Sim uses paired_session; real_sim is offline inspection only')
     verify_prepared_inputs(plan)
     frames=opts.get('max_frames',1)
     if type(frames)is not int or not 1<=frames<=300:raise ValueError('Explicit bounded max_frames in 1..300 required')
@@ -141,11 +141,6 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
                 metadata.update(scene_identity=_plain(plan.scene_identity),calibration_sha256=digest(_plain(plan.scene.calibration)))
             save_session(plan.output_path,model=model,mapping=device.precision_mapper.metadata(),samples=rows,images=images,metadata=metadata,scene=plan.scene)
         else:plan.output_path.mkdir()
-        if plan.stage=='precision_calibration':
-            from .calibration import review_joint
-            report['precision']={'joint_reviews':{n:review_joint(e)['review']for n,e in device.profile['joints'].items()},
-                'status':'PARTIAL','reason':'Existing reference fit reviewed; current static feedback is not a new independent angle reference',
-                'new_calibration_saved':False,'motor_specs':device.motor_specs}
         atomic_json(plan.output_path/'hardware-report.json',report)
         return StageResult('cancelled'if cancelled else 'completed',(str(plan.output_path),),0,{'frames':len(rows),'arm_commands':0,'command_sent':False})
     except Exception as error:

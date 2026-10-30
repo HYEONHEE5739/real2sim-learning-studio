@@ -41,8 +41,13 @@ def execution_scenes(workspace):
         project=Project(item['project'],read_only=True);registered=project.info.get('execution_packages',[])
         for record in registered:
             scene=(project.root/record['path']/'scene.json').resolve()
-            if not scene.is_relative_to(project.root)or not scene.is_file():continue
-            rows.append({'name':item['name'],'revision':record['revision'],'project':item['project'],'scene':str(scene)})
+            try:
+                from scene_contract.package import SceneIdentity
+                from real2sim_builder.export import verify_package
+                package=verify_package(scene.parent)
+                if package.identity!=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']):continue
+            except (ValueError,OSError):continue
+            rows.append({'name':item['name'],'revision':record['revision'],'project':item['project'],'project_id':project.info['id'],'scene_id':record['scene_id'],'scene':str(scene),'engines':sorted(set(record.get('engine_config',{}))&set(package.scene['engines']))})
     return {'scenes':rows}
 
 

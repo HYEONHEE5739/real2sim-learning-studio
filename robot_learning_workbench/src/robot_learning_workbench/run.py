@@ -295,6 +295,8 @@ _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear
 _SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':set(),'teleop_stop':set(),
                    'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque','initialize_goal'},'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
+_PRECISION_COMMANDS={'precision_select':{'joint'},'precision_record':{'joint','angle_rad','split'},'precision_fit':{'joint'},'precision_review':{'joint','tolerance_deg','independent'},'precision_save':set(),'precision_activate':{'path','approved'},'precision_remove':{'reference_id'}}
+_COMMANDS.update(_PRECISION_COMMANDS)
 _COMMANDS['calibration_response']={'prompt_id','response'}
 
 
@@ -305,6 +307,17 @@ def _command(command):
     if kind=='calibration_response'and(set(payload)!={'prompt_id','response'}or not all(isinstance(payload[k],str)for k in payload)):_fail('PROTOCOL_INVALID',kind,'current prompt ID and text response required')
     if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
     if kind=='session_import':_identifier(payload['snapshot_id'])
+    if kind in _PRECISION_COMMANDS:
+        import math
+        from .robot.calibration import JOINTS
+        if set(payload)!=_PRECISION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact Precision command fields required')
+        if 'joint'in payload and payload['joint']not in JOINTS:_fail('PROTOCOL_INVALID',kind,'named joint required')
+        for name in('angle_rad','tolerance_deg'):
+            if name in payload and(type(payload[name])not in(int,float)or not math.isfinite(payload[name])):_fail('PROTOCOL_INVALID',kind,'finite numeric angle/tolerance required')
+        if kind=='precision_record'and payload['split']not in('train','validation'):_fail('PROTOCOL_INVALID',kind,'train/validation reference required')
+        if kind=='precision_review'and(type(payload['independent'])is not bool or not 0<payload['tolerance_deg']<=5):_fail('PROTOCOL_INVALID',kind,'review kind and valid degree tolerance required')
+        if kind=='precision_activate'and(not isinstance(payload['path'],str)or type(payload['approved'])is not bool):_fail('PROTOCOL_INVALID',kind,'saved path and explicit approval required')
+        if kind=='precision_remove':_identifier(payload['reference_id'])
     if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
     if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')
     if kind=='step' and (type(payload.get('count')) is not int or not 1<=payload['count']<=1000):_fail('PROTOCOL_INVALID','step.count','expected 1..1000')
@@ -340,7 +353,7 @@ def send_command(handle,command):
 def touch_session(handle,timestamp_ns):
     """Latest UI liveness only. User commands still use durable ACK transactions."""
     root=Path(handle.run_dir);record=_read(root/'run.json')
-    if type(timestamp_ns)is not int or timestamp_ns<=0 or handle.run_id!=root.name or handle.request_id!=record.get('request_id') or record.get('stage')not in('scene_capture','capture_session','paired_session'):
+    if type(timestamp_ns)is not int or timestamp_ns<=0 or handle.run_id!=root.name or handle.request_id!=record.get('request_id') or record.get('stage')not in('scene_capture','capture_session','paired_session','precision_session'):
         _fail('PROTOCOL_INVALID','heartbeat','Current session handle and monotonic timestamp required')
     _atomic(root/'session-heartbeat.json',{'run_id':handle.run_id,'timestamp_ns':timestamp_ns})
 
@@ -357,6 +370,7 @@ def _poll_commands(root,state,stage):
     rows.sort(key=lambda row:row['seq']);out=[]
     allowed={'cancel'}|({'pause','resume','step'} if stage in ('source','annotation','datagen','simulation_evaluation','real_sim') else set())|({'mark','skip'} if stage=='annotation' else set())|({'save','discard'} if stage=='source' else set())
     if stage in('scene_capture','capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
+    if stage=='precision_session':allowed|=set(_PRECISION_COMMANDS)|{'session_disconnect','session_finish'}
     if stage=='sdk_calibration':allowed.add('calibration_response')
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')
@@ -372,7 +386,7 @@ def _poll_commands(root,state,stage):
         if reason:_ack(root,state,cid,'rejected',reason=reason);continue
         _ack(root,state,cid,'accepted');out.append(command)
         if command['kind']=='cancel':_append_event(root,state,'status',{'status':'running','phase':'stopping'})
-    if stage in('scene_capture','capture_session','paired_session')and(root/'session-heartbeat.json').is_file():
+    if stage in('scene_capture','capture_session','paired_session','precision_session')and(root/'session-heartbeat.json').is_file():
         heartbeat=_read(root/'session-heartbeat.json')
         if heartbeat.get('run_id')!=root.name or type(heartbeat.get('timestamp_ns'))is not int:_fail('PROTOCOL_INVALID','heartbeat','Invalid session liveness')
         out.append({'kind':'session_heartbeat','command_id':'liveness','payload':{'timestamp_ns':heartbeat['timestamp_ns']}})
@@ -412,6 +426,7 @@ def _run_stage(plan,*,events,commands):
     elif plan.stage=='scene_capture':module='robot.scene_observation';function='run'
     elif plan.stage=='sdk_calibration':module='robot.sdk_calibration';function='run'
     elif plan.stage=='capture_session':module='robot.session';function='run'
+    elif plan.stage=='precision_session':module='robot.precision';function='run'
     elif plan.stage in ('capture','precision_calibration','real_evaluation','real_sim'):
         module='robot.offline' if plan.effective_settings['execution'].get('mode')=='offline' else 'robot.teleoperation' if plan.effective_settings['execution'].get('mode')=='fake_all' else 'robot.live';function='run'
     elif plan.stage=='teleoperation':module='robot.teleoperation';function='run'

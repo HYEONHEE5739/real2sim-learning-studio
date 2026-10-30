@@ -5,6 +5,7 @@ import sys
 
 
 def stage_support(stage: str) -> dict:
+    if stage=='precision_session':return {'runnable':True,'reason':'수동 기준 자세 Raw 측정·Fit·Review·새 Profile 저장/명시 적용. 모터 Goal/Torque 없음.'}
     if stage in ('scene_capture','sdk_calibration','capture_session','paired_session','teleoperation','annotation','datagen','simulation_evaluation','train','offline_validation','hub_download','hub_upload'):
         return {'runnable':True,'reason':'지원 입력 검증 후 실행; 엔진 초기화는 실행 시 확인'}
     if stage in ('capture','precision_calibration','real_evaluation','real_sim'):return {'runnable':True,'reason':'오프라인 보존 자료/SDK 설정 검사만 실행합니다. 실제 장치/모터/카메라를 연결하지 않습니다.'}
@@ -28,6 +29,10 @@ def prepared(path: str,modules: str) -> dict:
     from ..cli import prepare
     plan=prepare(path,task_modules=modules);support=stage_support(plan.stage)
     if not support['runnable']:return {**support,'state':'prepared','plan':plan.summary()}
+    if plan.stage=='precision_session':
+        from ..robot.precision import construct
+        construct(plan,events=lambda e:None)
+        return {**support,'state':'runtime_ready','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage=='scene_capture':
         from ..robot.scene_observation import construct
         construct(plan)  # Identity resolution and constructors only, never connect.

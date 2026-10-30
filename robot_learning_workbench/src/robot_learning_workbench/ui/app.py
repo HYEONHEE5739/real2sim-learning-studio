@@ -68,13 +68,15 @@ class Window(QMainWindow):
         for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
         self.closing=False;self.cancelled_on_close=set()
         central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
-        self.safety=QLabel('실물 연결은 관측으로 시작 · 6축 Teleoperation은 현장 확인·개별 승인 후 활성화');self.safety.setWordWrap(True);layout.addWidget(self.safety)
+        self.safety=QLabel('실물 관측·수동 Precision 측정 · 실물 Teleoperation은 검증된 장치 제어 사양 미확보로 차단');self.safety.setWordWrap(True);layout.addWidget(self.safety)
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         self.scene=ScenePage(backend_python,self.workspace,self);self.source=CurationPage(backend_python,self.workspace,self,source_only=True);self.curation=CurationPage(backend_python,self.workspace,self)
-        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','precision_calibration','real_evaluation')}
+        self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('teleoperation','source','annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','real_evaluation')}
         from .session_page import CapturePage
         from .real_sim_page import RealSimPage
-        self.sessions={'capture':CapturePage(backend_python,modules,self.workspace,self),'real_sim':RealSimPage(backend_python,modules,self.workspace,self)}
+        from .precision_page import PrecisionPage
+        self.sessions={'capture':CapturePage(backend_python,modules,self.workspace,self),'real_sim':RealSimPage(backend_python,modules,self.workspace,self),'precision':PrecisionPage(backend_python,modules,self.workspace,self)}
+        self.sessions['precision'].activated.connect(self.precision_activated)
         self.source_tabs=QWidget();source_layout=QVBoxLayout(self.source_tabs);source_layout.setContentsMargins(0,0,0,0);source_layout.addWidget(self.workflows['source'])
         self.source_dialog=QDialog(self);self.source_dialog.setWindowTitle('저장 Source 검토');self.source_dialog.resize(1400,920);QVBoxLayout(self.source_dialog).addWidget(self.source)
         source_review=QPushButton('저장 Source 검토');source_review.clicked.connect(self.source_dialog.show);self.workflows['source'].form.insertWidget(1,source_review)
@@ -90,7 +92,7 @@ class Window(QMainWindow):
         curate=QPushButton('Data Curation');curate.clicked.connect(lambda:self.navigation.setCurrentRow(5));nav.addWidget(curate)
         hint=QLabel('단계를 선택하고\n입력을 확인한 뒤 실행하세요.');hint.setObjectName('mutedLabel');hint.setWordWrap(True);nav.addWidget(hint);body.addWidget(self.navigation_panel)
         self.stack=QStackedWidget();body.addWidget(self.stack,1)
-        self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.sessions['capture']),('Precision Calibration',self.workflows['precision_calibration']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.sessions['real_sim'])]
+        self.pages=[('Scene',self.scene),('Source Demo',self.source_tabs),('Teleoperation',self.workflows['teleoperation']),('Annotation',self.workflows['annotation']),('Mimic / Datagen',self.workflows['datagen']),('Data Curation',self.curation),('모델 학습',self.workflows['train']),('Sim 평가',self.workflows['simulation_evaluation']),('Offline Validation',self.workflows['offline_validation']),('Hub 다운로드',self.workflows['hub_download']),('Hub 업로드',self.workflows['hub_upload']),('Capture',self.sessions['capture']),('Precision Calibration',self.sessions['precision']),('Real Policy · Observe Only',self.workflows['real_evaluation']),('Real / Sim',self.sessions['real_sim'])]
         self.hardware_tabs={11:0,14:1,12:3};self._last_pipeline_row=1
         for i,(name,page)in enumerate(self.pages):
             self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if i in self.hardware_tabs or i==5 else page)
@@ -99,11 +101,17 @@ class Window(QMainWindow):
                 engine.parentWidget().hide()
             self.engine_stack.addWidget(engine if i not in self.hardware_tabs else QWidget())
         self.curation_dialog=QDialog(self);self.curation_dialog.setWindowTitle('Data Curation · Episode 검토');self.curation_dialog.resize(1400,920);self.curation_dialog.setWindowModality(Qt.WindowModality.WindowModal);QVBoxLayout(self.curation_dialog).addWidget(self.curation)
-        self.tabs.addTab(self.sessions['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.sessions['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.workflows['precision_calibration'],'4 · Precision Calibration')
+        self.tabs.addTab(self.sessions['capture'],'1 · Real2Sim Capture');self.tabs.addTab(self.sessions['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.sessions['precision'],'4 · Precision Calibration')
         self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(1)
-        self.tabs.currentChanged.connect(lambda index:self.safety.setText('Real/Sim: 현장 승인 후 Leader → 실물 Follower → 측정 자세 Sim 반영'if index==1 else'실물 연결은 관측으로 시작 · 6축 Teleoperation은 현장 확인·개별 승인 후 활성화'))
+        self.tabs.currentChanged.connect(lambda index:self.safety.setText('Real/Sim: Follower 측정 자세를 Sim에 반영 · 실물 구동은 제어 사양 미검증으로 차단'if index==1 else'실물 관측·수동 Precision 측정 · 실물 Teleoperation은 검증된 장치 제어 사양 미확보로 차단'))
         self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage('Scene v8 원본 보존 · 실제 모터 구동 기본 차단 · Hub 쓰기 별도 승인')
+
+    def precision_activated(self,result):
+        capture=self.sessions['capture']
+        if not capture.active()and str(capture.settings.saved_recipe)==result['source_configuration_path']:
+            capture.settings.load_recipe(result['configuration_path']);capture.buttons(False)
+        self.statusBar().showMessage('새 Precision 장치 구성 저장됨 · 기존 Scene 보정은 보존됩니다. Scene 연결에는 보정 identity 검증이 필요합니다.')
 
     def change_section(self,index):
         allowed={0,1,3,4,6,7,8,9,10}if index==0 else{2,11,12,13,14}

@@ -51,7 +51,7 @@ class SessionClient(QObject):
                     shutil.rmtree(Path(self.handle['run_dir'])/'preview',ignore_errors=True)
                 self.running=False;self.terminal.emit(status);return
             now=time.monotonic_ns()
-            if self.stage in('scene_capture','capture_session','paired_session')and now-self.heartbeat>400_000_000:
+            if self.stage in('scene_capture','capture_session','paired_session','precision_session')and now-self.heartbeat>400_000_000:
                 from ..run import RunHandle,touch_session
                 h=self.handle;touch_session(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),now);self.heartbeat=now
             self.read_events()

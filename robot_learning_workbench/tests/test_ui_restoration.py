@@ -170,12 +170,12 @@ import sys
 from PyQt6.QtWidgets import QApplication,QPushButton
 from robot_learning_workbench.ui.app import Window
 app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'space');w.show();app.processEvents()
-c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.workflows['precision_calibration']
+c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.sessions['precision']
 assert hasattr(c,'snapshot_table')and hasattr(c,'client')
 assert set(r.previews)=={'side','wrist','sim_side','sim_wrist'}
 assert not c.start_teleop_button.isEnabled()and not hasattr(r,'start_teleop_button')
-assert p.reference_table.columnCount()==6 and p.precision_table.rowCount()==6
-for page in (p,w.workflows['real_evaluation']):
+assert p.references.columnCount()==6 and not p.record.isEnabled()and not p.apply_button.isEnabled()
+for page in (w.workflows['real_evaluation'],):
     assert not page.gripper_button.isEnabled()
     assert not any(b.isEnabled() and any(word in b.text()for word in ('힘 풀기','Home','Start Teleop','Torque Enable'))for b in page.findChildren(QPushButton))
 w.navigation.setCurrentRow(5);app.processEvents();assert w.curation_dialog.isVisible()

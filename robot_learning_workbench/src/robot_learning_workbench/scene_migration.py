@@ -64,8 +64,8 @@ def register_package(project,source,workspace):
         if file.is_file():own_file(file,destination/file.relative_to(source),workspace,records)
     owned=load_scene(destination/'scene.json')
     if owned.identity!=package.identity:raise ValueError('Closed package identity changed while registering')
-    row={'path':str(destination.relative_to(project.root)),'scene_id':owned.identity.scene_id,'revision':owned.identity.revision,'manifest_sha256':owned.identity.manifest_sha256,'source_project_id':package.identity.scene_id}
-    info=read(project.root/'project.yaml');info.setdefault('execution_packages',[]).append(row);write(project.root/'project.yaml',info);project.info=info
+    from real2sim_builder.registration import register_export
+    row=register_export(project,destination,engine_config={},source_project_id=package.identity.scene_id)
     write(project.root/'input/migration/package-provenance.json',{'identity':asdict(owned.identity),'files':records,'relation':'same closed execution revision, new authoring project ownership; not a re-export'})
     return {**row,'path':str(destination)}
 

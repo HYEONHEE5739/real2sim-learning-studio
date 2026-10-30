@@ -372,6 +372,7 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
                 app['asset_paths']=relocated
         write(staging/'calibration.json',calibration)
         write(staging/'scene.json',spec)
+        write(staging/'authored_scene.json',working)
         write(staging/'provenance.json',{'project':copy.deepcopy(project.info),'candidate':candidate,'input_signature':signature,'validation':report,
               'original_scene':scene,'evidence':project.evidence,'native_assets':derivations,'calibration_execution':'declarations_only; no parameter application'})
         def manifest():
@@ -398,6 +399,9 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
             finally:os.close(directory)
         except OSError as error:
             raise ExportError('EXPORT_STATE_UNKNOWN',str(destination),'published package exists; directory durability was not confirmed; inspect this destination before retrying',effect='unknown') from error
+        if not project.read_only:
+            from .registration import register_export
+            register_export(project,destination)
         return package.identity
     finally:
         if lock is not None:lock.close();lock_path.unlink(missing_ok=True)
