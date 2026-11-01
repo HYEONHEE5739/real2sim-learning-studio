@@ -52,10 +52,20 @@ def bind_gripper_command(device: 'Follower', scene: 'ScenePackage', calibration_
 def create_leader(plan: 'PreparedRun') -> 'Leader':
     """Explicit SDK construction; callers must call connect/activate separately."""
     from .calibration import mapper_from_scene
-    spec=plan.input_documents['device_profile']
-    if set(spec)!={'calibration_id','calibration_path','sdk'}:raise ValueError('Leader profile needs calibration_id/calibration_path/sdk')
-    mapper=mapper_from_scene(plan.scene,spec['calibration_id'],role='leader',phase='device_observation')
-    calibration=Path(spec['calibration_path'])
-    if not calibration.is_absolute():raise ValueError('Explicit absolute SDK calibration file required')
-    return create_observer({'role':'leader','calibration_path':str(calibration),'sdk':dict(spec['sdk'])},mapper.profile)
-
+    import json
+    from ..recipe import _plain
+    spec=_plain(plan.input_documents['device_profile']);role=spec.get('role','leader')
+    if role!='leader':raise ValueError('Source device_profile must select a Leader, never a Follower')
+    calibration_id=spec.get('calibration_id')
+    if not calibration_id:
+        matches=[]
+        for name,record in plan.scene.calibration['records'].items():
+            if record['kind']!='encoder_mapping'or record['application'].get('phase')!='device_observation':continue
+            parameters=json.loads((plan.scene.root/record['parameters_file']).read_text())if'parameters_file'in record else record['parameters']
+            profile=parameters.get('profile',parameters)
+            if profile.get('role')=='leader':matches.append(name)
+        if len(matches)!=1:raise ValueError('Source needs one Scene-bound Leader device_observation mapping; specify device_profile.calibration_id to select among multiple mappings')
+        calibration_id=matches[0]
+    mapper=mapper_from_scene(plan.scene,calibration_id,role='leader',phase='device_observation')
+    spec['role']='leader'
+    return create_observer(spec,mapper.profile)

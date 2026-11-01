@@ -142,6 +142,7 @@ requires separately provisioned assets and SDK/Qt environments.
 - [Saturation recovery](docs/position-saturation-recovery.md)
 - [Resume/Multi-Env/SmolVLA/Preview results](docs/resume-multienv-smolvla-preview.md)
 - [Publication review](docs/github-upload-preparation.md)
+- [New Scene Builder and Workflow guide](docs/builder-scene-guide.md)
 - [Scene preparation, owned v8 and device setup](docs/scene-preparation-v8.md)
 - [Precision Calibration and Builder Export integration](docs/precision-export-integration.md)
 - [Leader Teleoperation recovery and workflow audit](docs/leader-teleop-recovery.md)

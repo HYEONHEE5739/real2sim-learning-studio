@@ -1,4 +1,4 @@
-"""Reference-angle calibration through one read-only session; no physical driver."""
+"""Reference-angle calibration with explicit release and save; no physical driver."""
 import copy,hashlib,json,math,time
 from pathlib import Path
 
@@ -14,8 +14,9 @@ class MemoryCalibrationDevice:
     def __init__(self,spec,profile):
         self.role=spec['role'];self.identity=copy.deepcopy(profile['identity']);self.calibration_path=Path(spec['calibration_path'])
         self.profile=profile;self.raw=dict.fromkeys(JOINTS,1500);self.torque=0;self.connected=False;self.exclusive=False;self.trace=[]
-        self.original_identity=copy.deepcopy(self.identity)
+        self.original_identity=copy.deepcopy(self.identity);self.calibration_release=None
     def connect(self):self.trace.append('connect');self.connected=True;self.exclusive=True
+    def release_for_calibration(self,*,cancelled=None):self.trace.append('release');self.torque=0;self.calibration_release={'joints':list(JOINTS),'effect':'applied'}
     def close(self):self.trace.append('close');self.connected=False;self.exclusive=False
     def unchanged(self):
         return self.identity==self.original_identity and hashlib.sha256(self.calibration_path.read_bytes()).hexdigest()==self.identity['calibration_sha256']
@@ -51,33 +52,27 @@ def precision_fixture(tmp_path):
 
 
 def recorded_candidate(session,device):
-    for raw,angle,split in((1500,0.,'train'),(2500,math.pi/2,'train'),(2000,math.pi/4,'validation')):
+    for raw,angle in((1500,0.),(2500,math.pi/2),(2000,math.pi/4)):
         device.raw['shoulder_pan']=raw
-        session.command('precision_record',{'joint':'shoulder_pan','angle_rad':angle,'split':split})
-    return session.command('precision_fit',{'joint':'shoulder_pan'})
+        session.command('precision_record',{'joint':'shoulder_pan','angle_rad':angle})
+    return session.candidates['shoulder_pan']
 
 
-def test_zero_reference_fit_independent_review_save_and_explicit_activation(tmp_path):
+def test_zero_reference_calculates_and_save_as_applies_selected_profile(tmp_path):
     session,device,workspace,configuration,old_profile,_=precision_fixture(tmp_path);original_config=configuration.read_bytes();original_profile=old_profile.read_bytes()
     try:
         session.connect();candidate=recorded_candidate(session,device)
-        assert candidate['status']=='CANDIDATE_NEEDS_VALIDATION'
-        with pytest.raises(ValueError,match='review|Review|validat|VALIDAT'):session.command('precision_save',{})
-        reviewed=session.command('precision_review',{'joint':'shoulder_pan','tolerance_deg':.5,'independent':True})
-        assert reviewed['status']=='VALIDATED_MANUAL'and reviewed['physical_verified']is False
-        saved=session.command('precision_save',{});path=Path(saved['path']);assert path.is_relative_to(workspace/'calibration')
+        assert device.torque==0 and 'release'in device.trace and candidate['status']=='CALIBRATED_MANUAL'
+        path=workspace/'calibration/new-profile.json'
+        saved=session.command('precision_save',{'path':str(path),'overwrite':False})
         profile=load_profile(path);assert profile['identity']==device.identity and profile['urdf_sha256']==hashlib.sha256((configuration.parent/'source-model.urdf').read_bytes()).hexdigest()
         assert profile['physical_verified']is False and abs(profile['joints']['shoulder_pan']['reference_angle_rad'])<1e-12
-        with pytest.raises(ValueError,match='approv|승인'):session.command('precision_activate',{'path':str(path),'approved':False})
-        result=session.command('precision_activate',{'path':str(path),'approved':True});new_config=Path(result['configuration_path'])
-        assert new_config!=configuration and new_config.is_relative_to(workspace/'devices')
-        updated=yaml.safe_load(new_config.read_text());assert Path(updated['inputs']['calibration_profile']).resolve()==path.resolve()
-        assert result['source_configuration_path']==str(configuration)
+        new_config=Path(saved['configuration_path']);updated=yaml.safe_load(new_config.read_text())
+        assert new_config!=configuration and Path(updated['inputs']['calibration_profile']).resolve()==path.resolve()
+        assert saved['automatically_applied']and saved['source_configuration_path']==str(configuration)
         assert configuration.read_bytes()==original_config and old_profile.read_bytes()==original_profile
-        assert session.command('precision_save',{})['path']!=str(old_profile)
-        device.raw['shoulder_pan']=2001;session.command('precision_record',{'joint':'shoulder_pan','angle_rad':.8,'split':'validation'})
-        with pytest.raises(ValueError,match='[Ss]tale|[Dd]raft|[Cc]hanged'):session.command('precision_activate',{'path':str(path),'approved':True})
-        assert set(device.trace)<={'connect','sample'}
+        session.command('precision_save',{'path':str(path),'overwrite':True})
+        assert session.source_profile==path and set(device.trace)<={'connect','release','sample'}
     finally:session.close()
     assert not device.connected and device.torque==0
 
@@ -86,23 +81,22 @@ def test_reference_capture_requires_supported_unpowered_pose_and_model_range(tmp
     session,device,_,configuration,old_profile,_=precision_fixture(tmp_path);before=(configuration.read_bytes(),old_profile.read_bytes())
     try:
         session.connect();device.torque=1
-        with pytest.raises((ValueError,RuntimeError),match='[Tt]orque|토크'):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':0.,'split':'train'})
+        with pytest.raises((ValueError,RuntimeError),match='[Tt]orque|토크'):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':0.})
         device.torque=0
-        with pytest.raises(ValueError,match='limit|range|범위'):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':100.,'split':'train'})
-        with pytest.raises(ValueError):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':float('nan'),'split':'train'})
+        with pytest.raises(ValueError,match='limit|range|범위'):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':100.})
+        with pytest.raises(ValueError):session.command('precision_record',{'joint':'shoulder_pan','angle_rad':float('nan')})
         assert (configuration.read_bytes(),old_profile.read_bytes())==before
-        assert set(device.trace)<={'connect','sample'}
+        assert set(device.trace)<={'connect','release','sample'}
     finally:session.close()
 
 
-def test_changed_sdk_identity_cannot_activate_a_saved_profile(tmp_path):
+def test_changed_sdk_identity_cannot_save_a_profile(tmp_path):
     session,device,_,configuration,old_profile,_=precision_fixture(tmp_path);before=(configuration.read_bytes(),old_profile.read_bytes())
     try:
-        session.connect();recorded_candidate(session,device);session.command('precision_review',{'joint':'shoulder_pan','tolerance_deg':.5,'independent':True});saved=session.command('precision_save',{})
-        device.identity['id']='different-follower'
-        with pytest.raises((ValueError,AssertionError,RuntimeError),match='identity|Identity|changed|calibration|device'):session.command('precision_activate',{'path':saved['path'],'approved':True})
+        session.connect();recorded_candidate(session,device);device.identity['id']='different-follower'
+        with pytest.raises((ValueError,AssertionError,RuntimeError),match='identity|Identity|changed|calibration|device'):
+            session.command('precision_save',{'path':str(old_profile),'overwrite':True})
         assert (configuration.read_bytes(),old_profile.read_bytes())==before
-        assert set(device.trace)<={'connect','sample'}
     finally:session.close()
 
 
@@ -117,8 +111,8 @@ def test_precision_recipe_and_worker_commands_pin_owned_inputs_without_connectin
     spec_path=Path(data['inputs']['device_profile']);spec=json.loads(spec_path.read_text());outside=tmp_path/'unexpected-sdk-cache';spec['sdk']['calibration_dir']=str(outside);spec_path.write_text(json.dumps(spec))
     with pytest.raises(ValueError,match='[Cc]alibration|SDK config'):construct(prepare_recipe(read_recipe(path)),events=lambda e:None)
     assert not outside.exists()
-    assert _command({'command_id':'zero','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':0.,'split':'train'}})['kind']=='precision_record'
-    with pytest.raises(Exception):_command({'command_id':'bad','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':float('nan'),'split':'train'}})
+    assert _command({'command_id':'zero','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':0.}})['kind']=='precision_record'
+    with pytest.raises(Exception):_command({'command_id':'bad','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':float('nan')}})
 
 
 def test_production_precision_runner_reads_memory_sdk_and_closes_without_motion(tmp_path):
@@ -137,12 +131,12 @@ def test_production_precision_runner_reads_memory_sdk_and_closes_without_motion(
             worker.touch_session(handle,time.monotonic_ns())
             events=worker.read_events(handle.run_dir,limit=200).items
             if not recorded and any(e['kind']=='status'and e['payload'].get('progress',{}).get('current_measurement')for e in events):
-                worker.send_command(handle,{'command_id':'zero','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':0.,'split':'train'}});recorded=True
+                worker.send_command(handle,{'command_id':'zero','kind':'precision_record','payload':{'joint':'shoulder_pan','angle_rad':0.}});recorded=True
             if recorded and (handle.run_dir/'acks/zero.json').exists()and json.loads((handle.run_dir/'acks/zero.json').read_text())['status']=='completed'and not finished:
                 worker.send_command(handle,{'command_id':'end','kind':'session_finish','payload':{}});finished=True
             time.sleep(.03)
         assert worker.read_status(handle.run_dir).status=='completed',json.loads((handle.run_dir/'run.json').read_text())
-        report=json.loads((plan.output_path/'precision-report.json').read_text());assert report['goal_commands']==report['torque_commands']==0 and len(report['references']['shoulder_pan'])==1
+        report=json.loads((plan.output_path/'precision-report.json').read_text());assert report['goal_commands']==0 and report['torque_commands']==6 and len(report['references']['shoulder_pan'])==1
     finally:
         if worker.read_status(handle.run_dir).status not in('completed','failed','cancelled','unknown'):
             worker.send_command(handle,{'command_id':'cancel-test','kind':'cancel','payload':{}})

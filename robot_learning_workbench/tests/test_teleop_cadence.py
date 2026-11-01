@@ -2,7 +2,6 @@
 import time,yaml
 from test_capture_session_protocol import session_recipe
 from test_precision_calibration import OLD
-from test_supervised_session import approval
 from robot_learning_workbench.recipe import read_recipe,prepare_recipe
 from robot_learning_workbench.robot.session_devices import construct
 from robot_learning_workbench.robot.session import HardwareSession
@@ -12,7 +11,7 @@ from robot_learning_workbench.robot.calibration import JOINTS,raw_from_native
 def test_capture_observation_delay_does_not_suspend_approved_leader_control(tmp_path):
     path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD);path.write_text(yaml.safe_dump(data));plan=prepare_recipe(read_recipe(path));devices,cameras,bounds=construct(plan);s=HardwareSession(plan,devices,cameras,bounds,events=lambda e:None)
     try:
-        s.connect();s.command({'kind':'teleop_prepare','command_id':'proposal','payload':{}});s.command({'kind':'teleop_start','command_id':'start','payload':approval(s.teleoperation.proposal)});assert s.teleoperation.active
+        s.connect();s.command({'kind':'teleop_start','command_id':'start','payload':{}});assert s.teleoperation.active
         follower=devices['follower'];native,_=follower.read();before=follower.precision_mapper.calibrated_to_urdf(native);target=before.copy();target['shoulder_pan']+=.03
         leader=devices['leader'];native=leader.precision_mapper.urdf_to_calibrated(target);raw={n:round(raw_from_native(native[n],leader.motor_specs[n]))for n in JOINTS};read=leader.bus.sync_read
         leader.bus.sync_read=lambda name,**kw:raw.copy()if name=='Present_Position'else read(name,**kw)
@@ -35,7 +34,7 @@ def test_stop_during_leader_read_blocks_goal_before_transmission(tmp_path):
         return read()
     l.read=blocked
     try:
-        proposal=loop.prepare();loop.start(approval(proposal));assert entered.wait(1)
+        loop.start('start');assert entered.wait(1)
         loop.stopped.set();release.set();loop.stop()
         assert not c.active and 'send'not in trace
     finally:release.set();loop.stop();l.close();f.close()
@@ -46,7 +45,7 @@ def test_undrained_command_record_queue_stops_without_silent_loss(tmp_path):
     from robot_learning_workbench.robot.teleop_loop import TeleoperationLoop
     c,l,f,_,trace,_=controller(tmp_path);loop=TeleoperationLoop(c)
     try:
-        proposal=loop.prepare();loop.rows.extend([{'preserved':True}for _ in range(300)]);loop.start(approval(proposal))
+        loop.rows.extend([{'preserved':True}for _ in range(300)]);loop.start('start')
         deadline=time.monotonic()+1
         while loop.thread.is_alive():time.sleep(.01);assert time.monotonic()<deadline
         from types import SimpleNamespace
@@ -55,19 +54,12 @@ def test_undrained_command_record_queue_stops_without_silent_loss(tmp_path):
 
 
 import pytest
-@pytest.mark.parametrize('kind',['capture','real_sim'])
-def test_control_record_failure_during_close_still_closes_all_owned_resources(tmp_path,kind):
+def test_capture_control_record_failure_during_close_still_closes_all_owned_resources(tmp_path):
     from types import SimpleNamespace
-    if kind=='capture':
-        path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD);path.write_text(yaml.safe_dump(data));plan=prepare_recipe(read_recipe(path));devices,cameras,bounds=construct(plan);s=HardwareSession(plan,devices,cameras,bounds,events=lambda e:None)
-    else:
-        from test_leader_teleop_workflow import configured_scene
-        from robot_learning_workbench.robot.real_sim import RealSimSession
-        path,_,data,config=configured_scene(tmp_path);data['inputs'].update({k:config['inputs'][k]for k in('leader_device_profile','leader_calibration_profile')});data['execution']=config['execution'];path.write_text(yaml.safe_dump(data));plan=prepare_recipe(read_recipe(path));devices,cameras,_=construct(plan);s=RealSimSession(plan,devices,cameras,events=lambda e:None)
+    path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD);path.write_text(yaml.safe_dump(data));plan=prepare_recipe(read_recipe(path));devices,cameras,bounds=construct(plan);s=HardwareSession(plan,devices,cameras,bounds,events=lambda e:None)
     trace=[]
     for d in devices.values():d.connect()
     for c in cameras.values():c.start()
-    if kind=='real_sim':s.renderer=SimpleNamespace(close=lambda:trace.append('renderer_closed'))
     def fail(row):raise RuntimeError('injected control recorder write failure')
     s.recorder=SimpleNamespace(append=fail,close=lambda:trace.append('recorder_closed'));s.control.rows.append({'recorded':False})
     try:
@@ -77,23 +69,15 @@ def test_control_record_failure_during_close_still_closes_all_owned_resources(tm
         assert len(s.control.rows)==1,'Unwritten control record must remain visible after failure'
         assert all(not d._connected for d in devices.values())
         assert 'recorder_closed'in trace
-        if kind=='real_sim':assert 'renderer_closed'in trace
     finally:
         s.control.rows.clear();s.close()
 
 
-@pytest.mark.parametrize('kind',['capture','real_sim'])
-def test_failed_worker_report_preserves_unwritten_control_payloads(tmp_path,monkeypatch,kind):
+def test_failed_capture_worker_report_preserves_unwritten_control_payloads(tmp_path,monkeypatch):
     import json
     from types import SimpleNamespace
-    if kind=='capture':
-        import robot_learning_workbench.robot.session as runner
-        name='HardwareSession';path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD)
-    else:
-        import robot_learning_workbench.robot.real_sim as runner
-        from test_leader_teleop_workflow import configured_scene
-        name='RealSimSession';path,_,data,config=configured_scene(tmp_path);data['inputs'].update({k:config['inputs'][k]for k in('leader_device_profile','leader_calibration_profile')});data['execution']=config['execution']
-        monkeypatch.setattr(runner,'RenderProcess',lambda *a:SimpleNamespace(close=lambda:None))
+    import robot_learning_workbench.robot.session as runner
+    name='HardwareSession';path,_,data=session_recipe(tmp_path);data['inputs']['source_robot_model']=str(OLD)
     path.write_text(yaml.safe_dump(data));plan=prepare_recipe(read_recipe(path));original=getattr(runner,name)
     row={'requested_model_rad':dict.fromkeys(JOINTS,.1),'applied_model_rad':[.1]*6,'sdk_goal_raw':dict.fromkeys(JOINTS,2048),'timestamp_ns':12345}
     class RecordingFault(original):

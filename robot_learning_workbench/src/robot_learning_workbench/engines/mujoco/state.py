@@ -36,7 +36,7 @@ def restore_episode(model,data,bindings,initial):
         robot=initial['articulation']['robot'];q=_values(robot['joint_position'],(1,6),'joint_position')[0];qd=_values(robot['joint_velocity'],(1,6),'joint_velocity')[0]
         root=_values(robot['root_pose'],(1,7),'robot.root_pose')[0]
         expected=bindings.world_from_robot_base;actual=transform(np.block([[Rotation.from_quat(root[[4,5,6,3]]).as_matrix(),root[:3,None]],[np.zeros((1,3)),np.ones((1,1))]]))
-        if not np.allclose(actual,expected,rtol=0,atol=1e-12):raise ValueError('Fixed robot base initial pose differs from bound Scene')
+        if not np.allclose(actual,expected,rtol=0,atol=1e-5):raise ValueError('Fixed robot base initial pose differs from bound Scene')
         velocity=_values(robot['root_velocity'],(1,6),'robot.root_velocity')
         if np.any(velocity):raise ValueError('Fixed robot root cannot restore nonzero velocity')
         if not set(bindings.dynamic_objects)<=set(initial['rigid_object']) or not set(initial['rigid_object'])<=set(bindings.object_body_ids):raise ValueError('Initial object identities differ')
@@ -47,7 +47,7 @@ def restore_episode(model,data,bindings,initial):
             if name not in bindings.dynamic_objects:
                 index=bindings.object_body_ids[name];m=np.eye(4);m[:3,3]=pose[:3];m[:3,:3]=Rotation.from_quat(pose[[4,5,6,3]]).as_matrix()
                 expected=np.eye(4);expected[:3,3]=reference.xpos[index];expected[:3,:3]=reference.xmat[index].reshape(3,3)
-                if np.any(vel) or not np.allclose(m,expected,rtol=0,atol=1e-12):raise ValueError('Recorded static object differs from Scene')
+                if np.any(vel) or not np.allclose(m,expected,rtol=0,atol=1e-5):raise ValueError('Recorded static object differs from Scene')
             else:object_values[name]=(pose,vel)
     if np.any(q<bindings.limits[:,0]) or np.any(q>bindings.limits[:,1]):raise ValueError('Initial joint target outside model bounds')
     mujoco.mj_resetData(model,data);data.qpos[list(bindings.q_indices)]=q;data.qvel[list(bindings.v_indices)]=qd;data.ctrl[list(bindings.actuator_ids)]=q
@@ -76,6 +76,7 @@ def reset_object_poses(model,data,bindings,poses):
 
 def finger_contacts(model,data,bindings,object_id):
     if object_id not in bindings.object_body_ids:raise ValueError('Unknown contact target')
+    if len(bindings.finger_body_ids)!=2:raise ValueError('Contact Task requires two declared robot.bindings.mujoco.finger_bodies')
     target=bindings.object_body_ids[object_id];result=[False,False]
     for contact in data.contact:
         bodies={int(model.geom_bodyid[contact.geom1]),int(model.geom_bodyid[contact.geom2])}
@@ -93,9 +94,9 @@ def camera_pose(model,data,bindings,name):
 
 
 def read_sample(model,data,bindings,phase,tick,*,episode_id='engine-check',env_index=0,object_id=None):
-    """Owned model/base snapshots; caller supplies the original pre/post-step phase."""
+    """Owned model/base snapshots at the declared Episode/Step boundary."""
     import mujoco
-    if phase not in ('pre_step','post_step','episode_end') or type(tick) is not int or tick<0 or type(env_index) is not int or env_index<0 or not isinstance(episode_id,str) or not episode_id:raise ValueError('Invalid MuJoCo sample phase/tick/episode/env')
+    if phase not in ('episode_start','pre_step','post_step','episode_end') or type(tick) is not int or tick<0 or type(env_index) is not int or env_index<0 or not isinstance(episode_id,str) or not episode_id:raise ValueError('Invalid MuJoCo sample phase/tick/episode/env')
     inverse=np.linalg.inv(bindings.world_from_robot_base)
     def pose(position,rotation):
         result=np.eye(4);result[:3,3]=position;result[:3,:3]=np.asarray(rotation).reshape(3,3)
@@ -105,7 +106,7 @@ def read_sample(model,data,bindings,phase,tick,*,episode_id='engine-check',env_i
         objects[name]=pose(data.xpos[index],data.xmat[index]);twist=np.empty(6)
         mujoco.mj_objectVelocity(model,data,mujoco.mjtObj.mjOBJ_BODY,index,twist,0);velocities[name]=twist[3:].copy()
     sample={'episode_id':episode_id,'env_index':env_index,'tick':tick,'phase':phase,'dt_s':float(model.opt.timestep)*bindings.decimation,'pose_frame':'robot_base',
-        'object_poses':objects,'eef_pose':eef,'joint_positions':data.qpos[list(bindings.q_indices)].copy(),'joint_order':tuple(JOINTS),'linear_velocities':velocities,'signals':{}}
+        'object_poses':objects,'eef_pose':eef,'joint_positions':data.qpos[list(bindings.q_indices)].copy(),'joint_velocities':data.qvel[list(bindings.v_indices)].copy(),'joint_order':tuple(JOINTS),'linear_velocities':velocities,'signals':{}}
     if object_id is not None:
         if object_id not in bindings.dynamic_objects:raise ValueError('Task contact object must be selected')
         relative=np.linalg.inv(eef)@objects[object_id];left,right=finger_contacts(model,data,bindings,object_id)

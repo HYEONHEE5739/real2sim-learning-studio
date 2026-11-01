@@ -15,5 +15,5 @@ def output_path(workspace,stage,name=None):
 
 
 def input_directory(workspace,stage,key):
-    group='policy' if key in ('policy','checkpoint') else 'scenes' if key=='scene' else 'source' if key=='source_dataset' or key=='dataset' and stage=='annotation' else 'annotation' if key=='dataset' and stage=='datagen' else 'dataset' if key in ('dataset','artifact') else None
+    group='policy' if key in ('policy','checkpoint') else 'scenes' if key=='scene' else 'source' if key=='dataset' and stage=='annotation' else 'annotation' if key=='dataset' and stage=='datagen' else 'dataset' if key in ('dataset','artifact') else None
     return Path(workspace).resolve()/group if group else Path(workspace).resolve()

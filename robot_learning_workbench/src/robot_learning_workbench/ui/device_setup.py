@@ -75,7 +75,7 @@ class DeviceSetup(QDialog):
             except Exception as error:self.status.setText(str(error))
     def load_recipe(self,path):
         path=Path(path).resolve();data=yaml.safe_load(path.read_text())
-        if data.get('stage')not in('scene_capture','capture_session'):raise ValueError('Capture 장치 구성을 선택하세요. Real/Sim은 Scene에서 구성을 복원합니다.')
+        if data.get('stage')not in('scene_capture','capture_session'):raise ValueError('Scene Prepare 장치 구성을 선택하세요. Real/Sim은 Scene에서 구성을 복원합니다.')
         for k,v in data['inputs'].items():data['inputs'][k]=str((path.parent/v).resolve())
         self.advanced.text.setPlainText(yaml.safe_dump(data,sort_keys=False,allow_unicode=True));self.saved_recipe=path
         for key,spec_key in(('leader','leader_device_profile'),('follower','device_profile')):
@@ -88,7 +88,7 @@ class DeviceSetup(QDialog):
         cameras=yaml.safe_load(Path(data['inputs']['camera_config']).read_text())['cameras']
         for name in('side','wrist'):
             combo=getattr(self,name);combo.blockSignals(True);combo.clear();p=cameras[name]['index_or_path'];combo.addItem(str(p),p);combo.blockSignals(False)
-        self.status.setText('저장 구성 복원 · '+('Precision/model rad 측정 가능 · 명령은 별도 현장 승인 필요'if data['stage']!='scene_capture'else'SDK native / Camera 관측 · model rad 및 제어 권한 없음'))
+        self.status.setText('저장 구성 복원 · '+('Precision/model rad 측정 가능 · 연결 후 Teleoperation 시작 버튼으로 구동'if data['stage']!='scene_capture'else'SDK native / Camera 관측 · model rad 및 제어 권한 없음'))
         self.dirty=False;self.advanced.dirty=False;self.refresh_configurations()
     def save_advanced(self):
         try:self.request('session_device_save',workspace=str(self.workspace),name=self.name.text(),recipe=self.advanced.data())

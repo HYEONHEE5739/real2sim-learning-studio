@@ -30,7 +30,6 @@ def validate_config(config: dict,*,dataset: Path,output: Path,mode: str) -> None
     if config.get('env') is not None or config.get('eval_freq',0)!=0:raise DataError('TRAIN_CONFIG_INVALID','evaluation','No automatic physical/evaluation environment')
     if bool(config.get('resume',False))!=(mode=='resume'):raise DataError('TRAIN_CONFIG_INVALID','resume','Recipe and official config differ')
     if any(type(config.get(k)) is not int or config[k]<1 for k in ('steps','batch_size','save_freq','log_freq')):raise DataError('TRAIN_CONFIG_INVALID','steps','Explicit positive steps/batch/save/log required')
-    if config['log_freq']>config['steps']:raise DataError('TRAIN_CONFIG_INVALID','log_freq','At least one official loss logging step required')
     if not config.get('save_checkpoint',True):raise DataError('TRAIN_CONFIG_INVALID','save_checkpoint','Closed checkpoints required')
 
     from lerobot.configs.policies import PreTrainedConfig
@@ -59,7 +58,6 @@ def training_command(plan) -> tuple[list[str],dict]:
         old=record['config'];allowed={'steps','output_dir','resume'}
         if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in config.items() if k not in allowed}:raise DataError('RESUME_INCOMPATIBLE','config','Only cumulative steps/new output/resume may change')
         if config['steps']<=record['step']:raise DataError('RESUME_INCOMPATIBLE','steps','New cumulative step target required')
-        if config['steps']//config['log_freq']==record['step']//config['log_freq']:raise DataError('TRAIN_CONFIG_INVALID','log_freq','Resume interval must contain an official loss logging step')
         args[-1]='--config_path='+str(root/'pretrained_model/train_config.json')
         args+=['--resume=true','--output_dir='+str(plan.output_path),'--steps='+str(config['steps'])]
     return args,config

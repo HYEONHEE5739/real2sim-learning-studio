@@ -8,7 +8,7 @@ def session(clock,monkeypatch):
     import robot_learning_workbench.robot.session as module
     s=HardwareSession.__new__(HardwareSession);s.events=[];s.events=s.events.append
     from robot_learning_workbench.robot.supervised import Teleoperation
-    s.state='OBSERVING';s.teleoperation=Teleoperation.__new__(Teleoperation);s.teleoperation.active=False;s.teleoperation.hardware=False;s.snapshots=[];s.terminal=False;s.closing=False
+    s.state='OBSERVING';s.teleoperation=Teleoperation.__new__(Teleoperation);s.teleoperation.active=False;s.snapshots=[];s.terminal=False;s.closing=False
     s.pending=s.saving=s.acquiring=None;s.capture_error='';s.history=deque([{'timestamp_ns':clock-30000000},{'timestamp_ns':clock}])
     s.stability=SimpleNamespace(assess=lambda:{'stable':True,'window_start_ns':clock-600000000})
     s.packets={n:{'sequence':1,'read_end':{'monotonic_ns':clock-119000000}}for n in('side','wrist')};s.store=SimpleNamespace(last_sequences={})

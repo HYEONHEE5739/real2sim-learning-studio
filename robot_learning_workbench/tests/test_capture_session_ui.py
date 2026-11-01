@@ -16,7 +16,9 @@ for size in ((1320,900),(1920,1080)):
  assert set(p.previews)=={'side','wrist'}
  assert p.snapshot_table.isVisible()and len(p.joint_labels)==6
  assert not p.start_teleop_button.isEnabled()and not p.capture_button.isEnabled()
- assert not p.disconnect_button.isEnabled()and not p.finish_button.isEnabled()
+ assert not hasattr(p,'disconnect_button')and not hasattr(p,'stop_teleop_button')
+ assert [b.text()for b in(p.connect_button,p.start_teleop_button,p.capture_button,p.finish_button)]==['로봇 연결','텔레옵 시작','캡처','종료']
+ assert not p.finish_button.isEnabled()
  assert p.width()<=size[0]and p.height()<size[1]
 w.close();app.processEvents();assert not w.isVisible()
 assert not any(m in sys.modules for m in ('torch','lerobot','isaaclab','mujoco','serial'))

@@ -10,6 +10,7 @@ from ..data.native import atomic_json,file_sha256
 class SnapshotStore:
     def __init__(self,project,*,session_id,model,mapping):
         project.require_writable();self.project=project;self.project_id=project.info['id'];self.session_id=session_id;self.model=Path(model)
+        self.directory=project.root/'input/captures'/session_id
         self.mapping=copy.deepcopy(mapping);self.last_sequences={};self.completed={}
         if mapping.get('profile',{}).get('urdf_sha256')!=file_sha256(self.model):raise ValueError('Explicit model differs from measured Precision mapping')
 
@@ -23,12 +24,12 @@ class SnapshotStore:
         measured,observed,warnings=prepare_snapshot(state,images,{'cameras':{n:{'resolution':[640,480]}for n in('side','wrist')}},now_ns=now_ns)
         sequences={r['camera']:r['sequence']for r in observed}
         if any(sequences[n]<=self.last_sequences.get(n,-1)for n in sequences):raise ValueError('Camera frame reused; wait for new Side/Wrist frames')
-        staging=self.project.root/'input/captures'/('pending_'+identifier);staging.mkdir(parents=True,exist_ok=False)
+        staging=self.directory/('pending_'+identifier);staging.mkdir(parents=True,exist_ok=False)
         model_relative,files=share_model(staging,self.model);shot=staging/'shots'/identifier;shot.mkdir(parents=True)
         measured.update(hardware_identity=state['hardware']['follower']['identity'],camera_metadata=state.get('camera_metadata',{}),device_source=state.get('device_source','unspecified'))
         atomic_json(shot/'state.json',measured);shot_files={'state.json':file_sha256(shot/'state.json')}
         for row in observed:
-            Image.fromarray(images['real_'+row['camera']]).save(shot/row['path']);shot_files[row['path']]=file_sha256(shot/row['path'])
+            Image.fromarray(images['real_'+row['camera']]).save(shot/row['path'],compress_level=1);shot_files[row['path']]=file_sha256(shot/row['path'])
         layout_id='layout_'+self.project_id.replace('-','_')
         metadata=dict(id=identifier,scene_state_id=layout_id,files=shot_files,images=observed,quality_warnings=warnings)
         atomic_json(shot/'metadata.json',metadata);(shot/'COMPLETE').write_text('complete\n')
@@ -56,7 +57,7 @@ class SnapshotStore:
                     from .pairs import write_pair
                     write_pair(staging,manifest,pending,rendered)
                 write(staging/'capture_manifest.yaml',manifest);normalized,_,_=load_session(staging)
-                final=self.project.root/'input/captures'/normalized['session_id'];os.rename(staging,final);pending['path']=str(final)
+                final=self.directory/normalized['session_id'];os.rename(staging,final);pending['path']=str(final)
             else:final=Path(pending['path'])
             manifest=read(final/'capture_manifest.yaml');metadata=read(final/manifest['snapshots'][0]['path']/'metadata.json')
             paired='pair.json'in metadata['files']

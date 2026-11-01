@@ -46,11 +46,11 @@ def prepared(path: str,modules: str) -> dict:
         from ..robot.scene_render import SceneView
         devices,cameras,_=construct(plan)
         SceneView(plan.resolved_inputs['scene']['path'],plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
-        return {**support,'state':'runtime_ready','reason':'Leader/Follower·Camera·Scene 준비 · 현장 승인 후 Teleoperation, 측정 자세를 Sim에 반영','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+        return {**support,'state':'runtime_ready','reason':'Leader/Follower·Camera·Scene 준비 · Real/Sim 연결 동작으로 Teleoperation 시작, 측정 자세를 Sim에 반영','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage=='capture_session':
         from ..robot.session_devices import construct
         construct(plan)
-        return {**support,'state':'runtime_ready','reason':'지속 관측 준비 · 실물 Teleoperation은 별도 현장 승인 필요','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
+        return {**support,'state':'runtime_ready','reason':'지속 관측 준비 · Teleoperation 시작 버튼으로 실물 Leader 추종','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage in ('teleoperation','real_evaluation') and plan.effective_settings['execution'].get('mode')=='gripper_once':
         from ..robot.live import open_inputs
         from ..robot.configuration import bind_gripper_command
@@ -68,7 +68,7 @@ def prepared(path: str,modules: str) -> dict:
         return {**support,'state':'runtime_ready','reason':'Fake 6축 Policy · 메모리 장치/합성 RGB만 사용 · 실물 포트/명령 없음','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
     if plan.stage in ('capture','precision_calibration','real_evaluation','real_sim') and plan.effective_settings['execution'].get('mode')!='offline':
         from ..robot.live import open_inputs
-        if not 1<=plan.effective_settings['execution'].get('max_frames',0)<=300:raise ValueError('명시 max_frames 1..300을 지정하세요')
+        if plan.effective_settings['execution'].get('max_frames',1)<1:raise ValueError('양수 max_frames를 지정하세요')
         if 'calibration_profile'not in plan.resolved_inputs:raise ValueError('선택한 Precision Profile이 필요합니다')
         open_inputs(plan)  # Constructors only: no connection, camera start or motor writes.
         return {**support,'state':'runtime_ready','reason':'실물 읽기 전용 · Goal/Torque 쓰기 없음 · 실물 팔 구동 금지','plan':plan.summary(),'prepared_sha256':plan.sha256,'recipe_sha256':plan.recipe_sha256}
@@ -90,22 +90,25 @@ def prepared(path: str,modules: str) -> dict:
             source=load_catalog(plan.resolved_inputs['source_dataset']['path']);validate_recording(source.execution.get('recording',{}))
             if source.execution.get('stage')!='source' or source.execution.get('engine')!=plan.engine or not source.episodes:raise ValueError('엔진이 일치하는 Source target stream이 필요합니다')
         else:
+            if plan.engine=='mujoco':
+                from ..engines.mujoco.source import resolved_model_config
+                resolved_model_config(plan)
+            if plan.effective_settings['execution'].get('num_envs',1)!=1:raise ValueError('Live Leader Source는 현재 env_num: 1을 사용합니다. 독립 다중 환경 Live 입력은 아직 지원하지 않습니다.')
             from ..robot.configuration import create_leader
             device=create_leader(plan)
             if not device.read_only:raise ValueError('Live Leader must preserve torque and never send motor commands')
     if plan.stage=='datagen':
         from importlib import import_module
         import_module('robot_learning_workbench.engines.'+plan.engine+'.datagen').load_inputs(plan)
-        placements=[b.name for b in plan.function_bindings.values() if b.kind=='placement']
-        if any(n not in ('placement.fixed_xy','placement.random_workspace') for n in placements) or len(set(placements))!=1:
-            raise ValueError('UI DataGen supports an all-Fixed or all-Random batch')
     elif plan.stage=='annotation':
         from ..data.native import load_catalog
         from robot_learning_workbench.data.recording import validate_recording
         catalog=load_catalog(plan.resolved_inputs['dataset']['path']);validate_recording(catalog.execution.get('recording',{}))
         from robot_learning_workbench.data.recording import validate_source_ranges
         validate_source_ranges(catalog)
-        if catalog.execution.get('stage')!='source' or catalog.execution.get('engine')!=plan.engine:raise ValueError('엔진이 같은 원본 Source가 필요합니다')
+        if catalog.execution.get('stage')!='source':raise ValueError('원본 Source Dataset이 필요합니다')
+        from ..data.recording import replay_settings
+        replay_settings(plan,catalog)
         if plan.engine=='isaac':
             from ..engines.isaac.annotation import validate_source
             validate_source(catalog)
@@ -113,7 +116,6 @@ def prepared(path: str,modules: str) -> dict:
         from ..learning.train import training_command
         training_command(plan)
     elif plan.stage=='simulation_evaluation':
-        if any(b.kind=='placement' and b.name not in ('placement.fixed_xy','placement.random_workspace') for b in plan.function_bindings.values()):raise ValueError('Evaluation은 Fixed 또는 Workspace Random 배치를 지원합니다')
         from ..learning.policy import checkpoint_record
         path=Path(plan.resolved_inputs['policy']['path'])
         if (path/'workbench-checkpoint.json').is_file():checkpoint_record(path)
@@ -142,23 +144,31 @@ def episode_plot(source: str, selection_id: str) -> dict:
     semantics=curation._field_semantics(catalog,target)
     clock='timestamp'if ep.format=='lerobot'else'obs/timestamp'
     times=samples(clock).reshape(-1)
-    eef=None;events={};event_times={}
+    eef=None;events={};event_times={};states=None
+    state_field='observation.state'if ep.format=='lerobot'else'obs/policy/joint_pos'
     if ep.format=='isaac_hdf5':
         import h5py
         with h5py.File(ep.file,'r')as file:
             group=file['data/'+ep.key]
             name='obs/datagen_info/eef_pose/tool0'
             if name in group:eef=samples(name)[:,:3,3].tolist()
-            name='obs/datagen_info/subtask_term_signals/grasp'
-            if name in group:
-                offset=0
-                for block in curation._chunks((ep,),name,2048,{}):
-                    first=np.flatnonzero(curation._numeric(block,name).any(1))
-                    if len(first):
-                        events['grasp']=int(offset+first[0]);event_times['grasp']=float(np.asarray(group['obs/timestamp'][ep.start+events['grasp']]).reshape(-1)[0]-np.asarray(group['obs/timestamp'][ep.start]).reshape(-1)[0]);break
-                    offset+=len(block)
+            if state_field in group:states=samples(state_field).tolist()
+            for prefix in('obs/events','obs/datagen_info/subtask_term_signals'):
+                if prefix not in group:continue
+                for event in group[prefix]:
+                    name=prefix+'/'+event
+                    if event in events:continue
+                    offset=0
+                    for block in curation._chunks((ep,),name,2048,{}):
+                        array=curation._numeric(block,name);first=np.flatnonzero(array.reshape(len(array),-1).any(1))
+                        if len(first):
+                            events[event]=int(offset+first[0]);event_times[event]=float(np.asarray(group['obs/timestamp'][ep.start+events[event]]).reshape(-1)[0]-np.asarray(group['obs/timestamp'][ep.start]).reshape(-1)[0]);break
+                        offset+=len(block)
+    elif ep.format=='lerobot':states=samples(state_field).tolist()
+    state_semantics=curation._field_semantics(catalog,state_field)
+    comparable=semantics['unit']=='rad'and state_semantics['unit']=='rad'and bool(semantics['joint_order'])and semantics['joint_order']==state_semantics['joint_order']
     return dict(selection_id=selection_id,frames=total,original_range=[ep.start,ep.start+total],indices=indices.tolist(),
-                targets=values.tolist(),timestamps=times.tolist(),target_unit=semantics['unit'],joint_order=semantics['joint_order'],
+                targets=values.tolist(),states=states,state_unit=state_semantics['unit'],state_joint_order=state_semantics['joint_order'],state_action_comparable=comparable,timestamps=times.tolist(),target_unit=semantics['unit'],joint_order=semantics['joint_order'],
                 eef=eef,eef_frame=catalog.execution.get('recording',{}).get('pose_frame','unknown'),eef_unit='m'if catalog.execution.get('recording',{}).get('units')=='m_rad_s'else'unknown',events=events,event_times_s=event_times,event_phase='recorded pre-step latch; not new Task evaluation',sampled=len(indices)<total)
 
 
@@ -214,14 +224,10 @@ def execute(request: dict) -> dict:
     if op=='hub_create':
         from ..learning.hub import create_repository
         return create_repository(**args)
+    if op=='source_scenes':
+        from ..scene_preparation import list_scenes
+        return {'scenes':list_scenes(args['workspace'])}
     if op=='prepare':return prepared(**args)
-    if op=='scene':
-        from scene_contract.package import load_scene
-        from dataclasses import asdict
-        scene=load_scene(Path(args['path']))
-        return {'path':str(Path(args['path']).resolve()),'identity':asdict(scene.identity),'objects':list(scene.scene['objects']),
-            'engines':list(scene.scene['engines']),'calibration_records':len(scene.calibration['records']),
-            'robot_model':scene.scene['robot'].get('joint_order'),'valid':True}
     if op=='start':
         from ..run import start,StartRequest
         from ..recipe import read_recipe
@@ -253,17 +259,13 @@ def execute(request: dict) -> dict:
             small=rgb[::2,::2].copy();h,w=small.shape[:2];target=folder/(camera+'.ppm')
             target.write_bytes(f'P6\n{w} {h}\n255\n'.encode()+small.tobytes());images[camera]=str(target)
         return {**result,'images':images}
-    if op in ('distribution','compare','split','save_curation','materialize','merge','horizontal'):
+    if op in ('distribution','compare','split','save_curation','materialize','merge'):
         from ..data import curation
         if op=='distribution':return curation.distribution(**args)
         if op=='compare':return curation.compare_distributions(**args)
         if op=='split':return curation.split_dataset(**args)
         if op=='save_curation':
             curation.save_curation(**args);return {'path':str(Path(args['path']).resolve())}
-        if op=='horizontal':
-            from real2sim_builder.project import Project,validate_horizontal_layout
-            scene=Project(args.pop('project'),read_only=True).scene
-            return validate_horizontal_layout(scene,**args)
         from ..data import lerobot
         output=lerobot.merge(**args) if op=='merge' else lerobot.materialize(**args)
         return {'path':str(output)}

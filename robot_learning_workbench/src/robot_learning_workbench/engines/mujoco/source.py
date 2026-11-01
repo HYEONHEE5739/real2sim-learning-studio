@@ -33,7 +33,7 @@ def initial_arrays(model,data,b):
     return {'articulation':{'robot':robot},'rigid_object':objects}
 
 
-def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,events,commands,realtime=False,duration_s=None,env_index=0):
+def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,events,commands,realtime=False,duration_s=None,env_index=0,plan=None):
     """Actual MuJoCo collection. read_target returns measured Leader model radians.
 
     Recorded input fixtures may supply the same boundary without opening a device;
@@ -42,8 +42,14 @@ def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,ev
     import mujoco
     episode=native_api()[0]();episode.seed=seed;episode.success=True
     initial=initial_arrays(model,data,b);opaque=snapshot(model,data,b);add_initial(episode,initial)
+    from ...tasks.evaluation import trackers_for
+    from ...tasks.execution import contact_object,add_placement_points,recorded_signals,update_signals,metrics
+    from ...data.recording import record_metrics
+    trackers=trackers_for(plan,episode_id,env_index=env_index)if plan else{};signals={}
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False)
     videos={};previous=None;fk=mujoco.MjData(model);count=0
+    if plan:
+        start=read_sample(model,data,b,'episode_start',0,episode_id=episode_id,env_index=env_index,object_id=contact_object(plan));add_placement_points(plan,start);update_signals(plan,start,trackers,signals);record_metrics(episode,metrics(plan,start),'episode_start')
     try:
         with mujoco.Renderer(model,height=480,width=640) as renderer:
             for camera in ('side','wrist'):
@@ -65,18 +71,26 @@ def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,ev
                 requested=np.asarray(read_target())
                 target=source_target(requested,b)
                 requested=requested.astype(np.float64)
-                sample=read_sample(model,data,b,'pre_step',count,episode_id=episode_id,env_index=env_index)
+                sample=read_sample(model,data,b,'pre_step',count,episode_id=episode_id,env_index=env_index,object_id=contact_object(plan)if plan else None);sample['signals']=dict(signals)
+                if plan:add_placement_points(plan,sample);update_signals(plan,sample,trackers,signals);record_metrics(episode,metrics(plan,sample),'pre_step')
                 fk.qpos[:]=data.qpos;fk.qpos[list(b.q_indices)]=target;mujoco.mj_forward(model,fk)
                 target_pose=np.eye(4);target_pose[:3,3]=fk.site_xpos[b.eef_id];target_pose[:3,:3]=fk.site_xmat[b.eef_id].reshape(3,3)
                 target_pose=np.linalg.inv(b.world_from_robot_base)@target_pose
-                record_frame(episode,sample,target_pose,target,time_s=float(data.time),requested=requested,base=b.world_from_robot_base,previous_pose=previous,command_requested=requested,command_limits=source_limits(b))
+                record_frame(episode,sample,target_pose,target,time_s=float(data.time),requested=requested,base=b.world_from_robot_base,previous_pose=previous,command_requested=requested,command_limits=source_limits(b),signals=recorded_signals(signals))
                 previous=target_pose
                 for camera,writer in videos.items():
                     renderer.update_scene(data,camera=camera);writer.write(renderer.render())
-                step(model,data,b,target);count+=1
+                step(model,data,b,target)
+                if plan:
+                    post=read_sample(model,data,b,'post_step',count,episode_id=episode_id,env_index=env_index,object_id=contact_object(plan));add_placement_points(plan,post)
+                    update_signals(plan,post,trackers,signals)
+                    post['signals']=dict(signals);record_metrics(episode,metrics(plan,post),'post_step')
+                count+=1
                 step_completed(controls,events,count-1)
                 if realtime:time.sleep(max(0,1/30-(time.monotonic()-started)))
         if not count:return episode,{},opaque,'discarded'
+        if plan:
+            final=read_sample(model,data,b,'episode_end',count-1,episode_id=episode_id,env_index=env_index,object_id=contact_object(plan));add_placement_points(plan,final);update_signals(plan,final,trackers,signals);record_metrics(episode,metrics(plan,final),'episode_end')
         for writer in videos.values():writer.close()
         return episode,{name:writer.video_path for name,writer in videos.items()},opaque,'completed'
     except Exception as error:
@@ -90,14 +104,17 @@ def collect_episode(model,data,b,segment,*,episode_id,seed,frames,read_target,ev
 
 def execution_contract(plan,b,cfg):
     from ...recipe import _plain
-    from ...data.native import file_sha256
+    from ...tasks.placement import uses_workspace_random
+    model_config=asdict(cfg)
+    if not plan.scene.scene['robot'].get('bindings',{}).get('mujoco',{}).get('asset_path'):
+        for key in('eef_site','robot_base_body','finger_bodies'):model_config.pop(key)
     return dict(stage=plan.stage,engine='mujoco',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),
         model_sha256=b.model_sha256,urdf_sha256=b.urdf_sha256,active_objects=list(b.dynamic_objects),partition='unpartitioned',
         task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={Path(k).name:v for k,v in plan.effective_settings['code_files'].items()},
         recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(JOINTS),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',
                        task_phase='post_step',collection_units=['rad']*5+['fraction'],collection_gripper_endpoints_rad=[0.,float(np.deg2rad(100))],fps=30,resolution=[640,480],codec='libx264',crf=18),
-        seed=plan.effective_settings['execution'].get('seed',0),rng_policy='source_base_seed_plus_attempt_minus_one',
-        model_config=_plain(asdict(cfg)),placements={k:_plain(v) for k,v in plan.function_bindings.items() if v.kind=='placement'})
+        seed=plan.effective_settings['execution'].get('seed',0),rng_policy='entropy_workspace_poses_no_rng_resume_v1' if uses_workspace_random(plan) else 'source_base_seed_plus_attempt_minus_one',
+        model_config=_plain(model_config),placements={k:_plain(v) for k,v in plan.function_bindings.items() if v.kind=='placement'})
 
 
 def resolved_model_config(plan,recorded=None):
@@ -106,20 +123,24 @@ def resolved_model_config(plan,recorded=None):
     if plan.engine!='mujoco':raise ValueError('MuJoCo configuration required')
     raw=recorded if recorded is not None else plan.input_documents.get('engine_config')
     if raw is None:raise ValueError('Explicit engine_config ModelConfig required')
-    cfg=ModelConfig(**_plain(raw))
+    values=_plain(raw);values.pop('package_root',None)
+    values.setdefault('active_object_ids',list(plan.object_order));values.setdefault('object_physics',{})
+    if isinstance(values.get('initial_joint_rad'),dict):values['initial_joint_rad']=[values['initial_joint_rad'][n]for n in JOINTS]
+    cfg=ModelConfig(**values)
     if cfg.width!=640 or cfg.height!=480 or cfg.physics_timestep_s*cfg.decimation!=1/30:raise ValueError('Side/Wrist 640x480 at 30Hz required')
-    if plan.stage=='source' and plan.object_order and tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Model object order differs from Recipe')
+    if plan.stage=='source' and not set(plan.object_order)<=set(cfg.active_object_ids):raise ValueError('Source placement objects must be active in the Model')
     return cfg
 
 
 def reset_placements(plan,model,data,b,seed):
     from .state import reset_object_poses
-    from ...tasks.placement import PlacementRequest
+    from ...tasks.placement import PlacementRequest,checked_placement
     from scene_contract.transforms import resolve_transform
     from ...tasks.placement import uses_workspace_random,workspace_reset_poses,validate_workspace_payload
     if uses_workspace_random(plan):
         occupied={}
         for name,body in b.object_body_ids.items():
+            if plan.scene.scene['objects'][name]['role'] in ('reference_robot','background','workspace'):continue
             if any(model.geom_contype[g] and model.geom_bodyid[g]==body for g in range(model.ngeom)):
                 pose=np.eye(4);pose[:3,:3]=data.xmat[body].reshape(3,3);pose[:3,3]=data.xpos[body];occupied[name]=pose
         poses,records=workspace_reset_poses(plan,occupied)
@@ -144,21 +165,23 @@ def reset_placements(plan,model,data,b,seed):
             body=b.object_body_ids[name];observed=np.eye(4);observed[:3,:3]=data.xmat[body].reshape(3,3);observed[:3,3]=data.xpos[body]
             records[name].update(applied=True,applied_world_pose=observed.tolist(),observed_world_pose=observed.tolist(),physical_collision_checked=True)
         return records
-    rng=np.random.default_rng(seed)
+    rng=np.random.default_rng(seed);records={}
     sample=read_sample(model,data,b,'pre_step',0)
     occupied={name:b.world_from_robot_base@sample['object_poses'][name] for name in b.dynamic_objects}
     for name in plan.object_order:
         binding=plan.function_bindings['objects.'+name+'.placement'];params=binding.params
         frame=params.frame;world_from_frame=resolve_transform(plan.scene.scene['frames'],source=frame,target='world')
         poses={key:np.linalg.inv(world_from_frame)@value for key,value in occupied.items() if key!=name}
-        request=PlacementRequest(name,frame,params.support,occupied_poses=poses,rng=rng,rules_id=params.rules,**dict(binding.request_fields))
-        result=plan.tasks.functions[binding.name].callable(request,params=params)
-        if params.rules=='v8_preserved':
+        request=PlacementRequest(name,frame,params.support,occupied_poses=poses,rng=rng,rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
+        result=checked_placement(request,plan.tasks.functions[binding.name].callable(request,params=params))
+        if getattr(params,'rules',None)=='v8_preserved':
             from ...tasks.placement import validate_v8_pose
             context=params._context
             validate_v8_pose(result.pose,context['object_dimensions'],context['support_pose'],context['support_dimensions'],object_id=name)
         pose=world_from_frame@result.pose
         reset_object_poses(model,data,b,[(name,pose)]);occupied[name]=pose
+        records[name]={'object_id':name,'requested_world_pose':pose.tolist(),'applied_world_pose':pose.tolist(),'applied':True}
+    return records
 
 
 def run(plan,*,events,commands,leader=None):
@@ -172,12 +195,15 @@ def run(plan,*,events,commands,leader=None):
     if 'source_dataset' in plan.resolved_inputs:return run_recorded(plan,events=events,commands=commands)
     if plan.effective_settings['execution'].get('num_envs',1)>1:raise ValueError('Multi-env Source requires explicit independent recorded streams; no Leader broadcast')
     cfg=resolved_model_config(plan)
-    if any(v.kind!='placement' for v in plan.function_bindings.values()):raise ValueError('Source optional signal/metric execution is not supported by this runner')
     opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='source')
     if 'episode_time_s' not in opts or 'reset_time_s' not in opts:raise ValueError('Explicit Source episode_time_s/reset_time_s required')
     frames=max(1,int(np.ceil(opts['episode_time_s']*30)))
     model,b=build_model(plan.scene,cfg);data=mujoco.MjData(model);restore_episode(model,data,b,None)
-    execution=execution_contract(plan,b,cfg);execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
+    execution=execution_contract(plan,b,cfg)
+    if any(b.kind!='placement'for b in plan.function_bindings.values()):
+        from ...recipe import _plain
+        execution['source_functions']={k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}
+    execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
     previous=plan.resolved_inputs.get('resume_dataset');owner=None;device=leader;cancelled=False
     try:
         # Model/sensor construction and Resume validation precede motor activation.
@@ -188,22 +214,27 @@ def run(plan,*,events,commands,leader=None):
         if count>=opts['episodes']:raise ValueError('Source cumulative Episode target must exceed completed count')
         device=device if device is not None else create_leader(plan)
         device.connect()
-        from ...robot.calibration import mapper_from_scene
-        spec=plan.input_documents['device_profile']
-        expected_mapper=mapper_from_scene(plan.scene,spec['calibration_id'],role='leader',phase='device_observation')
-        if device.precision_mapper.metadata()['sha256']!=expected_mapper.metadata()['sha256']:raise ValueError('Connected Leader mapping identity changed')
+        # create_leader already binds the selected Scene mapping and actual USB
+        # identity; port-number changes do not change calibrated coordinates.
         device.activate()
         def read_target():
             native,_=device.read()
             measured=values(device.precision_mapper.calibrated_to_observation(native,raw=device.last_raw))
             return np.array([measured[n] for n in JOINTS])
+        retry_state=None
         while count<opts['episodes']:
             number=max((r['attempt'] for r in history(owner.root)),default=0)+1
             seg=owner.segment('source-'+str(number));claim=owner.claim_attempt(seg);eid='source-'+str(number)
-            restore_episode(model,data,b,None);reset_placements(plan,model,data,b,claim['seed'])
+            if retry_state is None:
+                restore_episode(model,data,b,None);placements=reset_placements(plan,model,data,b,claim['seed']);retry_state=snapshot(model,data,b)
+            else:restore_episode(model,data,b,retry_state)
+            # Retry object state is authoritative; the simulated robot starts at
+            # the current Leader rather than the previous attempt's robot pose.
+            current=source_target(read_target(),b);data.qpos[list(b.q_indices)]=current;data.qvel[list(b.v_indices)]=0;data.ctrl[list(b.actuator_ids)]=current
+            data.qacc_warmstart[:]=0;data.qfrc_applied[:]=0;data.xfrc_applied[:]=0;mujoco.mj_forward(model,data)
             from ...robot.control import TargetRejected
             try:
-                ep,media,opaque,status=collect_episode(model,data,b,seg,episode_id=eid,seed=claim['seed'],frames=frames,read_target=read_target,events=events,commands=commands,realtime=True,duration_s=opts['episode_time_s'])
+                ep,media,opaque,status=collect_episode(model,data,b,seg,plan=plan,episode_id=eid,seed=claim['seed'],frames=frames,read_target=read_target,events=events,commands=commands,realtime=True,duration_s=opts['episode_time_s'])
             except TargetRejected as error:
                 seg.record_attempt(claim,status='failure',diagnostics={'category':'action_safety_rejection',**error.diagnostics})
                 seg.commit();raise
@@ -212,9 +243,9 @@ def run(plan,*,events,commands,leader=None):
                 seg.record_attempt(claim,status='cancelled' if status=='cancelled' else 'failure',diagnostics={'reason':status});seg.commit()
                 if status=='cancelled':cancelled=True;break
             else:
-                seg.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'initial_snapshot':opaque,'initial_state_owner':'this_source_episode','seed':claim['seed']},media=media)
+                seg.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'initial_snapshot':opaque,'placements':placements,'initial_state_owner':'this_source_episode','seed':claim['seed']},media=media)
                 for path in media.values():Path(path).unlink()
-                seg.record_attempt(claim,status='success',episode_id=eid);seg.commit();count+=1;publish_event(owner.root,eid,events)
+                seg.record_attempt(claim,status='success',episode_id=eid);seg.commit();count+=1;retry_state=None;publish_event(owner.root,eid,events)
             until=time.monotonic()+opts['reset_time_s'];control=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False,inactive=True)
             while count<opts['episodes'] and time.monotonic()<until:
                 control_commands(commands(),control,events,tick=frames,episode_id=eid)
@@ -267,7 +298,7 @@ def run_recorded(plan,*,events,commands):
             restore_episode(model,data,b,None if plan.object_order else source.metadata.get('initial_snapshot',recorded_initial(recorded)))
             if plan.object_order:reset_placements(plan,model,data,b,opts.get('seed',0)+attempt-1)
             segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment);eid='source-'+str(attempt)
-            try:ep,media,initial,status=collect_episode(model,data,b,segment,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
+            try:ep,media,initial,status=collect_episode(model,data,b,segment,plan=plan,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
             except Exception as error:
                 segment.record_attempt(claim,status='failure',diagnostics={'code':getattr(error,'code','COLLECTION_ERROR'),'reason':str(error),'effect':getattr(error,'effect','unknown')});segment.commit();raise
             if status=='completed':
@@ -297,7 +328,7 @@ def collect_streams(plan,owner,model,b,catalog,opts,*,events,commands):
         targets=recorded.data['joint_targets'].numpy()[source.start:source.stop if source.stop is not None else source.num_frames].copy();stream=iter(targets);data=states[i]
         restore_episode(model,data,b,None if plan.object_order else source.metadata.get('initial_snapshot',recorded_initial(recorded)))
         if plan.object_order:reset_placements(plan,model,data,b,claim['seed'])
-        return collect_episode(model,data,b,segment,episode_id='source-'+str(claim['attempt']),seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=send,commands=polls[i],env_index=i)
+        return collect_episode(model,data,b,segment,plan=plan,episode_id='source-'+str(claim['attempt']),seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=send,commands=polls[i],env_index=i)
     count=len(load_catalog(owner.root).episodes);attempt=max((r['attempt'] for r in history(owner.root)),default=0);available=list(range(n));pending={};cancelled=False;fatal=None
     with ThreadPoolExecutor(max_workers=n,thread_name_prefix='mujoco-source') as threads:
         try:

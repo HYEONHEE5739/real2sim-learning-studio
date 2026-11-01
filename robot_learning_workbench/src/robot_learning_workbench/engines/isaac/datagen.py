@@ -9,19 +9,19 @@ from ...data.native import load_catalog,open_native,file_sha256
 from .source import settings_for,model_identity
 from robot_learning_workbench.data.recording import validate_recording
 from ...robot.calibration import JOINTS
+from ...data.recording import record_metrics
 
 
 def load_inputs(plan):
     from .env_cfg import execution_inputs
-    validate_placements(plan)
     catalog=load_catalog(plan.resolved_inputs['dataset']['path'])
     if catalog.execution.get('stage')!='annotation' or catalog.execution.get('engine')!='isaac':raise ValueError('Verified Isaac Annotation input required')
     validate_recording(catalog.execution.get('recording',{}))
     if 'partition' not in catalog.execution or catalog.execution['partition'] is None:raise ValueError('Explicit input partition identity required')
     settings=settings_for(plan,catalog.execution.get('model_config'))
     if catalog.execution.get('model_sha256')!=model_identity(plan.scene,settings):raise ValueError('Annotation model/physics identity differs')
-    if any(b.kind=='metrics' for b in plan.function_bindings.values()):raise ValueError('Standalone metrics execution unsupported')
-    params=plan.function_bindings['acceptance'].params;conf=mimic.configuration(params.object,params.target,plan.effective_settings['execution']['seed']);records=[]
+    from ...tasks.execution import mimic_objects
+    obj,target=mimic_objects(plan);conf=mimic.configuration(obj,target,plan.effective_settings['execution']['seed']);records=[]
     for row in catalog.episodes:
         if row.start or row.stop not in (None,row.num_frames):raise ValueError('Complete Annotation Episode boundaries required')
         h=open_native(row)
@@ -42,7 +42,8 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
     import torch
     from ...data.native import native_api
     from ...data.video import AsyncVideoWriter
-    from ...tasks.pick_place import v8_placement,release_evidence
+    from ...tasks.pick_place import release_evidence
+    from ...tasks.execution import placement_signal,recorded_signals,update_signals,metrics,predicate
     from .source import record_frame
     from .annotation import task_sample
     from robot_learning_workbench.data.recording import add_initial
@@ -53,12 +54,13 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
     context={'episode_id':eid,'env_index':env_index,'control_dt_s':env.step_dt};signals={};trackers={}
     for role,binding in plan.function_bindings.items():
         if binding.kind=='tracker':trackers[role.split('.',1)[1]]=plan.tasks.functions[binding.name].callable(params=binding.params,episode=context)
-    acceptance=plan.function_bindings['acceptance'];params=acceptance.params
+    acceptance=plan.function_bindings['acceptance']
     def sample(phase,tick):return task_sample(env,plan,phase,tick,eid,signals,env_index=env_index)
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False);videos={};previous_pose=None;robot=env.scene['robot'];ids=[robot.joint_names.index(n) for n in JOINTS];previous_command=robot.data.joint_pos_target[env_index,ids].detach().cpu().numpy().copy()
     stream=mimic.RandomStream(claim['seed']);boundaries=mimic.randomize_boundaries(pool,stream=stream);last_plan=None;plans=[];diagnostics=[];tick=0;first=None
     release_reference=None;release_grip=None;released=False;loss_steps=0;drop_step=None
     report={'env_index':env_index,'initial_frame':'scene_world','engine_env_origin':env.scene.env_origins[env_index].cpu().numpy().tolist(),'initial_applied_joint_rad':previous_command.tolist(),'status':'failure','category':'grasp_failure','steps':0,'seed':claim['seed'],'initial_snapshot':initial,'selected_sources':plans,'ik_diagnostics':diagnostics,'boundaries':{k:v.tolist() for k,v in boundaries.items()}}
+    start=sample('episode_start',0);update_signals(plan,start,trackers,signals);record_metrics(ep,metrics(plan,start),'episode_start')
     try:
         for camera in ('side','wrist'):videos[camera]=AsyncVideoWriter(segment.folder/(camera+'.mp4'),env_index=env_index)
         for index in range(len(pool.env_cfg.subtask_configs['tool0'])):
@@ -74,7 +76,7 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
                     if not controls['paused'] or controls['steps']:break
                     yield None
                 if tick>=plan.effective_settings['execution'].get('max_episode_steps',2000):report.update(category='timeout',steps=tick);return None,{},report
-                before=sample('pre_step',tick);goal=waypoint.pose.numpy().astype(np.float64);grip=float(waypoint.gripper_action.reshape(-1)[0])
+                before=sample('pre_step',tick);update_signals(plan,before,trackers,signals);record_metrics(ep,metrics(plan,before),'pre_step');goal=waypoint.pose.numpy().astype(np.float64);grip=float(waypoint.gripper_action.reshape(-1)[0])
                 import time
                 ik_started=time.perf_counter()
                 try:
@@ -92,7 +94,7 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
                 duration_s=time.perf_counter()-ik_started
                 # Pre-step record first; previous_command only advances after real physics.
                 # Training target is actual payload; commands/requested retains solver float64.
-                record_frame(ep,before,goal,target,time_s=tick/30,signals={'grasp':bool(signals.get('grasp') and signals['grasp'].value),'place':v8_placement(before,params=params)},base=np.asarray(env.cfg.workbench_inputs['profile']['robot_base']['T_world']),previous_pose=previous_pose,command_requested=result.command,command_limits=np.array(env.cfg.workbench_joint_limits_rad))
+                record_frame(ep,before,goal,target,time_s=tick/30,signals={**recorded_signals(signals),'grasp':bool(signals.get('grasp') and signals['grasp'].value),'place':placement_signal(plan,before)},base=np.asarray(env.cfg.workbench_inputs['profile']['robot_base']['T_world']),previous_pose=previous_pose,command_requested=result.command,command_limits=np.array(env.cfg.workbench_joint_limits_rad))
                 for camera,writer in videos.items():writer.write(before['cameras'][camera]['rgb'])
                 yield target
                 previous_command=target.copy();previous_pose=goal
@@ -100,18 +102,20 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
                 for key,value in mimic.ik_record(result,duration_s,applied=True).items():ep.add('ik/'+key,torch.from_numpy(np.array(value)))
                 ep.add('ik/applied_joint_rad',torch.from_numpy(target.copy()))
                 post=sample('post_step',tick)
-                for name,tracker in trackers.items():signals[name]=tracker.update(post)
+                update_signals(plan,post,trackers,signals)
+                post['signals']=dict(signals);record_metrics(ep,metrics(plan,post),'post_step')
                 ep.add('states/joint_pos',torch.from_numpy(post['joint_positions'].copy()))
                 ep.add('states/contact_force_w',torch.from_numpy(post['contacts']['force_w'].copy()))
                 ep.add('states/grasp_latched',torch.tensor([bool(signals.get('grasp') and signals['grasp'].value)],dtype=torch.uint8))
-                release_reference,release_grip,released,loss_steps,drop_step=release_evidence(trackers['grasp'],post['grasp_inputs']['relative'],(post['contacts']['left'],post['contacts']['right']),target,tick,30,release_reference,release_grip,released,loss_steps,drop_step)
+                if plan.function_bindings.get('signals.grasp')and plan.function_bindings['signals.grasp'].name=='pick_place.stable_grasp':release_reference,release_grip,released,loss_steps,drop_step=release_evidence(trackers['grasp'],post['grasp_inputs']['relative'],(post.get('contacts',{}).get('left',False),post.get('contacts',{}).get('right',False)),target,tick,30,release_reference,release_grip,released,loss_steps,drop_step)
                 if signals.get('grasp') and signals['grasp'].value and first is None:first=tick
                 step_completed(controls,events,tick);tick+=1
-        final=sample('episode_end',tick-1);passed=plan.tasks.functions[acceptance.name].callable(final,params=params)
+        final=sample('episode_end',tick-1);update_signals(plan,final,trackers,signals);record_metrics(ep,metrics(plan,final),'episode_end');passed=predicate(plan,'acceptance',final)
         if type(passed) is not bool:raise ValueError('Task acceptance must return bool')
-        report.update(steps=tick,first_grasp_post_tick=first,drop_step=drop_step,release_commanded=released,final_placement=v8_placement(final,params=params),grasp_latched=bool(signals.get('grasp') and signals['grasp'].value))
-        if not passed:report['category']='grasp_failure' if first is None else 'drop_failure' if drop_step is not None else 'place_failure';return None,{},report
-        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1
+        report.update(steps=tick,first_grasp_post_tick=first,drop_step=drop_step,release_commanded=released,final_placement=placement_signal(plan,final),acceptance_function=acceptance.name,declared_metrics=metrics(plan,final),grasp_latched=bool(signals.get('grasp') and signals['grasp'].value))
+        if not passed:report['category']=('grasp_failure'if first is None else'drop_failure'if drop_step is not None else'place_failure')if acceptance.name.startswith('pick_place.')else'task_rejected';return None,{},report
+        ep.pre_export();ep.success=True
+        if acceptance.name=='pick_place.v8_datagen':ep.data['obs']['events']['place'][-1]=1
         for writer in videos.values():writer.close()
         report.update(status='success',category='success')
         return ep,{k:v.video_path for k,v in videos.items()},report
@@ -122,12 +126,6 @@ def generation_steps(plan,env,pool,kin,segment,claim,*,events,commands,env_index
         for writer in videos.values():
             if not writer._closed:writer.abort()
 
-
-def validate_placements(plan):
-    # New DataGen Random has an explicit entropy-only rule. Historical seeded
-    # samplers remain pure Baseline functions, not a new DataGen Pose policy.
-    if any(b.kind=='placement' and b.name not in ('placement.fixed_xy','placement.random_workspace') for b in plan.function_bindings.values()):
-        raise ValueError('New DataGen Random uses placement.random_workspace; legacy Random is not supported')
 
 
 def run(plan,*,events,commands):
@@ -144,7 +142,7 @@ def run(plan,*,events,commands):
     random_poses=uses_workspace_random(plan)
     verify_prepared_inputs(plan);catalog,pool,settings,kin=load_inputs(plan);opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='datagen')
     execution=execution_contract(plan,settings)
-    execution.update(stage='datagen',partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
+    execution.update(stage='datagen',task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
         target_successes=opts['target_successes'],max_attempts=opts['max_attempts'],max_episode_steps=opts.get('max_episode_steps',2000),
         rng_policy=('entropy_workspace_poses_episode_reset_v1' if 'num_episodes' in opts else 'entropy_workspace_poses_one_attempt_per_worker_v1') if random_poses else 'attempt_seed_sequence_fixed_placement_no_reset_draws',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
     previous=plan.resolved_inputs.get('resume_dataset')
@@ -178,7 +176,7 @@ def run(plan,*,events,commands):
                 if ep is not None:
                     eid='datagen-'+str(attempt)
                     lineage=[{'dataset':_plain(catalog.identity),**selection,'source_lineage':catalog.episodes[selection['source_index']].metadata.get('source_lineage')} for selection in report['selected_sources']]
-                    segment.write_episode(ep,episode_id=eid,metadata={**summary,'non_tensor_arrays':{'ik/failure_reason':np.asarray([r['failure_reason'].encode() for r in rows],dtype='S64')},'ik_identity':kin.identity,'source_lineage':lineage,'success_source':'stable_grasp_and_placement'},media=media)
+                    segment.write_episode(ep,episode_id=eid,metadata={**summary,'non_tensor_arrays':{'ik/failure_reason':np.asarray([r['failure_reason'].encode() for r in rows],dtype='S64')},'ik_identity':kin.identity,'source_lineage':lineage,'success_source':plan.function_bindings['acceptance'].name},media=media)
                     for p in media.values():Path(p).unlink()
                     segment.record_attempt(claim,status='success',episode_id=eid,diagnostics=summary);segment.commit();count+=1;publish_event(owner.root,eid,events)
                 else:

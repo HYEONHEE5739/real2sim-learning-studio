@@ -80,7 +80,7 @@ class ReviewPlot(QWidget):
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
         title={'scatter':'선택 시작 Object 위치 · 지정 좌표 XY [m]','trajectory':'기록된 EEF 경로 · '+str((self.row or {}).get('display_frame',''))+' ['+str((self.row or {}).get('eef_unit','unknown'))+']','actions':'기록된 Target ['+str((self.row or {}).get('target_unit','unknown'))+'] · 선택 Frame'}[self.mode]
-        painter.drawText(12,22,title)
+        painter.drawText(12,22,title+(' · 실선 Target / 점선 Joint Position'if self.mode=='actions'else''))
         if self.mode=='scatter' and self.rows:
             self.draw_distribution(painter)
             self.screen=self.project([r['xy'] for r in self.rows])
@@ -99,11 +99,18 @@ class ReviewPlot(QWidget):
             for point,label,color in [(points[0],'시작','#55d6b0'),(points[-1],'끝','#efb467')]:
                 painter.setPen(QColor(color));painter.drawEllipse(point,5,5);painter.drawText(point+QPointF(8,18),label)
         elif self.row and self.mode=='actions':
-            q=np.asarray(self.row['actions']);low=q.min();span=max(q.max()-low,1e-6)
+            q=np.asarray(self.row['actions']);states=np.asarray(self.row['states'])if self.row.get('states')is not None else None
+            comparable=self.row.get('state_action_comparable',False)and states is not None and states.shape==q.shape
+            low=min(q.min(),states.min())if comparable else q.min();high=max(q.max(),states.max())if comparable else q.max();span=max(high-low,1e-6)
             indices=self.row.get('sample_indices',np.arange(len(q)));total=max(self.row.get('frames',len(q))-1,1)
             times=self.row.get('timestamps')
             def phase(i):return i/total
             colors=['#55d6b0','#69b9ff','#efb467','#d196fa','#fb9292','#e5e7eb']
+            if comparable:
+                for j,color in enumerate(colors[:q.shape[1]]):
+                    painter.setPen(QPen(QColor(color),1,Qt.PenStyle.DashLine))
+                    points=[QPointF(35+phase(indices[i])*(self.width()-55),self.height()-35-(v-low)/span*(self.height()-75))for i,v in enumerate(states[:,j])]
+                    for a,b in zip(points,points[1:]):painter.drawLine(a,b)
             for j,color in enumerate(colors[:q.shape[1]]):
                 painter.setPen(QPen(QColor(color),1))
                 points=[QPointF(35+phase(indices[i])*(self.width()-55),self.height()-35-(v-low)/span*(self.height()-75)) for i,v in enumerate(q[:,j])]

@@ -34,7 +34,7 @@ def publish_generation(owner,segment,claim,ep,media,report,catalog,kin,events):
     if ep is not None:
         eid='datagen-'+str(claim['attempt'])
         lineage=[{'dataset':_plain(catalog.identity),**selection,'source_lineage':catalog.episodes[selection['source_index']].metadata.get('source_lineage')} for selection in report['selected_sources']]
-        segment.write_episode(ep,episode_id=eid,metadata={**summary,'non_tensor_arrays':{'ik/failure_reason':np.asarray([r['failure_reason'].encode() for r in report['ik_diagnostics']],dtype='S64')},'ik_identity':kin.identity,'source_lineage':lineage,'success_source':'stable_grasp_and_placement'},media=media)
+        segment.write_episode(ep,episode_id=eid,metadata={**summary,'non_tensor_arrays':{'ik/failure_reason':np.asarray([r['failure_reason'].encode() for r in report['ik_diagnostics']],dtype='S64')},'ik_identity':kin.identity,'source_lineage':lineage,'success_source':report.get('acceptance_function','stable_grasp_and_placement')},media=media)
         for p in media.values():Path(p).unlink()
         segment.record_attempt(claim,status='success',episode_id=eid,diagnostics=summary);segment.commit();publish_event(owner.root,eid,events)
     else:
@@ -48,7 +48,7 @@ def publish_generation(owner,segment,claim,ep,media,report,catalog,kin,events):
 def publish_attempt(owner,segment,claim,ep,media,report,events):
     eid='evaluation-'+str(claim['attempt']);saved=None
     if ep is not None:
-        ep.success=report['success'];segment.write_episode(ep,episode_id=eid,metadata={**report,'success_source':'simulation_place_condition'},media=media)
+        ep.success=report['success'];segment.write_episode(ep,episode_id=eid,metadata={**report,'success_source':report.get('success_function','simulation_place_condition')},media=media)
         for path in media.values():Path(path).unlink()
         saved=eid
     status='cancelled' if report['category']=='cancelled' else 'success' if report['success'] else 'failure'

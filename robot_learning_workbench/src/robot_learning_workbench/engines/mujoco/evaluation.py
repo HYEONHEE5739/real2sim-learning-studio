@@ -24,29 +24,32 @@ def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,
     from .source import initial_arrays
     from .control import command_target,step
     from ...data.video import AsyncVideoWriter
-    from ...tasks.pick_place import numpy_corners,v8_placement
+    from ...tasks.execution import placement_signal,recorded_signals,update_signals,success_at,metrics
     policy,pre,post,record,contract=policy_bundle;policy.reset()
     eid='evaluation-'+str(claim['attempt']);ep=native_api()[0]();ep.seed=claim['seed'];add_initial(ep,initial_arrays(model,data,b))
-    initial=snapshot(model,data,b);params=plan.function_bindings['success'].params
+    initial=snapshot(model,data,b)
     signals={};trackers=trackers_for(plan,eid,env_index=env_index);state={};videos={};previous=None;latencies=[];tick=0;placed=False;grasp=False
     report=dict(env_index=env_index,success=False,category='max_steps',steps=0,first_grasp_post_tick=None,first_placement_post_tick=None,initial_snapshot=initial,policy_reset=True,physics_effect='not_started',recipe_sha256=plan.recipe_sha256)
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False)
     def sample(phase,t):
-        row=read_sample(model,data,b,phase,t,episode_id=eid,env_index=env_index,object_id=params.object);row['signals']=dict(signals)
-        dims=plan.scene.scene['objects'][params.object]['task_geometry']['dimensions_m']
-        row['placement_points']={params.object:{'target_id':params.target,'points':numpy_corners(row['object_poses'][params.object],row['object_poses'][params.target],dims)}}
-        return row
-    initial_positions={n:p[:3,3].copy() for n,p in sample('pre_step',0)['object_poses'].items()};phase='camera';applying=False
+        from ...tasks.execution import contact_object,add_placement_points
+        row=read_sample(model,data,b,phase,t,episode_id=eid,env_index=env_index,object_id=contact_object(plan));row['signals']=dict(signals)
+        return add_placement_points(plan,row)
+    initial_row=sample('pre_step',0);initial_positions={n:p[:3,3].copy()for n,p in initial_row['object_poses'].items()};phase='camera';applying=False
+    initial_row={**initial_row,'phase':'episode_start'};update_signals(plan,initial_row,trackers,signals);placed=success_at(plan,initial_row);report.setdefault('declared_metrics',{}).update(metrics(plan,initial_row))
+    if placed:report.update(success=True,category='task_success')
     try:
         with mujoco.Renderer(model,height=480,width=640) as renderer:
             for name in ('side','wrist'):videos[name]=AsyncVideoWriter(segment.folder/(name+'.mp4'),env_index=env_index)
-            while tick<report_limit(plan):
+            while tick<report_limit(plan)and not placed:
                 events({'kind':'status','payload':{'episode_id':eid,'env_index':env_index,'tick':tick,'progress':{'applied_steps':tick}}})
                 control_commands(commands(),controls,events,tick=tick,episode_id=eid,env_index=env_index)
                 if controls['cancelled'] or controls['skipped']:
                     report.update(category='cancelled',steps=tick);return None,{},report
                 if controls['paused'] and not controls['steps']:time.sleep(.01);continue
-                phase='observation';before=sample('pre_step',tick);rgb={}
+                phase='observation';before=sample('pre_step',tick);update_signals(plan,before,trackers,signals);placed=success_at(plan,before)
+                if placed:report.update(success=True,category='task_success');break
+                rgb={}
                 phase='camera'
                 for name in ('side','wrist'):renderer.update_scene(data,camera=name);rgb[name]=renderer.render().copy()
                 phase='policy';batch=observation_batch(before['joint_positions'],rgb,joint_order=before['joint_order'],task=plan.effective_settings['execution'].get('task_instruction'));started=time.perf_counter()
@@ -56,25 +59,29 @@ def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,
                     target=command_target(target,b)  # Keep the actual engine's final preflight.
                 except ActionRejected as error:
                     error.diagnostics['applied_dtype']='float64';report.update(category='action_safety_rejection',rejection={'tick':tick,**error.diagnostics});break
+                report.setdefault('declared_metrics',{}).update(metrics(plan,before))
                 latencies.append(time.perf_counter()-started);goal=kin.forward_kinematics(target[:5]);phase='recording'
-                record_frame(ep,before,goal,target,time_s=tick/30,base=b.world_from_robot_base,signals={'grasp':grasp,'place':v8_placement(before,params=params)},previous_pose=previous,command_requested=original,command_limits=b.limits)
+                record_frame(ep,before,goal,target,time_s=tick/30,base=b.world_from_robot_base,signals={**recorded_signals(signals),'grasp':grasp,'place':placement_signal(plan,before)},previous_pose=previous,command_requested=original,command_limits=b.limits)
                 ep.add('obs/physics_timestamp',torch.tensor(float(data.time),dtype=torch.float64))
                 for name,writer in videos.items():writer.write(rgb[name])
                 phase='physics';applying=True;step(model,data,b,target);applying=False
                 phase='task';after=sample('post_step',tick);placed,grasp=post_evaluation(plan,after,trackers,signals,state,initial_positions,report)
                 ep.add('states/joint_pos',torch.from_numpy(after['joint_positions'].copy()))
                 ep.add('states/joint_vel',torch.from_numpy(data.qvel[list(b.v_indices)].copy()))
-                ep.add('states/finger_contact',torch.tensor([after['contacts']['left'],after['contacts']['right']],dtype=torch.bool))
-                ep.add('states/grasp_latched',torch.tensor([grasp],dtype=torch.uint8));ep.add('states/placement',torch.tensor([placed],dtype=torch.uint8))
+                ep.add('states/finger_contact',torch.tensor([after.get('contacts',{}).get('left',False),after.get('contacts',{}).get('right',False)],dtype=torch.bool))
+                ep.add('states/grasp_latched',torch.tensor([grasp],dtype=torch.uint8));ep.add('states/placement',torch.tensor([placement_signal(plan,after)],dtype=torch.uint8));ep.add('states/task_success',torch.tensor([placed],dtype=torch.uint8))
                 ep.add('states/physics_timestamp',torch.tensor(float(data.time),dtype=torch.float64))
                 ep.add('policy/action_queue_remaining',torch.tensor(len(policy._action_queue) if hasattr(policy,'_action_queue') else len(policy._queues['action']) if hasattr(policy,'_queues') and 'action' in policy._queues else -1,dtype=torch.int64))
                 previous=goal;step_completed(controls,events,tick);tick+=1;report['physics_effect']='applied'
-                if placed:report.update(success=True,category='placement_success');break
+                if placed:report.update(success=True,category='task_success');break
+        final=sample('episode_end',max(0,tick-1));update_signals(plan,final,trackers,signals);report.setdefault('declared_metrics',{}).update(metrics(plan,final))
+        if not placed:placed=success_at(plan,final)
         if placed or tick>=report_limit(plan):report.update(evaluation_result(placed=placed,grasp=grasp,steps=tick,limit=report_limit(plan)))
+        if plan.function_bindings['success'].name not in('pick_place.v8_evaluation','pick_place.placement'):report.pop('placement',None)
         report.update(steps=tick,inference_mean_s=float(np.mean(latencies)) if latencies else None,inference_calls=len(latencies),policy_chunk_steps=getattr(policy.config,'n_action_steps',None),peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024)
         if not tick:return None,{},report
         ep.pre_export()
-        if placed:ep.data['obs']['events']['place'][-1]=1
+        if placed and plan.function_bindings['success'].name in('pick_place.v8_evaluation','pick_place.placement'):ep.data['obs']['events']['place'][-1]=1
         for writer in videos.values():writer.close()
         return ep,{name:writer.video_path for name,writer in videos.items()},report
     except Exception as error:

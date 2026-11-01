@@ -89,6 +89,13 @@ class PlacementResult:
     diagnostics: Mapping
 
 
+def checked_placement(request,result):
+    if not isinstance(result,PlacementResult)or(result.object_id,result.frame_id)!=(request.object_id,request.frame_id):
+        _fail('INVALID_PLACEMENT',request.object_id,'PlacementResult must identify the requested object and frame')
+    _se3(result.pose,request.object_id)
+    return result
+
+
 @dataclass(frozen=True)
 class PlacementParams:
     object: str = field(metadata={'reference':'object'})
@@ -608,7 +615,7 @@ def random_workspace(request: PlacementRequest,*,params: WorkspaceParams) -> Pla
           bounds_m=[low.tolist(),high.tolist()],surface_gap_m=params.separation_m,last_reason=reason,command_applied=False)
 
 
-FUNCTIONS['placement.random_workspace']=FunctionSpec(kind='placement',stages={'datagen','simulation_evaluation'},engines={'independent'},
+FUNCTIONS['placement.random_workspace']=FunctionSpec(kind='placement',stages={'source','datagen','simulation_evaluation'},engines={'independent'},
     params_type=WorkspaceParams,callable=random_workspace)
 
 
@@ -624,14 +631,22 @@ def workspace_reset_poses(plan: "PreparedRun",occupied_world: Mapping[str,np.nda
     """
     occupied={n:pose for n,pose in occupied_world.items() if n not in plan.object_order}
     results=[];records={}
-    for name in plan.object_order:
+    # Reserve fixed/legacy placements before sampling Workspace positions so
+    # random objects see their final poses rather than discarded initial poses.
+    order=sorted(plan.object_order,key=lambda name:isinstance(plan.function_bindings['objects.'+name+'.placement'].params,WorkspaceParams))
+    for name in order:
         binding=plan.function_bindings['objects.'+name+'.placement'];params=binding.params
-        if binding.name!='placement.random_workspace':
-            _fail('INVALID_PLACEMENT',name,'One workspace reset batch requires explicit random_workspace bindings; fixed obstacles belong in occupied state',attempts=0)
-        if binding.request_fields:_fail('INVALID_PLACEMENT',name,'Random workspace does not accept pose overrides',attempts=0)
+        workspace=isinstance(params,WorkspaceParams)
+        if workspace and binding.request_fields:_fail('INVALID_PLACEMENT',name,'Random workspace does not accept pose overrides',attempts=0)
         world=_reference_pose(plan.scene,params.frame,'world');inverse=np.linalg.inv(world)
-        local_occupied={n:inverse@pose for n,pose in occupied.items() if n!=params._context['support_id']}
-        try:result=random_workspace(PlacementRequest(name,params.frame,params.support,occupied_poses=local_occupied,rules_id=params.rules),params=params)
+        support_id=getattr(params,'_context',{}).get('support_id')
+        local_occupied={n:inverse@pose for n,pose in occupied.items() if n!=support_id and (workspace or plan.scene.scene['objects'][n]['role']=='task_object')}
+        request=PlacementRequest(name,params.frame,params.support,occupied_poses=local_occupied,rng=None if workspace else np.random.default_rng(),rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
+        try:
+            result=checked_placement(request,plan.tasks.functions[binding.name].callable(request,params=params))
+            if isinstance(params,PlacementParams):
+                context=params._context
+                validate_v8_pose(result.pose,context['object_dimensions'],context['support_pose'],context['support_dimensions'],object_id=name)
         except TaskError as error:
             error.diagnostics=_freeze({**error.diagnostics,'planned_not_applied':records});raise
         pose=world@result.pose;occupied[name]=pose;results.append((name,pose))
@@ -648,7 +663,9 @@ def validate_workspace_payload(plan: "PreparedRun",poses_world: list[tuple[str,n
     """
     actual=dict(occupied_world);actual.update(poses_world)
     for name,world in poses_world:
-        params=plan.function_bindings['objects.'+name+'.placement'].params;context=params._context
+        binding=plan.function_bindings['objects.'+name+'.placement']
+        if binding.name!='placement.random_workspace':continue
+        params=binding.params;context=params._context
         inverse=np.linalg.inv(_reference_pose(plan.scene,params.frame,'world'));pose=inverse@world
         vertices=np.concatenate(context['parts'])@pose[:3,:3].T+pose[:3,3]
         if np.any(abs(vertices[:,:2])>context['workspace_dimensions_m']/2):

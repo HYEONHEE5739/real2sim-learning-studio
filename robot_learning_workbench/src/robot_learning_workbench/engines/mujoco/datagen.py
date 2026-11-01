@@ -10,6 +10,7 @@ from ...data.native import load_catalog,open_native,file_sha256
 from .source import resolved_model_config
 from robot_learning_workbench.data.recording import validate_recording
 from .model import JOINTS,_execution_urdf
+from ...data.recording import record_metrics
 
 
 from ...data.publication import publish_generation
@@ -22,8 +23,6 @@ def reset_seeds(seed,count):
 
 
 def load_inputs(plan):
-    if any(b.kind=='placement' and b.name in ('placement.random_xy','placement.contact_random_xy') for b in plan.function_bindings.values()):
-        raise ValueError('New DataGen Random uses placement.random_workspace without a Pose Seed')
     catalog=load_catalog(plan.resolved_inputs['dataset']['path'])
     if catalog.execution.get('stage')!='annotation' or catalog.execution.get('engine')!='mujoco':raise ValueError('Verified MuJoCo Annotation input required')
     validate_recording(catalog.execution.get('recording',{}))
@@ -31,8 +30,8 @@ def load_inputs(plan):
     cfg=resolved_model_config(plan,catalog.execution.get('model_config'))
     if tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Explicit generation creation order must match annotated model')
     acceptance=plan.function_bindings['acceptance']
-    if any(b.kind=='metrics' for b in plan.function_bindings.values()):raise ValueError('Standalone DataGen metric declarations are unsupported')
-    conf=mimic.configuration(acceptance.params.object,acceptance.params.target,plan.effective_settings['execution']['seed'])
+    from ...tasks.execution import mimic_objects
+    obj,target=mimic_objects(plan);conf=mimic.configuration(obj,target,plan.effective_settings['execution']['seed'])
     records=[]
     for row in catalog.episodes:
         if row.start or row.stop not in (None,row.num_frames):raise ValueError('Mimic needs complete annotated Episode boundaries')
@@ -50,7 +49,8 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
     import mujoco,torch
     from ...data.native import native_api
     from ...data.video import AsyncVideoWriter
-    from ...tasks.pick_place import numpy_corners,v8_placement,release_evidence
+    from ...tasks.pick_place import release_evidence
+    from ...tasks.execution import contact_object,add_placement_points,placement_signal,recorded_signals,update_signals,metrics,predicate
     from robot_learning_workbench.engines.mujoco.source import initial_arrays
     from robot_learning_workbench.data.recording import add_initial, record_frame
     from robot_learning_workbench.commands import control_commands, step_completed
@@ -60,16 +60,15 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
     context={'episode_id':eid,'env_index':env_index,'control_dt_s':1/30};signals={};trackers={}
     for role,binding in plan.function_bindings.items():
         if binding.kind=='tracker':trackers[role.split('.',1)[1]]=plan.tasks.functions[binding.name].callable(params=binding.params,episode=context)
-    acceptance=plan.function_bindings['acceptance'];params=acceptance.params
+    acceptance=plan.function_bindings['acceptance']
     def sample(phase,tick):
-        row=read_sample(model,data,b,phase,tick,episode_id=eid,env_index=env_index,object_id=params.object);row['signals']=dict(signals)
-        dims=plan.scene.scene['objects'][params.object]['task_geometry']['dimensions_m']
-        row['placement_points']={params.object:{'target_id':params.target,'points':numpy_corners(row['object_poses'][params.object],row['object_poses'][params.target],dims)}}
-        return row
+        row=read_sample(model,data,b,phase,tick,episode_id=eid,env_index=env_index,object_id=contact_object(plan));row['signals']=dict(signals)
+        return add_placement_points(plan,row)
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False);videos={};previous_pose=None;previous_command=data.ctrl[list(b.actuator_ids)].copy()
     stream=mimic.RandomStream(claim['seed']);boundaries=mimic.randomize_boundaries(pool,stream=stream);last_plan=None;plans=[];diagnostics=[];tick=0;first=None
     release_reference=None;release_grip=None;released=False;loss_steps=0;drop_step=None
     report={'env_index':env_index,'initial_applied_joint_rad':previous_command.tolist(),'status':'failure','category':'grasp_failure','steps':0,'seed':claim['seed'],'initial_snapshot':initial,'selected_sources':plans,'ik_diagnostics':diagnostics,'boundaries':{k:v.tolist() for k,v in boundaries.items()}}
+    start=sample('episode_start',0);update_signals(plan,start,trackers,signals);record_metrics(ep,metrics(plan,start),'episode_start')
     try:
         with mujoco.Renderer(model,height=480,width=640) as renderer:
             for camera in ('side','wrist'):videos[camera]=AsyncVideoWriter(segment.folder/(camera+'.mp4'),env_index=env_index)
@@ -87,7 +86,7 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
                         import time
                         time.sleep(.01)
                     if tick>=plan.effective_settings['execution'].get('max_episode_steps',2000):report.update(category='timeout',steps=tick);return None,{},report
-                    before=sample('pre_step',tick);goal=waypoint.pose.numpy().astype(np.float64);grip=float(waypoint.gripper_action.reshape(-1)[0])
+                    before=sample('pre_step',tick);update_signals(plan,before,trackers,signals);record_metrics(ep,metrics(plan,before),'pre_step');goal=waypoint.pose.numpy().astype(np.float64);grip=float(waypoint.gripper_action.reshape(-1)[0])
                     import time
                     ik_started=time.perf_counter()
                     try:
@@ -101,25 +100,27 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
                         report.update(category='ik_failure',steps=tick,invalid_ik={**result.diagnostics,'failure_reason':'engine_command_jump','command_applied':False});return None,{},report
                     duration_s=time.perf_counter()-ik_started
                     # Pre-step record first; previous_command only advances after real physics.
-                    record_frame(ep,before,goal,target,time_s=tick/30,signals={'grasp':bool(signals.get('grasp') and signals['grasp'].value),'place':v8_placement(before,params=params)},base=b.world_from_robot_base,previous_pose=previous_pose,command_requested=result.command,command_limits=b.limits)
+                    record_frame(ep,before,goal,target,time_s=tick/30,signals={**recorded_signals(signals),'grasp':bool(signals.get('grasp') and signals['grasp'].value),'place':placement_signal(plan,before)},base=b.world_from_robot_base,previous_pose=previous_pose,command_requested=result.command,command_limits=b.limits)
                     for camera,writer in videos.items():renderer.update_scene(data,camera=camera);writer.write(renderer.render())
                     step(model,data,b,target);previous_command=target.copy();previous_pose=goal
                     diag={**result.diagnostics,'duration_s':duration_s,'command_applied':True,'applied_joint_rad':target.tolist(),'tick':tick};diagnostics.append(diag)
                     for key,value in mimic.ik_record(result,duration_s,applied=True).items():ep.add('ik/'+key,torch.from_numpy(np.array(value)))
                     ep.add('ik/applied_joint_rad',torch.from_numpy(target.copy()))
                     post=sample('post_step',tick)
-                    for name,tracker in trackers.items():signals[name]=tracker.update(post)
+                    update_signals(plan,post,trackers,signals)
+                    post['signals']=dict(signals);record_metrics(ep,metrics(plan,post),'post_step')
                     ep.add('states/joint_pos',torch.from_numpy(post['joint_positions'].copy()))
-                    ep.add('states/finger_contact',torch.tensor([post['contacts']['left'],post['contacts']['right']],dtype=torch.bool))
+                    ep.add('states/finger_contact',torch.tensor([post.get('contacts',{}).get('left',False),post.get('contacts',{}).get('right',False)],dtype=torch.bool))
                     ep.add('states/grasp_latched',torch.tensor([bool(signals.get('grasp') and signals['grasp'].value)],dtype=torch.uint8))
-                    release_reference,release_grip,released,loss_steps,drop_step=release_evidence(trackers['grasp'],post['grasp_inputs']['relative'],(post['contacts']['left'],post['contacts']['right']),target,tick,30,release_reference,release_grip,released,loss_steps,drop_step)
+                    if plan.function_bindings.get('signals.grasp')and plan.function_bindings['signals.grasp'].name=='pick_place.stable_grasp':release_reference,release_grip,released,loss_steps,drop_step=release_evidence(trackers['grasp'],post['grasp_inputs']['relative'],(post.get('contacts',{}).get('left',False),post.get('contacts',{}).get('right',False)),target,tick,30,release_reference,release_grip,released,loss_steps,drop_step)
                     if signals.get('grasp') and signals['grasp'].value and first is None:first=tick
                     step_completed(controls,events,tick);tick+=1
-        final=sample('episode_end',tick-1);passed=plan.tasks.functions[acceptance.name].callable(final,params=params)
+        final=sample('episode_end',tick-1);update_signals(plan,final,trackers,signals);record_metrics(ep,metrics(plan,final),'episode_end');passed=predicate(plan,'acceptance',final)
         if type(passed) is not bool:raise ValueError('Task acceptance must return bool')
-        report.update(steps=tick,first_grasp_post_tick=first,drop_step=drop_step,release_commanded=released,final_placement=v8_placement(final,params=params),grasp_latched=bool(signals.get('grasp') and signals['grasp'].value))
-        if not passed:report['category']='grasp_failure' if first is None else 'drop_failure' if drop_step is not None else 'place_failure';return None,{},report
-        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1
+        report.update(steps=tick,first_grasp_post_tick=first,drop_step=drop_step,release_commanded=released,final_placement=placement_signal(plan,final),acceptance_function=acceptance.name,declared_metrics=metrics(plan,final),grasp_latched=bool(signals.get('grasp') and signals['grasp'].value))
+        if not passed:report['category']=('grasp_failure'if first is None else'drop_failure'if drop_step is not None else'place_failure')if acceptance.name.startswith('pick_place.')else'task_rejected';return None,{},report
+        ep.pre_export();ep.success=True
+        if acceptance.name=='pick_place.v8_datagen':ep.data['obs']['events']['place'][-1]=1
         for writer in videos.values():writer.close()
         report.update(status='success',category='success')
         return ep,{k:v.video_path for k,v in videos.items()},report
@@ -149,7 +150,7 @@ def run(plan,*,events,commands):
     random_poses=uses_workspace_random(plan)
     opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='datagen')
     execution=execution_contract(plan,b,cfg)
-    execution.update(stage='datagen',partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
+    execution.update(stage='datagen',task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
         target_successes=opts['target_successes'],max_attempts=opts['max_attempts'],max_episode_steps=opts.get('max_episode_steps',2000),
         rng_policy='entropy_workspace_poses_no_rng_resume_v1' if random_poses else 'v8_single_worker_attempt_seed_and_worker_reset_stream',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
     previous=plan.resolved_inputs.get('resume_dataset')

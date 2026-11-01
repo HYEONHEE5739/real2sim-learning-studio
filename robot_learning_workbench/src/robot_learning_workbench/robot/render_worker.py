@@ -3,6 +3,7 @@ from pathlib import Path
 import sys,time,json,os
 from PIL import Image
 from ..data.native import atomic_json,file_sha256
+from .render_transport import write_preview
 
 
 def run(root):
@@ -30,9 +31,10 @@ def run(root):
                 folder=root/'captures'/request['id']if capture else root/'live'/str(generation%2);folder.mkdir(parents=True,exist_ok=True)
                 files={}
                 for name,rgb in result.pop('images').items():
-                    path=folder/(name+'.png');temporary=path.with_suffix('.tmp.png');Image.fromarray(rgb).save(temporary);os.replace(temporary,path);files[name]={'path':str(path),'sha256':file_sha256(path)}
+                    path=folder/(name+'.png');temporary=path.with_suffix('.tmp.png');Image.fromarray(rgb).save(temporary,compress_level=1);os.replace(temporary,path);files[name]={'path':str(path),'sha256':file_sha256(path)}
                 result.update(id=request['id'],requested_ns=request['requested_ns'],generation=generation,files=files)
-                atomic_json(root/('capture-result.json'if capture else'live-result.json'),result)
+                if capture:atomic_json(root/'capture-result.json',result)
+                else:write_preview(root/'live-result.json',result)
     except BaseException as error:
         atomic_json(root/'error.json',{'error':str(error)});raise
     finally:

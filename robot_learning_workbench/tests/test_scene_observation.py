@@ -11,12 +11,13 @@ def test_camera_only_material_capture_owns_original_rgb_without_robot_state(tmp_
     from robot_learning_workbench.robot.scene_observation import save_materials
     project=Project.create(tmp_path,'Camera Scene');now=time.monotonic_ns()
     packets={name:{'rgb':np.zeros((480,640,3),np.uint8),'sequence':3,'read_start':{'monotonic_ns':now-1000000,'unix_ns':time.time_ns()},'read_end':{'monotonic_ns':now,'unix_ns':time.time_ns()}}for name in('side','wrist')}
-    row=save_materials(project,'shot_one',packets,None,now_ns=now)
+    row=save_materials(project,'run_one','shot_one',packets,None,now_ns=now)
+    assert row['path']==str(project.root/'input/observations/run_one/shot_one')
     assert row['q_measured']==[]and row['images'].keys()=={'side','wrist'}
     record=read(row['path']+'/observation.json');assert record['model_state']is None and record['action']is None and not record['eligible_for_calibration']
     assert len(project.evidence['images'])==2 and len(project.evidence['documents'])==1
     packets['wrist']['read_end']['monotonic_ns']-=300000000
-    with pytest.raises(ValueError,match='stale|skew'):save_materials(project,'shot_two',packets,None,now_ns=now)
+    with pytest.raises(ValueError,match='stale|skew'):save_materials(project,'run_one','shot_two',packets,None,now_ns=now)
 
 
 def test_raw_sdk_observer_has_no_motor_write_or_precision_requirement(tmp_path):

@@ -68,3 +68,30 @@ def save_inputs(path,files,notes):
             with tempfile.TemporaryDirectory(dir=project.root/'scratch')as temporary:
                 file=Path(temporary)/'scene-notes.txt';file.write_text(notes);add_brief(project,file)
     return scene_details(project.root)
+
+
+def source_inputs(path,engine):
+    """Resolve a named Project's registered physics Package and Leader settings."""
+    from scene_contract.package import load_scene,SceneIdentity
+    from .robot.registration import bound_configuration
+    project=Project(path,read_only=True);engine_key='isaac'if engine=='isaaclab'else engine
+    if engine_key not in('mujoco','isaac'):raise ValueError('MuJoCo 또는 Isaac을 선택하세요.')
+    records=[row for row in project.info.get('execution_packages',[])if engine_key in row.get('engine_config',{})]
+    if not records:raise ValueError('선택한 Scene에 이 엔진의 실행 Package가 등록되지 않았습니다.')
+    # Registration order is the Project's revision order; never fall back from a
+    # broken newest revision to an older Package without the user's knowledge.
+    record=records[-1];scene=(project.root/record['path']/'scene.json').resolve()
+    settings=(project.root/record['engine_config'][engine_key]).resolve()
+    if not scene.is_relative_to(project.root)or not settings.is_relative_to(project.root):raise ValueError('Scene 실행 자산은 선택 Project 내부에 있어야 합니다.')
+    package=load_scene(scene,expected=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']))
+    if engine_key not in package.scene['engines']:raise ValueError('Scene Package가 선택 엔진을 지원하지 않습니다.')
+    config=read(settings)
+    if config.get('render_type')=='authored':raise ValueError('이 Scene에는 비교용 렌더 설정만 있습니다. Builder에서 Source용 물리 실행 자산과 설정을 등록하세요.')
+    workspace=project.root.parent.parent;configuration=bound_configuration(project.root,workspace)
+    if configuration is None:raise ValueError('이 Scene에 장치 설정이 없습니다. Scene Prepare에서 Leader 장치 구성을 저장하세요.')
+    device=read(configuration).get('inputs',{}).get('leader_device_profile')
+    if not device:raise ValueError('이 Scene의 장치 설정에 Leader가 없습니다.')
+    leader=(configuration.parent/device).resolve()
+    if read(leader).get('role')!='leader':raise ValueError('Source는 Leader만 읽으며 실제 Follower를 제어하지 않습니다.')
+    return {'name':project.info['name'],'project':str(project.root),'configuration':str(configuration),
+        'inputs':{'scene':str(scene),'engine_config':str(settings),'device_profile':str(leader)}}

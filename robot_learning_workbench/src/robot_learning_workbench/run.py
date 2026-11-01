@@ -292,10 +292,10 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
 
 
 _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
-_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_prepare':set(),'teleop_stop':set(),
-                   'teleop_start':{'proposal_sha256','supervised','clear','stop_ready','direction_checked','ranges_checked','preserve_torque','initialize_goal'},'session_import':{'snapshot_id'}}
+_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_stop':set(),
+                   'teleop_start':set(),'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
-_PRECISION_COMMANDS={'precision_select':{'joint'},'precision_record':{'joint','angle_rad','split'},'precision_fit':{'joint'},'precision_review':{'joint','tolerance_deg','independent'},'precision_save':set(),'precision_activate':{'path','approved'},'precision_remove':{'reference_id'}}
+_PRECISION_COMMANDS={'precision_select':{'joint'},'precision_record':{'joint','angle_rad'},'precision_save':{'path','overwrite'},'precision_remove':{'reference_id'}}
 _COMMANDS.update(_PRECISION_COMMANDS)
 _COMMANDS['calibration_response']={'prompt_id','response'}
 
@@ -312,13 +312,9 @@ def _command(command):
         from .robot.calibration import JOINTS
         if set(payload)!=_PRECISION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact Precision command fields required')
         if 'joint'in payload and payload['joint']not in JOINTS:_fail('PROTOCOL_INVALID',kind,'named joint required')
-        for name in('angle_rad','tolerance_deg'):
-            if name in payload and(type(payload[name])not in(int,float)or not math.isfinite(payload[name])):_fail('PROTOCOL_INVALID',kind,'finite numeric angle/tolerance required')
-        if kind=='precision_record'and payload['split']not in('train','validation'):_fail('PROTOCOL_INVALID',kind,'train/validation reference required')
-        if kind=='precision_review'and(type(payload['independent'])is not bool or not 0<payload['tolerance_deg']<=5):_fail('PROTOCOL_INVALID',kind,'review kind and valid degree tolerance required')
-        if kind=='precision_activate'and(not isinstance(payload['path'],str)or type(payload['approved'])is not bool):_fail('PROTOCOL_INVALID',kind,'saved path and explicit approval required')
+        if 'angle_rad'in payload and(type(payload['angle_rad'])not in(int,float)or not math.isfinite(payload['angle_rad'])):_fail('PROTOCOL_INVALID',kind,'finite reference angle required')
+        if kind=='precision_save'and(not isinstance(payload['path'],str)or not payload['path'].strip()or type(payload['overwrite'])is not bool):_fail('PROTOCOL_INVALID',kind,'Precision file path and explicit overwrite flag required')
         if kind=='precision_remove':_identifier(payload['reference_id'])
-    if kind=='teleop_start'and(not isinstance(payload['proposal_sha256'],str)or len(payload['proposal_sha256'])!=64 or any(payload[k]is not True for k in _SESSION_COMMANDS[kind]-{'proposal_sha256'})):_fail('PROTOCOL_INVALID',kind,'fresh proposal SHA and explicit on-site confirmations required')
     if kind=='gripper_approve' and (set(payload)!=_COMMANDS[kind] or not isinstance(payload.get('proposal_sha256'),str) or len(payload['proposal_sha256'])!=64 or type(payload.get('target_raw'))is not int or any(type(payload.get(k))is not bool for k in ('supervised','clear','stop_ready'))):_fail('PROTOCOL_INVALID','gripper_approve','Exact SHA/target and explicit safety confirmations required')
     if kind=='step' and (type(payload.get('count')) is not int or not 1<=payload['count']<=1000):_fail('PROTOCOL_INVALID','step.count','expected 1..1000')
     if kind=='mark' and (not isinstance(payload.get('event'),str) or type(payload.get('frame')) is not int or payload['frame']<0):_fail('PROTOCOL_INVALID','mark','event and nonnegative frame required')

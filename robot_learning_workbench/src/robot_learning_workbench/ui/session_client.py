@@ -28,15 +28,26 @@ class SessionClient(QObject):
         if self.phase=='prepare':
             if self.cancel_requested:self.terminal.emit('cancelled');return
             if not result.get('runnable'):self.error.emit(result['reason']);self.terminal.emit('failed');return
-            self.busy=True;self.phase='start';self.job.start('start',path=self.path,modules=self.modules,request_id=uuid.uuid4().hex,expected_recipe_sha256=result['recipe_sha256'],expected_prepared_sha256=result['prepared_sha256'])
+            self.start_prepared(self.path,result)
         elif self.phase=='start':
             self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0
             if self.cancel_requested:self.send('cancel')
-    def send(self,kind,payload=None):
+    def start_prepared(self,path,prepared):
+        if self.active():raise ValueError('기존 실행 종료를 기다리세요')
+        import yaml
+        self.path=str(path);self.stage=yaml.safe_load(Path(path).read_text())['stage']
+        self.busy=True;self.phase='start';self.cancel_requested=False
+        self.job.start('start',path=self.path,modules=self.modules,request_id=uuid.uuid4().hex,expected_recipe_sha256=prepared['recipe_sha256'],expected_prepared_sha256=prepared['prepared_sha256'])
+
+    def send(self,kind,payload=None,*,context=None):
         if not self.running:raise ValueError('연결된 Session이 없습니다')
         from ..run import RunHandle,send_command
         h=self.handle;key=uuid.uuid4().hex
-        send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),{'command_id':key,'kind':kind,'payload':payload or {}})
+        command={'command_id':key,'kind':kind,'payload':payload or {}}
+        if context:
+            for field in('episode_id','env_index'):
+                if field in context:command[field]=context[field]
+        send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
         return key
     def poll(self):
         if not self.running:return
@@ -72,3 +83,7 @@ class SessionClient(QObject):
     def cancel(self):
         self.cancel_requested=True
         if self.running:self.send('cancel')
+
+    def finish(self):
+        self.cancel_requested=True
+        if self.running:self.send('session_finish')

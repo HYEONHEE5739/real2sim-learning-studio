@@ -66,7 +66,7 @@ def construct(plan):
     return devices,cameras
 
 
-def save_materials(project,key,packets,feedback,*,now_ns=None):
+def save_materials(project,session_id,key,packets,feedback,*,now_ns=None):
     """Existing Builder images/documents; no new Dataset or model Snapshot schema."""
     import os
     from PIL import Image
@@ -83,10 +83,10 @@ def save_materials(project,key,packets,feedback,*,now_ns=None):
         t=feedback['interval']['end']['monotonic_ns'];times.append(t)
         if t>now or now-t>200000000:raise ValueError('SDK feedback stale')
     if max(times)-min(times)>100000000:raise ValueError('Observation skew exceeds100ms')
-    root=project.root/'input/observations'/key
+    root=project.root/'input/observations'/session_id/key
     if root.exists():raise ValueError('Observation already exists')
     root.mkdir(parents=True);images={}
-    record={'timestamp_kind':'host_receipt_not_exposure','hardware_synchronized':False,'model_state':None,'action':None,'sdk_feedback':feedback,'camera_timing':{n:{k:p[k]for k in('read_start','read_end','sequence')}for n,p in packets.items()},'eligible_for_calibration':False,'reason':'Unbound reference observations; model/Precision/camera calibration unverified'}
+    record={'session_id':session_id,'timestamp_kind':'host_receipt_not_exposure','hardware_synchronized':False,'model_state':None,'action':None,'sdk_feedback':feedback,'camera_timing':{n:{k:p[k]for k in('read_start','read_end','sequence')}for n,p in packets.items()},'eligible_for_calibration':False,'reason':'Unbound reference observations; model/Precision/camera calibration unverified'}
     write(root/'observation.json',record)
     for name,p in packets.items():Image.fromarray(p['rgb']).save(root/(name+'.png'))
     from real2sim_builder.candidate import exclusive
@@ -99,7 +99,7 @@ def save_materials(project,key,packets,feedback,*,now_ns=None):
             evidence=project.evidence;evidence.setdefault('documents',[]).append({'path':str((root/'observation.json').relative_to(project.root)),'sha256':sha(root/'observation.json'),'role':'unbound_sdk_camera_observation','status':'UNVERIFIED'})
             write(project.root/'input/evidence.yaml',evidence);project.invalidate();(root/'COMPLETE').write_text('complete\n')
         except BaseException:write(project.root/'input/evidence.yaml',before);raise
-    return {'id':key,'path':str(root),'unix_ns':packets['side']['read_end']['unix_ns'],'q_measured':[],'images':images,'quality':[record['reason']],'paired':False,'kind':'scene_materials'}
+    return {'id':key,'session_id':session_id,'path':str(root),'unix_ns':packets['side']['read_end']['unix_ns'],'q_measured':[],'images':images,'quality':[record['reason']],'paired':False,'kind':'scene_materials'}
 
 
 def run(plan,*,events,commands):
@@ -145,7 +145,7 @@ def run(plan,*,events,commands):
                 c,deadline=pending
                 try:
                     if not ready:raise ValueError('Waiting for fresh camera frames')
-                    row=save_materials(project,'observation_'+c['command_id'],packets,feedback);rows.append(row);sequences={n:p['sequence']for n,p in packets.items()};pending=None;ack(c);emit(snapshot=row)
+                    row=save_materials(project,plan.output_path.name.replace('-','_'),'observation_'+c['command_id'],packets,feedback);rows.append(row);sequences={n:p['sequence']for n,p in packets.items()};pending=None;ack(c);emit(snapshot=row)
                 except ValueError as exc:
                     if time.monotonic()>deadline:ack(c,'rejected',str(exc));pending=None
             time.sleep(1/30)

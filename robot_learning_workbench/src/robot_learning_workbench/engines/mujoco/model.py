@@ -55,9 +55,9 @@ def robot_xml(urdf, base_pose, finger_convex, contact_pads):
     assets = ET.SubElement(result, 'asset')
     meshes = {}
     source_hashes = {str(urdf): hashlib.sha256(urdf.read_bytes()).hexdigest()}
-    if finger_convex.get('schema') != 'so101.finger-convex-parts/1':
+    if finger_convex is not None and finger_convex.get('schema') != 'so101.finger-convex-parts/1':
         raise ValueError('Unknown SO101 finger collision export')
-    convex_parts = {(entry['link'], entry['collision_index']): entry for entry in finger_convex['meshes']}
+    convex_parts = {(entry['link'], entry['collision_index']): entry for entry in (finger_convex or {}).get('meshes',[])}
     materials = {m.get('name'): m.find('color').get('rgba') for m in root.findall('material')}
     world = ET.SubElement(result, 'worldbody')
 
@@ -95,7 +95,7 @@ def robot_xml(urdf, base_pose, finger_convex, contact_pads):
                     ET.SubElement(assets, 'mesh', name=meshes[key], file=str(path), scale=scale)
                     source_hashes[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
                 attributes = {'name': f'{name}_{kind}_{index}', 'type': 'mesh', 'mesh': meshes[key], **pose_attrs(origin(geom.find('origin')))}
-                if kind == 'collision' and name in ('gripper', 'jaw'):
+                if kind == 'collision' and name in ('gripper', 'jaw')and finger_convex is not None:
                     entry = convex_parts.get((name, index))
                     if not entry or entry['source_sha256'] != source_hashes[str(path)]:
                         raise ValueError('Finger collision STL changed; regenerate offline convex export: ' + str(path))
@@ -149,6 +149,24 @@ class ModelConfig:
     width: int = 640
     height: int = 480
     object_ids: tuple | None = None
+    eef_site: str = 'tool0'
+    robot_base_body: str = 'base'
+    finger_bodies: tuple = ()
+    visual_color_gamma: float = 1.0
+
+
+def apply_visual_gamma(root, gamma):
+    """Explicit render-only transfer for Scene colors; never alter colliders."""
+    if type(gamma) not in (int, float) or not np.isfinite(gamma) or gamma <= 0:
+        raise ValueError('visual_color_gamma must be finite and positive')
+    if gamma == 1:
+        return
+    for geom in root.findall('.//geom'):
+        if geom.get('group') != '2' or geom.get('rgba') is None:
+            continue
+        rgba = np.fromstring(geom.get('rgba'), sep=' ')
+        rgba[:3] = np.clip(rgba[:3], 0, 1) ** gamma
+        geom.set('rgba', numbers(rgba))
 
 
 @dataclass(frozen=True)
@@ -187,7 +205,8 @@ def _local(package, path):
 
 
 def _collision_inputs(package):
-    binding=package.scene['robot']['collision'];result={}
+    binding=package.scene['robot'].get('collision');result={}
+    if not binding:return {'finger_convex_parts':None,'contact_pads':{'schema':'so101.usd-contact-pads/1','pads':[]}}
     for kind,schema in [('finger_convex_parts','so101.finger-convex-parts/1'),('contact_pads','so101.usd-contact-pads/1')]:
         declaration=binding[kind];payload=json.loads(_local(package,declaration['asset_path']).read_text())
         if payload.get('schema')!=schema:raise ValueError('Unknown Collision schema')
@@ -202,7 +221,11 @@ def _collision_inputs(package):
 
 def _execution_urdf(package):
     records=[record for record in package.calibration['records'].values() if record['kind']=='robot_residual' and record['application']['mode']=='baked']
-    if len(records)!=1:raise ValueError('One explicit baked robot model binding required; no reference-snapshot or active-profile fallback')
+    if not records:
+        path=package.scene['robot'].get('asset_path')
+        if not path or Path(path).suffix.lower()!='.urdf':raise ValueError('Scene must declare a six-axis execution URDF in robot.asset_path or a baked Calibration binding')
+        return _local(package,path)
+    if len(records)!=1:raise ValueError('Ambiguous baked execution robot bindings')
     record=records[0]
     paths=[p for p in record['application']['asset_paths'] if str(p).endswith('.urdf')]
     if len(paths)!=1:raise ValueError('One calibrated URDF Asset required')
@@ -229,7 +252,11 @@ def build_model(scene, prepared):
     if type(cfg.width) is not int or type(cfg.height) is not int or min(cfg.width,cfg.height)<1:raise ValueError('Invalid image resolution')
     if len(set(cfg.active_object_ids))!=len(cfg.active_object_ids) or any(name not in scene.scene['objects'] or scene.scene['objects'][name]['role']!='task_object' for name in cfg.active_object_ids):raise ValueError('Invalid active object selection')
     if cfg.object_ids is not None and (len(set(cfg.object_ids))!=len(cfg.object_ids) or not set(cfg.active_object_ids)<=set(cfg.object_ids) or any(name not in scene.scene['objects'] or scene.scene['objects'][name]['role'] not in ('task_object','receptacle') for name in cfg.object_ids)):raise ValueError('Explicit task object selection is invalid')
-    canonical=json.loads(_local(scene,'provenance.json').read_text())['original_scene']
+    if scene.scene['robot'].get('bindings',{}).get('mujoco',{}).get('asset_path'):
+        if cfg.visual_color_gamma != 1.0:
+            raise ValueError('visual_color_gamma requires Builder-authored geometry; precompiled MJCF must declare its own materials')
+        return build_native_model(scene,cfg)
+    canonical=json.loads(_local(scene,'authored_scene.json').read_text())if (scene.root/'authored_scene.json').is_file()else json.loads(_local(scene,'provenance.json').read_text())['original_scene']
     objects={obj['id']:obj for obj in canonical['objects']};frames=scene.scene['frames']
     base=resolve_transform(frames,source='robot_base',target='world')
     urdf=_execution_urdf(scene);collision=_collision_inputs(scene)
@@ -260,10 +287,9 @@ def build_model(scene, prepared):
     def world_pose(name):return resolve_transform(frames,source=scene.scene['objects'][name]['frame_id'],target='world')
     def mounted(frame):
         while frame!='world':
-            if frame=='robot_link_gripper':return True
-            if frame.startswith('robot_link_'):raise ValueError('Unsupported robot fixture mount: '+frame)
+            if frame.startswith('robot_link_'):return frame.removeprefix('robot_link_')
             frame=canonical['frames'][frame]['parent']
-        return False
+        return None
     excluded={name for name,obj in objects.items() if obj['role']=='manipulable_object' and name not in dynamic}
     if cfg.object_ids is not None:excluded.update(name for name,obj in objects.items() if obj['role'] in ('manipulable_object','receptacle') and name not in cfg.object_ids)
     while True:
@@ -274,10 +300,15 @@ def build_model(scene, prepared):
         name=source.get('name');obj=objects[name]
         if name in excluded:continue
         physical=cfg.object_physics.get(name);local=np.eye(4)
+        if physical is None:
+            declared=scene.scene['objects'][name]['physics'];mass=declared.get('mass_kg');mass=mass.get('value')if isinstance(mass,Mapping)else mass
+            friction=declared.get('friction');friction=friction.get('value')if isinstance(friction,Mapping)else friction
+            if name in dynamic and(mass is None or mass<=0):raise ValueError(name+': declare positive mass_kg for a dynamic Scene object')
+            physical={'role':'DYNAMIC_MANIPULAND'if name in dynamic else'STATIC','mass_kg':mass,'collision':obj['role']!='reference_robot','material':{'dynamic_friction':1. if friction is None else friction}}
         if obj['role']=='reference_robot':
             body=world.find(".//body[@name='robot_"+obj['link']+"']");local=transform(obj['link_local_pose'])
         elif mounted(obj['frame']):
-            body=world.find(".//body[@name='robot_gripper']");local=np.linalg.inv(resolve_transform(frames,source='robot_link_gripper',target='world'))@world_pose(name)
+            link=mounted(obj['frame']);body=world.find(".//body[@name='robot_"+link+"']");local=np.linalg.inv(resolve_transform(frames,source='robot_link_'+link,target='world'))@world_pose(name)
         elif obj.get('parent_object'):
             parent=obj['parent_object'];body=world.find("body[@name='"+parent+"']");local=np.linalg.inv(world_pose(parent))@world_pose(name)
         else:
@@ -285,9 +316,13 @@ def build_model(scene, prepared):
             if name in dynamic:
                 if physical is None or physical['role']!='DYNAMIC_MANIPULAND' or not physical['mass_kg']>0:raise ValueError('Dynamic object requires explicit positive mass/physics')
                 ET.SubElement(body,'freejoint',name='object_free_'+name)
-                size=np.asarray(scene.scene['objects'][name]['task_geometry']['dimensions_m'],float);mass=float(physical['mass_kg'])
-                ET.SubElement(body,'inertial',pos='0 0 0',mass=str(mass),diaginertia=numbers(mass/12*(size@size-size**2)))
+                dimensions=scene.scene['objects'][name].get('task_geometry',{}).get('dimensions_m');mass=float(physical['mass_kg'])
+                if dimensions is not None:
+                    size=np.asarray(dimensions,float)
+                    ET.SubElement(body,'inertial',pos='0 0 0',mass=str(mass),diaginertia=numbers(mass/12*(size@size-size**2)))
+                else:output.find('compiler').set('inertiafromgeom','auto')
         if body is None:raise ValueError('Missing runtime geometry owner: '+name)
+        collision_count=sum('_visual_'not in g.get('name','')for g in source.findall('geom'))
         for original in source.findall('geom'):
             visual_geom='_visual_' in original.get('name','');is_collision=not visual_geom and physical is not None and physical['collision']
             if not visual_geom and not is_collision:continue
@@ -295,16 +330,20 @@ def build_model(scene, prepared):
             for key in ('mesh','material'):
                 if geom.get(key):geom.set(key,renames[geom.get(key)])
             geom.set('contype','1' if is_collision else '0');geom.set('conaffinity','3' if is_collision else '0');geom.set('mass','0');geom.set('group','3' if is_collision else '2')
+            if is_collision and name in dynamic and body.find('inertial')is None:
+                geom.set('mass',str(float(physical['mass_kg'])/collision_count))
             if is_collision:geom.set('rgba','0 0 0 0');geom.set('friction',numbers([physical['material']['dynamic_friction'],.005,.0001]))
             body.append(geom)
     for name,camera in scene.scene['cameras'].items():
         original=next(c for c in canonical['cameras'] if c['id']==name)
         if any(camera['distortion']):raise ValueError('MuJoCo requires explicitly undistorted camera input')
-        if original['frame']=='robot_link_gripper':parent=world.find(".//body[@name='robot_gripper']");pose=np.array(original['pose']['value'],float)
-        elif original['frame']=='world':parent=world;pose=resolve_transform(frames,source=camera['frame_id'],target='world')
-        else:raise ValueError('Unsupported dynamic camera parent')
+        link=mounted(original['frame'])
+        if link:
+            parent=world.find(".//body[@name='robot_"+link+"']");pose=resolve_transform(frames,source=camera['frame_id'],target='robot_link_'+link)
+        else:parent=world;pose=resolve_transform(frames,source=camera['frame_id'],target='world')
         pose[:3,:3]=pose[:3,:3]@np.diag([1.,-1.,-1.]);k=np.array(camera['K'],float);k[0]*=cfg.width/camera['resolution'][0];k[1]*=cfg.height/camera['resolution'][1]
         ET.SubElement(parent,'camera',name=name,**pose_attrs(pose),resolution=f'{cfg.width} {cfg.height}',sensorsize=f'{cfg.width} {cfg.height}',focalpixel=numbers([k[0,0],k[1,1]]),principalpixel=numbers([cfg.width/2-k[0,2],k[1,2]-cfg.height/2]))
+    apply_visual_gamma(output,cfg.visual_color_gamma)
     xml=ET.tostring(output,encoding='unicode');model=mujoco.MjModel.from_xml_string(xml)
     def ids(kind,names):
         result=tuple(int(mujoco.mj_name2id(model,kind,name)) for name in names)
@@ -315,4 +354,45 @@ def build_model(scene, prepared):
     for value in (initial,limits,base):value.setflags(write=False)
     finger_bodies=ids(mujoco.mjtObj.mjOBJ_BODY,['robot_gripper','robot_jaw']);finger_geom_ids=tuple(i for i in range(model.ngeom) if model.geom_bodyid[i] in finger_bodies and model.geom_contype[i])
     model_sha=hashlib.sha256((xml.replace(str(scene.root),'package:')+scene.identity.manifest_sha256).encode()).hexdigest()
-    return model,ModelBindings(scene.identity,model_sha,hashlib.sha256(urdf.read_bytes()).hexdigest(),joints,tuple(map(int,model.jnt_qposadr[list(joints)])),tuple(map(int,model.jnt_dofadr[list(joints)])),actuators,limits,initial,dynamic,object_indices,objects_ids,model.site('tool0').id,finger_bodies,finger_geom_ids,{name:model.camera(name).id for name in scene.scene['cameras']},base,cfg.decimation,cfg.width,cfg.height,scene.scene['robot']['collision'])
+    return model,ModelBindings(scene.identity,model_sha,hashlib.sha256(urdf.read_bytes()).hexdigest(),joints,tuple(map(int,model.jnt_qposadr[list(joints)])),tuple(map(int,model.jnt_dofadr[list(joints)])),actuators,limits,initial,dynamic,object_indices,objects_ids,model.site('tool0').id,finger_bodies,finger_geom_ids,{name:model.camera(name).id for name in scene.scene['cameras']},base,cfg.decimation,cfg.width,cfg.height,scene.scene['robot'].get('collision',{}))
+
+
+def build_native_model(package,cfg):
+    """Bind a declared articulated MJCF directly; no v8 geometry reconstruction."""
+    import mujoco
+    binding=package.scene['robot']['bindings']['mujoco'];path=_local(package,binding['asset_path'])
+    model=mujoco.MjModel.from_xml_path(str(path));model.opt.timestep=cfg.physics_timestep_s
+    def required(kind,name):
+        index=mujoco.mj_name2id(model,kind,name)
+        if index<0:raise ValueError('Declared MJCF is missing '+name)
+        return index
+    joints=tuple(required(mujoco.mjtObj.mjOBJ_JOINT,n)for n in JOINTS)
+    if any(model.jnt_type[i]!=mujoco.mjtJoint.mjJNT_HINGE for i in joints):raise ValueError('SO101 MJCF requires six revolute model-radian joints')
+    limits=np.asarray([model.jnt_range[i]for i in joints]);initial=np.asarray(cfg.initial_joint_rad,dtype=float)
+    if initial.shape!=(6,)or not np.isfinite(initial).all()or np.any(initial<limits[:,0])or np.any(initial>limits[:,1]):raise ValueError('Initial joint state differs from MJCF limits')
+    actuators=[]
+    for joint in joints:
+        matching=[i for i in range(model.nu)if model.actuator_trntype[i]==mujoco.mjtTrn.mjTRN_JOINT and model.actuator_trnid[i,0]==joint]
+        if len(matching)!=1:raise ValueError('MJCF needs one position actuator for '+mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_JOINT,joint))
+        index=matching[0]
+        # Position servos use a restoring position bias; velocity/torque actuators
+        # cannot consume an absolute-radian Target merely because dimensions fit.
+        if model.actuator_biastype[index]!=mujoco.mjtBias.mjBIAS_AFFINE or model.actuator_gainprm[index,0]<=0 or not np.isclose(model.actuator_biasprm[index,1],-model.actuator_gainprm[index,0])or not np.array_equal(model.actuator_gear[index],np.array([1.,0,0,0,0,0])):raise ValueError('Declared MJCF actuator must consume absolute model radians with unit joint gear')
+        actuators.append(index)
+    objects={n:required(mujoco.mjtObj.mjOBJ_BODY,o.get('bindings',{}).get('mujoco',{}).get('body_name',n))for n,o in package.scene['objects'].items()if o['role']!='reference_robot'}
+    indices={}
+    for name in cfg.active_object_ids:
+        body=objects[name];joint=model.body_jntadr[body]
+        if model.body_jntnum[body]!=1 or model.jnt_type[joint]!=mujoco.mjtJoint.mjJNT_FREE:raise ValueError(name+': selected moving object needs a free joint in MJCF')
+        indices[name]=(int(model.jnt_qposadr[joint]),int(model.jnt_dofadr[joint]))
+    for i,actuator in enumerate(actuators):
+        if model.actuator_ctrllimited[actuator]:limits[i]=[max(limits[i,0],model.actuator_ctrlrange[actuator,0]),min(limits[i,1],model.actuator_ctrlrange[actuator,1])]
+    if np.any(limits[:,0]>limits[:,1])or np.any(initial<limits[:,0])or np.any(initial>limits[:,1]):raise ValueError('Initial state/actuator control ranges have no valid model intersection')
+    fingers=tuple(required(mujoco.mjtObj.mjOBJ_BODY,n)for n in binding.get('finger_bodies',cfg.finger_bodies))
+    cameras={n:required(mujoco.mjtObj.mjOBJ_CAMERA,n)for n in('side','wrist')}
+    base=resolve_transform(package.scene['frames'],source='robot_base',target='world');urdf=_execution_urdf(package)
+    reference=mujoco.MjData(model);reference.qpos[[int(model.jnt_qposadr[i])for i in joints]]=initial;mujoco.mj_forward(model,reference)
+    base_id=required(mujoco.mjtObj.mjOBJ_BODY,binding.get('base_body',cfg.robot_base_body));actual=np.eye(4);actual[:3,3]=reference.xpos[base_id];actual[:3,:3]=reference.xmat[base_id].reshape(3,3)
+    if not np.allclose(actual,base,rtol=0,atol=1e-6):raise ValueError('Native MJCF robot base differs from declared Scene robot_base frame')
+    identity=hashlib.sha256((package.identity.manifest_sha256+json.dumps({'settings':dict(cfg.__dict__)},sort_keys=True)).encode()).hexdigest()
+    return model,ModelBindings(package.identity,identity,hashlib.sha256(urdf.read_bytes()).hexdigest(),joints,tuple(int(model.jnt_qposadr[i])for i in joints),tuple(int(model.jnt_dofadr[i])for i in joints),tuple(actuators),limits,initial,tuple(cfg.active_object_ids),indices,objects,required(mujoco.mjtObj.mjOBJ_SITE,binding.get('eef_site',cfg.eef_site)),fingers,tuple(i for i in range(model.ngeom)if model.geom_bodyid[i]in fingers and model.geom_contype[i]),cameras,base,cfg.decimation,cfg.width,cfg.height,{})

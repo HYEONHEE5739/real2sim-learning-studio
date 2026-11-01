@@ -113,14 +113,15 @@ class Follower:
         motors={n:{'id':m.id,'model':m.model} for n,m in self.bus.motors.items()}
         if motors != self.identity['motors']: raise ValueError('Motor identity mismatch')
         if self.precision_mapper.metadata()['sha256'] != self._mapping_hash: raise ValueError('Precision mapping changed')
-        self.motor_specs={}
+        motor_specs={}
         for n in JOINTS:
             motor=self.bus.motors[n]
             spec={'calibration_hash':self.identity['calibration_sha256'],'calibration':_record(self.bus.calibration[n]),
                   'resolution':self.bus.model_resolution_table[motor.model], 'mode':motor.norm_mode.name,'apply_drive_mode':bool(self.bus.apply_drive_mode)}
             if spec['mode'] != ('RANGE_0_100' if n=='gripper' else 'DEGREES'): raise ValueError('Motor normalization mismatch')
             if n in self.profile['joints'] and spec != self.profile['joints'][n]['motor']: raise ValueError('Profile motor spec mismatch')
-            self.motor_specs[n]=spec
+            motor_specs[n]=spec
+        self.motor_specs=motor_specs
 
     def connect(self):
         if self._connected or self._closed: raise DeviceError('connect','Already connected or closed',effect='not_applied')
@@ -306,12 +307,12 @@ def send_gripper_once(follower: Follower, proposal: dict, *, approved: bool=Fals
 
 
 class CalibrationDevice:
-    """Exclusive read-only reference collection; approved joint release is explicit."""
+    """Reference collection with explicit calibration-only Torque release."""
     def __init__(self, device, *, role, identity, calibration_path, kernel_exclusive=True):
         if role not in ('leader','follower'): raise ValueError('Unknown calibration role')
         self.device=device; self.bus=device.bus; self.role=role
         self.identity=copy.deepcopy(identity);self.calibration_path=Path(calibration_path)
-        self.exclusive=False;self._closed=False;self.cleanup=None;self.kernel_exclusive=kernel_exclusive
+        self.exclusive=False;self._closed=False;self.cleanup=None;self.kernel_exclusive=kernel_exclusive;self.calibration_release=None
 
     def unchanged(self):
         motors={n:{'id':m.id,'model':m.model} for n,m in self.bus.motors.items()}
@@ -353,6 +354,18 @@ class CalibrationDevice:
                 'clock':'host_monotonic_ns; not hardware synchronized','native_source':'normalized_same_raw_packet' if live else 'separate_normalized_read',
                 'joint':joint,'device_identity':copy.deepcopy(self.identity),'calibration_hash':self.identity['calibration_sha256'],'motor':self.motor_spec(joint)}
         except BaseException as exc:raise DeviceError('calibration_sample',str(exc),effect='not_applied') from exc
+
+    def release_for_calibration(self,*,cancelled=None):
+        if not self.exclusive or not self.unchanged():
+            raise DeviceError('calibration_release','Unchanged connected calibration device required',effect='not_applied')
+        if cancelled and cancelled():return False
+        self.calibration_release={'joints':list(JOINTS),'effect':'unknown','timestamp_ns':time.monotonic_ns()}
+        try:
+            self.bus.disable_torque(list(JOINTS))
+            torque={name:self.bus.read('Torque_Enable',name,normalize=False)for name in JOINTS}
+            if any(value!=0 for value in torque.values()):raise ValueError('Calibration Torque release not confirmed for every joint')
+            self.calibration_release.update(effect='applied',torque=torque)
+        except BaseException as exc:raise DeviceError('calibration_release',str(exc),effect='unknown')from exc
 
     def release(self,joint,*,approved=False):
         if joint!='gripper' or approved is not True or not self.exclusive or not self.unchanged():

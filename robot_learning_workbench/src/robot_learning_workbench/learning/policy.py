@@ -192,7 +192,14 @@ def policy_inputs(plan,urdf_sha256):
         action=dict(source='joint_targets',phase='command_for_step_t',meaning='absolute_model_joint_position_target',units=['rad']*6),
         cameras={n:dict(color='rgb',fps=30.,shape=[480,640,3]) for n in ('side','wrist')})
     if contract and 'command_processing' in contract:expected['command_processing']={'position_target_policy':'saturation_inward_v1','training_target':'applied'}
-    if contract!=expected:raise DataError('POLICY_INCOMPATIBLE','policy','Explicit Scene/model/Calibration/joint/unit/phase/camera contract mismatch')
+    comparison=expected
+    if plan.stage=='simulation_evaluation':
+        # A Policy can be evaluated in another environment with the same model
+        # coordinates and IO. Dataset Resume still pins the actual Scene/Policy.
+        comparison={k:v for k,v in expected.items()if k not in('scene_identity','calibration_sha256')}
+    differing=[k for k,v in comparison.items()if not contract or contract.get(k)!=v]
+    if differing:
+        raise DataError('POLICY_INCOMPATIBLE','policy','Policy/live input contracts differ in: '+', '.join(differing)+'. Select a matching Scene/Policy or provide an explicit policy_contract; action units are never inferred.')
     if any(getattr(policy.config,k,False) for k in ('adapt_to_pi_aloha','use_delta_joint_actions_aloha')):raise DataError('POLICY_INCOMPATIBLE','policy.action','Absolute model-radian targets required; Aloha/delta remapping is incompatible')
     features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
     if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')

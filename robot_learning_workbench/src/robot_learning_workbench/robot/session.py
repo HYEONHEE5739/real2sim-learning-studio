@@ -20,15 +20,19 @@ class HardwareSession:
         self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='snapshot-save');self.saving=None;self.save_phase=None;self.acquiring=None;self.acquire_deadline=0
         self.project=Project(plan.resolved_inputs['project']['root']);self.session_id=plan.output_path.name.replace('-','_')
         self.store=SnapshotStore(self.project,session_id=self.session_id,model=plan.resolved_inputs['robot_model']['path'],mapping=devices['follower'].precision_mapper.metadata())
-        settings=plan.effective_settings['execution'];self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id,hardware=settings['device_source']=='hardware')
-        self.control=TeleoperationLoop(self.teleoperation)
+        self.teleoperation=None;self.control=None
+        if 'leader'in devices:
+            self.teleoperation=Teleoperation(devices['leader'],devices['follower'],model_bounds=bounds,session_id=self.session_id);self.control=TeleoperationLoop(self.teleoperation)
+
+    @property
+    def teleop_active(self):return bool(self.teleoperation and self.teleoperation.active)
 
     def emit(self,**progress):
         pending=self.acquiring is not None or self.pending is not None or self.saving is not None
-        reason=self.teleoperation.configuration_issue()
-        allowed=not self.terminal and not self.closing and self.state in('OBSERVING','TELEOP_READY','TELEOP_ACTIVE')and not pending
-        self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'teleop_active':self.teleoperation.active,
-            'teleoperation_available':True,'teleoperation_reason':reason,'capture_request_allowed':allowed,'capture_pending':pending,'snapshots':len(self.snapshots),**progress}}})
+        reason=''if self.teleoperation else'Leader를 선택하면 Teleoperation을 준비할 수 있습니다. 현재는 Follower 관측/Capture입니다.'
+        allowed=not self.terminal and not self.closing and self.state in('OBSERVING','TELEOP_ACTIVE')and not pending
+        self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'teleop_active':self.teleop_active,
+            'teleoperation_available':self.teleoperation is not None,'teleoperation_reason':reason,'capture_request_allowed':allowed,'capture_pending':pending,'snapshots':len(self.snapshots),**progress}}})
 
     def ack(self,command,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':status,**({'reason':reason}if reason else{})}})
@@ -42,9 +46,15 @@ class HardwareSession:
         except Exception:self.state='FAILED';self.close();raise
 
     def read_observation(self):
-        sample=self.control.sample();native=sample['native'];interval=sample['interval'];t=interval['end']['monotonic_ns']
-        if not self.history or t>self.history[-1]['timestamp_ns']:
-            self.history.append(dict(timestamp_ns=t,native=native,raw=sample['raw'],q_measured=sample['q_measured'],feedback_interval=interval));self.stability.add(t,native)
+        if self.control:samples=self.control.samples(self.history[-1]['timestamp_ns']if self.history else 0)
+        else:
+            device=self.devices['follower'];native,interval=device.read();q=observed_positions(device.precision_mapper,native,raw=device.last_raw,motor_specs=device.motor_specs)
+            samples=[{'native':native,'interval':interval,'raw':dict(device.last_raw),'q_measured':[q[n]for n in JOINTS]}]
+        for sample in samples:
+            native=sample['native'];interval=sample['interval'];t=interval['end']['monotonic_ns']
+            if not self.history or t>self.history[-1]['timestamp_ns']:
+                self.history.append(dict(timestamp_ns=t,native=native,raw=sample['raw'],q_measured=sample['q_measured'],feedback_interval=interval));self.stability.add(t,native)
+        t=self.history[-1]['timestamp_ns']
         self.packets={n:c.nearest(t,not_after=True)for n,c in self.cameras.items()};self.observed_at_ns=time.monotonic_ns()
     def observe(self):
         self.read_observation();device=self.devices['follower'];t=self.history[-1]['timestamp_ns']
@@ -56,9 +66,10 @@ class HardwareSession:
         self.emit(feedback_gap_ms=(self.history[-1]['timestamp_ns']-self.history[-2]['timestamp_ns'])/1e6 if len(self.history)>1 else None,q_measured=self.history[-1]['q_measured'],raw=self.history[-1]['raw'],capture_ready=self.acquiring is None and self.capture_ready(),capture_reason='관측 정합 대기 중…'if self.acquiring else self.capture_error,
                   camera_timing={n:None if p is None else {**self.cameras[n].statistics(),'sequence':p['sequence'],'age_ms':(time.monotonic_ns()-p['read_end']['monotonic_ns'])/1e6,'joint_skew_ms':(p['read_end']['monotonic_ns']-t)/1e6}for n,p in self.packets.items()})
     def record_control(self):
+        if self.control is None:return
         error=self.control.record_to(getattr(self,'recorder',None))
         if error:
-            if self.state in('TELEOP_ACTIVE','TELEOP_READY'):self.state='OBSERVING'
+            if self.state=='TELEOP_ACTIVE':self.state='OBSERVING'
             self.emit(error=error)
 
     def capture_ready(self):
@@ -71,7 +82,9 @@ class HardwareSession:
         for command in commands:
             if command['kind']=='session_heartbeat':
                 t=command['payload']['timestamp_ns']
-                if 0<=time.monotonic_ns()-t<=1_000_000_000:self.last_heartbeat=t;self.teleoperation.last_heartbeat_ns=t
+                if 0<=time.monotonic_ns()-t<=1_000_000_000:
+                    self.last_heartbeat=t
+                    if self.teleoperation:self.teleoperation.last_heartbeat_ns=t
         commands=[c for c in commands if c['kind']!='session_heartbeat'];stops=[c for c in commands if c['kind']in('cancel','session_disconnect','session_finish','teleop_stop')]
         if stops:
             for c in commands:
@@ -88,13 +101,14 @@ class HardwareSession:
             if self.terminal:self.ack(command,'rejected','Session is disconnected');return
             if kind in('cancel','session_disconnect','session_finish'):
                 self.cancelled=kind=='cancel';self.finished=kind=='session_finish';self.close()
-            elif kind=='teleop_prepare':
-                proposal=self.control.prepare()
+            elif kind=='teleop_start':
+                if self.control is None:raise ValueError('Leader/Precision 구성이 필요합니다. Follower 관측과 Snapshot은 계속 사용할 수 있습니다.')
                 from .telemetry import Recorder
                 if not hasattr(self,'recorder'):self.recorder=Recorder(self.plan,self.devices['follower'])
-                self.state='TELEOP_READY';self.emit(teleop_proposal=proposal)
-            elif kind=='teleop_start':self.control.start(payload);self.state='TELEOP_ACTIVE';self.emit()
-            elif kind=='teleop_stop':self.control.stop();self.record_control();self.state='OBSERVING';self.emit()
+                self.control.start(key);self.state='TELEOP_ACTIVE';self.emit()
+            elif kind=='teleop_stop':
+                if self.control:self.control.stop()
+                self.record_control();self.state='OBSERVING';self.emit()
             elif kind=='session_snapshot':
                 if self.acquiring is not None or self.pending is not None or self.saving is not None:raise ValueError('Capture already in progress')
                 self.read_observation();self.acquiring=command;self.acquire_deadline=time.monotonic()+5;self.state='CAPTURING'
@@ -108,8 +122,8 @@ class HardwareSession:
         except Exception as error:
             if self.terminal:
                 self.ack(command,'rejected',str(error));raise
-            if isinstance(error,DeviceError):self.control.stop()
-            self.state='TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.ack(command,'rejected',str(error));self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
+            if isinstance(error,DeviceError)and self.control:self.control.stop()
+            self.state='TELEOP_ACTIVE'if self.teleop_active else'OBSERVING';self.ack(command,'rejected',str(error));self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
 
     def try_capture(self):
         if self.acquiring is None:return
@@ -120,7 +134,7 @@ class HardwareSession:
             self.pending_command=command
             self.saving=self.writer.submit(self.store.prepare,'snapshot_'+command['command_id'],state,{'real_'+n:p['rgb']for n,p in self.packets.items()});self.save_phase='prepare'
         elif time.monotonic()>self.acquire_deadline:
-            command=self.acquiring;self.acquiring=None;self.state='TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.ack(command,'rejected','정합된 관측을5초 안에 얻지 못했습니다: '+self.capture_error)
+            command=self.acquiring;self.acquiring=None;self.state='TELEOP_ACTIVE'if self.teleop_active else'OBSERVING';self.ack(command,'rejected','정합된 관측을5초 안에 얻지 못했습니다: '+self.capture_error)
 
     def complete_capture(self):
         self.saving=self.writer.submit(self.store.finish,self.pending);self.save_phase='finish'
@@ -137,20 +151,23 @@ class HardwareSession:
             else:
                 self.snapshots.append(result)
                 self.pending=None;self.ack(self.pending_command);self.pending_command=None
-                self.state='DISCONNECTING'if self.closing else'TELEOP_ACTIVE'if self.teleoperation.active else'OBSERVING';self.emit(snapshot=result)
+                self.state='DISCONNECTING'if self.closing else'TELEOP_ACTIVE'if self.teleop_active else'OBSERVING';self.emit(snapshot=result)
         except Exception as error:
-            self.ack(self.pending_command,'rejected',str(error));self.pending_command=None;self.state='OBSERVING';self.control.stop();self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
+            self.ack(self.pending_command,'rejected',str(error));self.pending_command=None;self.state='OBSERVING'
+            if self.control:self.control.stop()
+            self.emit(error=str(error),pending_snapshot=self.pending['id']if self.pending else None)
 
     def close(self):
         if self.terminal:return
         self.closing=True;self.state='DISCONNECTING';self.emit();errors=[]
-        try:self.control.stop()
+        try:
+            if self.control:self.control.stop()
         except Exception as error:errors.append(str(error))
-        stopped=not(self.control.thread and self.control.thread.is_alive())
+        stopped=not(self.control and self.control.thread and self.control.thread.is_alive())
         if stopped:
             try:self.record_control()
             except Exception as error:errors.append(str(error))
-        if self.control.recording_error and self.control.recording_error not in errors:errors.append(self.control.recording_error)
+        if self.control and self.control.recording_error and self.control.recording_error not in errors:errors.append(self.control.recording_error)
         if self.acquiring is not None:
             self.ack(self.acquiring,'rejected','Disconnected before synchronized capture; no observation published');self.acquiring=None
         try:close_devices({**(self.devices if stopped else{}),**self.cameras})
@@ -191,5 +208,5 @@ def run(plan,*,events,commands):
     finally:
         try:session.close()
         finally:atomic_json(plan.output_path/'session-report.json',dict(state=session.state,error=error,project_id=session.project.info['id'],snapshots=session.snapshots,
-            pending_snapshot=session.pending,pending_control_rows=len(session.control.rows),unwritten_control_records=list(session.control.rows),control_record_error=session.control.recording_error,teleoperation_activation=session.teleoperation.last_activation,teleoperation_last_attempt=session.teleoperation.last_attempt,device_source=plan.effective_settings['execution']['device_source'],motion_verified=False,stop_policy='preserve_torque_no_new_goal'))
+            pending_snapshot=session.pending,pending_control_rows=len(session.control.rows)if session.control else 0,unwritten_control_records=list(session.control.rows)if session.control else[],control_record_error=session.control.recording_error if session.control else None,teleoperation_activation=session.teleoperation.last_activation if session.teleoperation else None,teleoperation_last_attempt=session.teleoperation.last_attempt if session.teleoperation else None,device_source=plan.effective_settings['execution']['device_source'],motion_verified=False,stop_policy='preserve_torque_no_new_goal'))
     return StageResult('cancelled'if session.cancelled else'completed',(str(plan.output_path),),0,{'snapshots':len(session.snapshots),'disconnected':True,'task_finished':session.finished})

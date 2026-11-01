@@ -3,7 +3,14 @@ from pathlib import Path
 import os,time,json
 import numpy as np
 from PIL import Image
-from ..data.native import atomic_json,file_sha256
+from ..data.native import atomic_json,file_sha256,encoded
+
+
+def write_preview(path,value):
+    """Replace disposable live IPC atomically; durable Capture files use atomic_json."""
+    temporary=path.with_name(path.name+'.pending')
+    try:temporary.write_bytes(encoded(value));os.replace(temporary,path)
+    finally:temporary.unlink(missing_ok=True)
 
 
 class RenderProcess:
@@ -21,16 +28,17 @@ class RenderProcess:
     def observe(self,q):
         now=time.monotonic_ns()
         if now-self.last_request<100_000_000:return
-        self.number+=1;self.last_request=now;atomic_json(self.root/'latest.json',{'id':'live_'+str(self.number),'q':list(q),'requested_ns':now})
+        self.number+=1;self.last_request=now;write_preview(self.root/'latest.json',{'id':'live_'+str(self.number),'q':list(q),'requested_ns':now})
 
     def capture(self,pending):
         if self.capture_id is not None:raise ValueError('One Pair render at a time')
         self.capture_id=pending['id'];atomic_json(self.root/'capture.json',{'id':self.capture_id,'q':pending['sample']['q_measured'],'requested_ns':time.monotonic_ns()})
 
-    def _read(self,name):
+    def _read(self,name,*,previous_id=None):
         path=self.root/name
         if not path.is_file():return None
         before=path.read_bytes();result=json.loads(before);images={}
+        if result['id']==previous_id:return None
         for camera,row in result['files'].items():
             image=Path(row['path'])
             if not image.resolve().is_relative_to(self.root.resolve()):raise ValueError('Render result escaped owned storage')
@@ -44,7 +52,7 @@ class RenderProcess:
     def poll(self):
         if(self.root/'error.json').is_file():raise ValueError('Scene render failed: '+json.loads((self.root/'error.json').read_text())['error'])
         if self.process.poll()is not None:raise ValueError('Scene render child exited: '+str(self.process.returncode))
-        live=self._read('live-result.json')
+        live=self._read('live-result.json',previous_id=self.last_live['id']if self.last_live is not None else None)
         if live is not None and (self.last_live is None or live['id']!=self.last_live['id']):
             self.last_live={k:v for k,v in live.items()if k!='images'}
             from ..data import video

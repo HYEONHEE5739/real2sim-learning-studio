@@ -4,7 +4,8 @@
 def control_commands(rows,state,events,*,tick,episode_id,env_index=0):
     """Execute already claimed IPC commands once at the current control boundary."""
     for row in rows:
-        if row.get('episode_id',episode_id)!=episode_id or row.get('env_index',env_index)!=env_index:raise ValueError('Stale command target')
+        if row.get('episode_id',episode_id)!=episode_id or row.get('env_index',env_index)!=env_index:
+            events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Command targets a previous Episode/environment'}});continue
         kind=row['kind'];payload=row.get('payload',{})
         if state.get('inactive') and kind!='cancel':
             events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Episode already closed; only cancel is supported during reset cooldown'}})
@@ -20,8 +21,10 @@ def control_commands(rows,state,events,*,tick,episode_id,env_index=0):
         elif kind=='save':state['save']=True
         elif kind=='discard':state['discard']=True
         elif kind=='mark':
-            if payload['event']!='grasp' or not 0<payload['frame']<=tick:raise ValueError('Invalid manual grasp boundary')
-            state['marks'].append(payload['frame'])
+            if not payload['event'].isidentifier()or not 0<payload['frame']<=tick:
+                events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Select a named event and an already recorded frame inside this Episode'}});continue
+            state.setdefault('event_marks',{})[payload['event']]=payload['frame']
+            if payload['event']=='grasp':state['marks'].append(payload['frame'])
         else:raise ValueError('Unsupported workflow command')
         events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'completed','applied_tick':tick}})
 

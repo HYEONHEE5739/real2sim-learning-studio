@@ -440,11 +440,17 @@ def _validate_continuation(catalog,execution,*,allow_producer_update=False):
         if allow_producer_update and 'workflow_code' in result:
             # These shared producer helpers were moved from the same exempt
             # concrete loops. Keep their existing class, not physics/IK/Task math.
-            orchestration={'source.py','annotation.py','datagen.py','evaluation.py','run.py','recipe.py','cli.py','native.py','recording.py','publication.py','commands.py','configuration.py'}
-            result['workflow_code']={k:v for k,v in result['workflow_code'].items() if Path(k).name not in orchestration}
+            orchestration={'source.py','annotation.py','datagen.py','evaluation.py','run.py','recipe.py','cli.py','native.py','recording.py','publication.py','commands.py','configuration.py','operations.py','workflow.py','recipe_editor.py','session_client.py','execution.py'}
+            result['workflow_code']={k:v for k,v in result['workflow_code'].items() if Path(k).name not in orchestration and '/ui/'not in str(k)}
         return result
     before=semantic_core(old);after=semantic_core(execution)
-    if old['stage'] not in ('source','datagen','simulation_evaluation') or semantic_identity(before)!=semantic_identity(after):raise DataError('RESUME_INCOMPATIBLE','execution','different policy/Scene/Task/Calibration/seed/phase')
+    # Historical Source runners only executed Placement declarations. Unused
+    # registry modules used to be hashed too; dropping those does not change
+    # an identical declared placement whose actual module bytes still match.
+    if old['stage']=='source'and before.get('placements')==after.get('placements')and not before.get('source_functions')and not after.get('source_functions'):
+        prior=before.get('task_code',{});current=after.get('task_code',{})
+        if current and set(current)<=set(prior)and all(prior[k]==v for k,v in current.items()):before['task_code']=dict(current)
+    if old['stage'] not in ('source','datagen','simulation_evaluation') or semantic_identity(before)!=semantic_identity(after):raise DataError('RESUME_INCOMPATIBLE','execution','Changed collection contract fields: '+', '.join(k for k in set(before)|set(after)if k not in('max_attempts','target_successes','episodes')and before.get(k)!=after.get(k)))
     attempts=history(catalog.root)
     success_ids=[row.get('episode_id') for row in attempts if row['status']=='success' or (old['stage']=='simulation_evaluation' and row['status']=='failure' and row.get('episode_id') is not None)]
     if set(success_ids)!={ep.episode_id for ep in catalog.episodes} or len(success_ids)!=len(catalog.episodes):raise DataError('RESUME_INCOMPATIBLE','history','accepted attempts and completed Episodes disagree or history is missing')

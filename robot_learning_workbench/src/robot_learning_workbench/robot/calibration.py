@@ -228,15 +228,19 @@ class PrecisionMapper:
     def __init__(self, profile):
         self.profile = copy.deepcopy(profile)
         if profile.get('schema') != SCHEMA: raise ValueError('Unknown precision profile')
-        if not profile.get('joints'):raise ValueError('Profile must contain a validated joint')
+        if not profile.get('joints'):raise ValueError('Profile must contain a calibrated joint')
         for joint, entry in profile['joints'].items():
-            if joint not in JOINTS or entry['status'] not in ('VALIDATED_MANUAL', 'REVIEWED_MANUAL'): raise ValueError('Unvalidated profile joint')
+            if joint not in JOINTS or entry['status'] not in ('CALIBRATED_MANUAL', 'VALIDATED_MANUAL', 'REVIEWED_MANUAL'): raise ValueError('Unknown profile joint status')
             if any(r['joint']!=joint for r in entry['references']):raise ValueError('Profile joint/reference mismatch')
-            if entry['status']=='REVIEWED_MANUAL':
+            if entry['status']=='CALIBRATED_MANUAL':
+                checked=fit_joint(entry['references'],entry['motor'],joint,entry['limits'],entry.get('reference_mode','angle'))
+                if checked['status']not in('OFFSET_ONLY_NEEDS_MORE_DATA','CANDIDATE_NEEDS_VALIDATION'):raise ValueError('Manual reference calculation failed')
+                if entry.get('physical_verified')is not False:raise ValueError('Manual calculation does not establish physical verification')
+            elif entry['status']=='REVIEWED_MANUAL':
                 checked = review_joint(entry, entry['review']['tolerance_deg'])
                 if entry['review'] != checked['review']: raise ValueError('Manual review evidence differs')
             else: checked = validate_joint(entry, entry['validation']['tolerance_deg'])
-            if checked['status'] != entry['status']: raise ValueError('Validation no longer passes')
+            if entry['status']!='CALIBRATED_MANUAL'and checked['status'] != entry['status']: raise ValueError('Validation no longer passes')
             for key in ('anchor_raw', 'reference_angle_rad', 'rad_per_count', 'raw_domain'):
                 if entry[key] != checked[key]: raise ValueError('Profile coefficients disagree with reference evidence')
 

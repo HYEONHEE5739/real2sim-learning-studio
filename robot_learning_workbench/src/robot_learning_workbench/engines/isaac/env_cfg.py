@@ -18,6 +18,7 @@ def execution_inputs(package, settings):
     """
     from collections.abc import Mapping
     if not isinstance(settings,Mapping):raise ValueError('Explicit engine settings mapping required; Recipe preparation is a separate boundary')
+    if 'baseline_metadata'not in settings:return scene_execution_inputs(package,settings)
     identity=settings['scene_identity']
     if any(identity[k]!=getattr(package.identity,k) for k in ('scene_id','revision','manifest_sha256')):
         raise ValueError('Scene identity differs from execution input')
@@ -71,14 +72,14 @@ def write_scene_assets(package, inputs, directory):
     if directory.is_relative_to(package.root):raise ValueError('Runtime assets must not modify Scene package')
     directory.mkdir(parents=True,exist_ok=False)
     source=package.root/package.scene['engines']['isaac']['asset_path']
-    provenance=json.loads((package.root/'provenance.json').read_text())['original_scene']
+    provenance=json.loads((package.root/'authored_scene.json').read_text())if (package.root/'authored_scene.json').is_file()else json.loads((package.root/'provenance.json').read_text())['original_scene']
     originals={o['id']:o for o in provenance['objects']}
     def mounted(name):
         frame=originals[name]['frame']
         while frame is not None:
-            if frame=='robot_link_gripper':return True
+            if frame.startswith('robot_link_'):return frame.removeprefix('robot_link_')
             frame=provenance['frames'][frame]['parent']
-        return False
+        return None
     attached=[n for n in originals if mounted(n)]
     targets=[n for n,o in package.scene['objects'].items() if o['role']=='receptacle']
     bodies=list(inputs['active_object_ids'])+targets
@@ -99,7 +100,7 @@ def write_scene_assets(package, inputs, directory):
         prim.GetReferences().AddReference(str(source),'/Scene/'+name)
         pose=np.eye(4)
         if name in attached:
-            pose=resolve_transform(package.scene['frames'],source=package.scene['objects'][name]['frame_id'],target='robot_link_gripper')
+            pose=resolve_transform(package.scene['frames'],source=package.scene['objects'][name]['frame_id'],target='robot_link_'+mounted(name))
         UsdGeom.Xformable(prim).MakeMatrixXform().Set(Gf.Matrix4d(pose.T.tolist()))
         if name in attached:
             prim.RemoveAPI(UsdPhysics.RigidBodyAPI);prim.RemoveAPI(UsdPhysics.MassAPI)
@@ -161,7 +162,7 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
         return tuple(matrix[:3,3]),tuple(quat[[3,0,1,2]])
     class RuntimeCamera(Camera):
         def _update_poses(self,env_ids):
-            if not self.cfg.prim_path.rsplit('/',1)[0].endswith('/gripper'):return super()._update_poses(env_ids)
+            if '/Robot/'not in self.cfg.prim_path:return super()._update_poses(env_ids)
             import torch
             from isaaclab.utils.math import combine_frame_transforms,convert_camera_frame_orientation_convention
             if not hasattr(self,'_mount_view'):
@@ -182,7 +183,17 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
         init_state=ArticulationCfg.InitialStateCfg(pos=root_pos,rot=root_rot,joint_pos=inputs['initial_joint_rad']),
         actuators={'joints':ImplicitActuatorCfg(joint_names_expr=list(inputs['joint_order']),effort_limit_sim=30.,stiffness={n:v[0] for n,v in gains.items()},damping={n:v[1] for n,v in gains.items()})})
     scene.workspace_static=AssetBaseCfg(prim_path='{ENV_REGEX_NS}/Workspace',spawn=sim.UsdFileCfg(usd_path=str(assets['static'])))
-    for name,file in assets['mounted'].items():setattr(scene,name,AssetBaseCfg(prim_path='{ENV_REGEX_NS}/Robot/gripper/'+name,spawn=sim.UsdFileCfg(usd_path=str(file))))
+    for name,file in assets['mounted'].items():
+        from scene_contract.transforms import resolve_transform
+        authored=json.loads((package.root/('authored_scene.json'if(package.root/'authored_scene.json').is_file()else'provenance.json')).read_text())
+        authored=authored.get('original_scene',authored);row=next(o for o in authored['objects']if o['id']==name);frame=row['frame']
+        while not frame.startswith('robot_link_'):frame=authored['frames'][frame]['parent']
+        local=resolve_transform(package.scene['frames'],source=package.scene['objects'][name]['frame_id'],target=frame)
+        mount_pos,mount_rot=pose(local)
+        # AssetBase passes its initial pose to the USD spawner, replacing the
+        # root transform in the derived layer. Preserve the declared mount.
+        setattr(scene,name,AssetBaseCfg(prim_path='{ENV_REGEX_NS}/Robot/'+frame.removeprefix('robot_link_')+'/'+name,
+            spawn=sim.UsdFileCfg(usd_path=str(file)),init_state=AssetBaseCfg.InitialStateCfg(pos=mount_pos,rot=mount_rot)))
     from scene_contract.transforms import resolve_transform
     for name,file in assets['objects'].items():
         target=name not in inputs['active_object_ids'];spec=inputs['compiled_physics']['objects'][name]
@@ -197,10 +208,10 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     scene.dome_light=AssetBaseCfg(prim_path='/World/Light',spawn=sim.DomeLightCfg(intensity=1000.,color=(.75,.75,.75)))
     for view,camera in inputs['profile']['cameras'].items():
         width,height=camera['resolution'];raw=np.asarray(camera['K']);f=(raw[0,0]+raw[1,1])/2;pos,quat=pose(camera['T_parent_camera'])
-        path='Robot/gripper/' if camera['parent']=='gripper' else ''
+        path='Robot/'+camera['parent']+'/'if camera['parent']!='world'else''
         setattr(scene,'camera_'+view,CameraCfg(class_type=RuntimeCamera,prim_path='{ENV_REGEX_NS}/'+path+'Camera_'+view,width=width,height=height,data_types=['rgb'],update_period=0.,update_latest_camera_pose=True,
             spawn=sim.PinholeCameraCfg(focal_length=24.,horizontal_aperture=24*width/f,vertical_aperture=24*height/f,clipping_range=(.001,100.),f_stop=0.),offset=CameraCfg.OffsetCfg(pos=pos,rot=quat,convention='ros')))
-    for name,link in [('grasp_fixed_contact','gripper'),('grasp_moving_contact','jaw')]:
+    for name,link in ([('grasp_fixed_contact','gripper'),('grasp_moving_contact','jaw')]if inputs['active_object_ids']else[]):
         setattr(scene,name,ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/'+link,update_period=0.,filter_prim_paths_expr=['{ENV_REGEX_NS}/'+n for n in inputs['active_object_ids']]))
     @configclass
     class Actions:
@@ -225,3 +236,45 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     model=ET.parse(inputs['robot_urdf']).getroot()
     cfg.workbench_joint_limits_rad=tuple(tuple(float(model.find("joint[@name='"+name+"']/limit").get(key)) for key in ('lower','upper')) for name in inputs['joint_order'])
     return cfg
+
+
+def scene_execution_inputs(package,settings):
+    """Resolve a new Scene from its declared assets, not v8 baseline file names."""
+    from dataclasses import asdict
+    from collections.abc import Mapping
+    from scene_contract.transforms import resolve_transform
+    from ...robot.calibration import JOINTS,joint_specs
+    from ..mujoco.model import _execution_urdf
+    files={f.path:f for f in package.files};identity=asdict(package.identity)
+    if 'scene_identity'in settings and dict(settings['scene_identity'])!=identity:raise ValueError('Engine configuration belongs to another Scene revision')
+    if tuple(package.scene['robot']['joint_order'])!=JOINTS:raise ValueError('Scene robot joint order must match SO101')
+    urdf=_execution_urdf(package);asset=package.scene['robot'].get('bindings',{}).get('isaac',{}).get('asset_path')
+    if asset not in files or Path(asset).suffix.lower()not in('.usd','.usda','.usdc'):raise ValueError('Declare robot.bindings.isaac.asset_path with a physics-enabled SO101 USD; the static Builder reference robot is not an Articulation')
+    q=settings.get('initial_joint_rad')
+    if isinstance(q,(list,tuple)):q=dict(zip(JOINTS,q))if len(q)==6 else{}
+    limits=joint_specs(urdf)
+    if not isinstance(q,dict)or set(q)!=set(JOINTS)or any(type(q[n])not in(int,float)or not math.isfinite(q[n])or not limits[n]['limits'][0]<=q[n]<=limits[n]['limits'][1]for n in JOINTS):raise ValueError('Declare six initial_joint_rad values within the selected URDF limits')
+    active=tuple(settings.get('active_object_ids',[n for n,o in package.scene['objects'].items()if o['role']=='task_object']))
+    if len(set(active))!=len(active)or any(n not in package.scene['objects']or package.scene['objects'][n]['role']!='task_object'for n in active):raise ValueError('active_object_ids must name declared task objects')
+    physics=settings.get('isaac',{});dt=physics.get('physics_timestep_s',1/300);decimation=physics.get('decimation',10)
+    if not math.isfinite(dt)or dt<=0 or type(decimation)is not int or decimation<1:raise ValueError('Invalid physics timestep/decimation')
+    def scalar(value):return value.get('value')if isinstance(value,Mapping)else value
+    compiled={}
+    for name,obj in package.scene['objects'].items():
+        mass=scalar(obj['physics'].get('mass_kg'));friction=scalar(obj['physics'].get('friction'));override=settings.get('object_physics',{}).get(name,{})
+        mass=override.get('mass_kg',mass)
+        if name in active and(type(mass)not in(int,float)or not math.isfinite(mass)or mass<=0):raise ValueError(name+': dynamic object requires explicit positive mass_kg')
+        compiled[name]={'collision':override.get('collision',obj['role']!='reference_robot'),'mass_kg':mass,'material':override.get('material',{'static_friction':1. if friction is None else friction,'dynamic_friction':1. if friction is None else friction,'restitution':0.})}
+    authored=json.loads((package.root/'authored_scene.json').read_text())if(package.root/'authored_scene.json').is_file()else json.loads((package.root/'provenance.json').read_text())['original_scene']
+    cameras={};rows={c['id']:c for c in authored['cameras']}
+    for name,camera in package.scene['cameras'].items():
+        if any(camera['distortion']):raise ValueError(name+': undistorted pinhole camera required')
+        frame=rows[name]['frame'];parent='world'
+        while frame is not None:
+            if frame.startswith('robot_link_'):parent=frame.removeprefix('robot_link_');break
+            frame=authored['frames'][frame]['parent']
+        local=resolve_transform(package.scene['frames'],source=camera['frame_id'],target='robot_link_'+parent if parent!='world'else'world')
+        cameras[name]={'parent':parent,'T_parent_camera':local.tolist(),'resolution':list(camera['resolution']),'K':camera['K']}
+    if not {'side','wrist'}<=cameras.keys():raise ValueError('Scene must declare Side/Wrist cameras')
+    profile={'robot_base':{'T_world':resolve_transform(package.scene['frames'],source='robot_base',target='world').tolist()},'cameras':cameras}
+    return {'profile':profile,'task':{'dynamic':list(active)},'physics':{},'compiled_physics':{'objects':compiled},'robot_usd':package.root/asset,'robot_urdf':urdf,'joint_order':JOINTS,'initial_joint_rad':q,'active_object_ids':active,'dt':dt,'decimation':decimation,'seed':settings.get('seed',0),'scene_identity':identity,'source_settings':settings}

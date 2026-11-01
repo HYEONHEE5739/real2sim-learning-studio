@@ -16,7 +16,8 @@ from ...data.video import AsyncVideoWriter
 
 
 def validate_settings(settings):
-    if settings['isaac']['physics_timestep_s']*settings['isaac']['decimation']!=1/30:raise ValueError('Isaac collection needs explicit 30Hz control settings')
+    physics=settings.get('isaac',{'physics_timestep_s':1/300,'decimation':10})
+    if not np.isclose(physics['physics_timestep_s']*physics['decimation'],1/30):raise ValueError('Isaac collection needs explicit 30Hz control settings')
 
 
 def record_frame(episode,sample,target_pose,target,*,time_s,base,requested=None,signals=None,previous_pose=None,command_requested=None,command_limits=None):
@@ -34,17 +35,23 @@ def pose_delta_action(previous,current,gripper):
     return torch.cat([current[:3]-previous[:3],axis_angle_from_quat(rotation.unsqueeze(0))[0],gripper.reshape(1)])
 
 
-def collect_episode(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False):
+def collect_episode(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False,plan=None):
     from .mdp import complete_episode
-    return complete_episode(env,collection_steps(env,segment,kin,episode_id=episode_id,seed=seed,frames=frames,read_target=read_target,events=events,commands=commands,duration_s=duration_s,realtime=realtime))
+    return complete_episode(env,collection_steps(env,segment,kin,episode_id=episode_id,seed=seed,frames=frames,read_target=read_target,events=events,commands=commands,duration_s=duration_s,realtime=realtime,plan=plan))
 
 
-def collection_steps(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False,env_index=0):
+def collection_steps(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False,env_index=0,plan=None):
     import torch
     ep=native_api()[0]();ep.seed=seed;ep.success=True;initial=initial_state(env,env_index,relative=True);add_initial(ep,initial)
     base=np.asarray(env.cfg.workbench_inputs['profile']['robot_base']['T_world'])
     limits=np.array(env.cfg.workbench_joint_limits_rad);limits[5]=[max(limits[5,0],0.),min(limits[5,1],np.deg2rad(100))]
+    from ...tasks.evaluation import trackers_for
+    from ...tasks.execution import contact_object,add_placement_points,recorded_signals,update_signals,metrics
+    from ...data.recording import record_metrics
+    trackers=trackers_for(plan,episode_id,env_index=env_index)if plan else{};signals={}
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False);videos={};previous=None;tick=0
+    if plan:
+        start=read_sample(env,env_index,'episode_start',0,episode_id=episode_id,object_id=contact_object(plan));add_placement_points(plan,start);update_signals(plan,start,trackers,signals);record_metrics(ep,metrics(plan,start),'episode_start')
     try:
         for camera in ('side','wrist'):videos[camera]=AsyncVideoWriter(segment.folder/(camera+'.mp4'),env_index=env_index)
         deadline=None if duration_s is None else time.monotonic()+duration_s
@@ -60,19 +67,26 @@ def collection_steps(env,segment,kin,*,episode_id,seed,frames,read_target,events
             requested=np.asarray(read_target())
             from ...robot.control import checked_target
             target=validate_targets(checked_target(requested,limits=limits,applied_dtype=np.float32)[None],limits[None])[0]
-            before=read_sample(env,env_index,'pre_step',tick,episode_id=episode_id)
+            before=read_sample(env,env_index,'pre_step',tick,episode_id=episode_id,object_id=contact_object(plan)if plan else None);before['signals']=dict(signals)
+            if plan:add_placement_points(plan,before);update_signals(plan,before,trackers,signals);record_metrics(ep,metrics(plan,before),'pre_step')
             target_pose=kin.forward_kinematics(target[:5])
-            record_frame(ep,before,target_pose,target,time_s=float(env.sim.current_time),base=base,requested=requested.astype(np.float64),previous_pose=previous,command_requested=requested,command_limits=limits)
+            record_frame(ep,before,target_pose,target,time_s=float(env.sim.current_time),base=base,requested=requested.astype(np.float64),previous_pose=previous,command_requested=requested,command_limits=limits,signals=recorded_signals(signals))
             for name,writer in videos.items():writer.write(before['cameras'][name]['rgb'])
             native_before=env.obs_buf['policy']['ee_state'][env_index].clone()
             yield target
             raw=pose_delta_action(native_before,env.obs_buf['policy']['ee_state'][env_index],torch.as_tensor(target[-1],device=env.device))
             if not torch.isfinite(raw).all():raise RuntimeError('Nonfinite post-step EEF delta after command; effect unknown')
+            if plan:
+                post=read_sample(env,env_index,'post_step',tick,episode_id=episode_id,object_id=contact_object(plan));add_placement_points(plan,post)
+                update_signals(plan,post,trackers,signals)
+                post['signals']=dict(signals);record_metrics(ep,metrics(plan,post),'post_step')
             ep.add('collection/recorded_mimic_actions',raw.cpu().clone())
             for name in ('joint_pos','joint_vel'):ep.add('states/'+name,env.obs_buf['policy'][name][env_index].detach().cpu().clone())
             previous=target_pose;step_completed(controls,events,tick);tick+=1
             if realtime:time.sleep(max(0,1/30-(time.monotonic()-started)))
         if not tick:return None,{},initial,'discarded'
+        if plan:
+            final=read_sample(env,env_index,'episode_end',tick-1,episode_id=episode_id,object_id=contact_object(plan));add_placement_points(plan,final);update_signals(plan,final,trackers,signals);record_metrics(ep,metrics(plan,final),'episode_end')
         for writer in videos.values():writer.close()
         return ep,{k:v.video_path for k,v in videos.items()},initial,'completed'
     except Exception as error:
@@ -89,7 +103,9 @@ def settings_for(plan,recorded=None):
     raw=recorded if recorded is not None else plan.input_documents.get('engine_config')
     if raw is None:raise ValueError('Explicit Isaac engine_config required')
     settings=_plain(raw);settings.pop('package_root',None);validate_settings(settings)
-    if (plan.stage=='datagen' or (plan.stage=='source' and plan.object_order)) and tuple(settings['active_object_ids'])!=tuple(plan.object_order):raise ValueError('Recipe object order differs from explicit engine configuration')
+    settings.setdefault('active_object_ids',list(plan.object_order));settings.setdefault('isaac',{'physics_timestep_s':1/300,'decimation':10})
+    if plan.stage=='datagen' and tuple(settings['active_object_ids'])!=tuple(plan.object_order):raise ValueError('Recipe object order differs from explicit engine configuration')
+    if plan.stage=='source' and not set(plan.object_order)<=set(settings['active_object_ids']):raise ValueError('Source placement objects must be active in the Model')
     return settings
 
 
@@ -102,15 +118,18 @@ def model_identity(package,settings):
 
 def execution_contract(plan,settings):
     from ...recipe import _plain
-    return dict(stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),
+    from ...tasks.placement import uses_workspace_random
+    from .env_cfg import execution_inputs
+    from ...data.native import file_sha256
+    return dict(stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
         model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),partition='unpartitioned',seed=plan.effective_settings['execution'].get('seed',0),
         task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={k:v for k,v in plan.effective_settings['code_files'].items()},
-        rng_policy='source_base_seed_plus_attempt_minus_one',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
+        rng_policy='entropy_workspace_poses_no_rng_resume_v1' if uses_workspace_random(plan) else 'source_base_seed_plus_attempt_minus_one',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
 
 
 def reset_placements(plan,env,seed,*,env_index=0):
     import torch
-    from ...tasks.placement import PlacementRequest,validate_v8_pose
+    from ...tasks.placement import PlacementRequest,checked_placement,validate_v8_pose
     from scene_contract.transforms import resolve_transform
     from scipy.spatial.transform import Rotation
     from ...tasks.placement import uses_workspace_random,workspace_reset_poses,validate_workspace_payload
@@ -122,6 +141,7 @@ def reset_placements(plan,env,seed,*,env_index=0):
     if uses_workspace_random(plan):
         occupied={}
         for name,spec in env.cfg.workbench_inputs['compiled_physics']['objects'].items():
+            if plan.scene.scene['objects'][name]['role'] in ('reference_robot','background','workspace'):continue
             if not spec.get('collision'):continue
             if name in initial['rigid_object']:occupied[name]=canonical(initial['rigid_object'][name]['root_pose'][0])
             elif name in plan.scene.scene['objects']:
@@ -149,19 +169,21 @@ def reset_placements(plan,env,seed,*,env_index=0):
             actual=canonical(observed['rigid_object'][name]['root_pose'][0])
             records[name].update(applied=True,applied_world_pose=actual.tolist(),observed_world_pose=actual.tolist(),physical_collision_checked=False)
         return records
-    rng=np.random.default_rng(seed)
+    rng=np.random.default_rng(seed);records={}
     from .state import _matrix,restore_episode
     occupied={n:canonical(initial['rigid_object'][n]['root_pose'][0]) for n in plan.object_order}
     for name in plan.object_order:
         binding=plan.function_bindings['objects.'+name+'.placement'];params=binding.params
         world=resolve_transform(plan.scene.scene['frames'],source=params.frame,target='world');inverse=np.linalg.inv(world)
-        request=PlacementRequest(name,params.frame,params.support,occupied_poses={n:inverse@p for n,p in occupied.items() if n!=name},rng=rng,rules_id=params.rules,**dict(binding.request_fields))
-        result=plan.tasks.functions[binding.name].callable(request,params=params)
-        if params.rules=='v8_preserved':
+        request=PlacementRequest(name,params.frame,params.support,occupied_poses={n:inverse@p for n,p in occupied.items() if n!=name},rng=rng,rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
+        result=checked_placement(request,plan.tasks.functions[binding.name].callable(request,params=params))
+        if getattr(params,'rules',None)=='v8_preserved':
             context=params._context;validate_v8_pose(result.pose,context['object_dimensions'],context['support_pose'],context['support_dimensions'],object_id=name)
         pose=world@result.pose;quat=Rotation.from_matrix(pose[:3,:3]).as_quat()[[3,0,1,2]]
         initial['rigid_object'][name]['root_pose']=np.r_[pose[:3,3]+origin,quat][None];initial['rigid_object'][name]['root_velocity'][:]=0;occupied[name]=pose
     restore_episode(env,[env_index],initial)
+    observed=initial_state(env,env_index)
+    return {n:{'object_id':n,'requested_world_pose':p.tolist(),'applied_world_pose':canonical(observed['rigid_object'][n]['root_pose'][0]).tolist(),'applied':True}for n,p in occupied.items()}
 
 
 def run(plan,*,events,commands,leader=None):
@@ -178,7 +200,6 @@ def run(plan,*,events,commands,leader=None):
     if 'source_dataset' in plan.resolved_inputs:return run_recorded(plan,events=events,commands=commands)
     if plan.effective_settings['execution'].get('num_envs',1)>1:raise ValueError('Multi-env Source requires independent recorded streams; no Leader broadcast')
     settings=settings_for(plan);opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='source')
-    if any(b.kind!='placement' for b in plan.function_bindings.values()):raise ValueError('Optional Source signal/metrics execution unsupported')
     if not {'episode_time_s','reset_time_s'}<=opts.keys():raise ValueError('Source timing must be explicit')
     inputs=execution_inputs(plan.scene,settings);kin=bind_kinematics(inputs['robot_urdf'],model_sha256=file_sha256(inputs['robot_urdf']),joint_order=JOINTS)
     env=owner=None;device=leader;cancelled=False
@@ -186,30 +207,42 @@ def run(plan,*,events,commands,leader=None):
     with tempfile.TemporaryDirectory(prefix='isaac-source-',dir=plan.output_path.parent) as temporary:
         try:
             env=ManagerBasedEnv(cfg=build_env_cfg(plan.scene,settings,runtime_directory=Path(temporary)/'runtime'));env.reset()
-            execution=execution_contract(plan,settings);execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
+            execution=execution_contract(plan,settings)
+            if any(b.kind!='placement'for b in plan.function_bindings.values()):
+                from ...recipe import _plain
+                execution['source_functions']={k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}
+            execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
             previous=plan.resolved_inputs.get('resume_dataset');owner=resume_to(previous['path'],plan.output_path,execution) if previous else NativeRun(plan.output_path,execution,append=opts.get('resume',False))
             count=len(load_catalog(owner.root).episodes)
             if count>=opts['episodes']:raise ValueError('Cumulative target must exceed previous completed count')
             device=device if device is not None else create_leader(plan);device.connect()
-            mapper=mapper_from_scene(plan.scene,plan.input_documents['device_profile']['calibration_id'],role='leader',phase='device_observation')
-            if device.precision_mapper.metadata()['sha256']!=mapper.metadata()['sha256']:raise ValueError('Leader mapping changed')
+            # Constructor/connection validate Scene mapping, motors and USB identity.
             device.activate()
             def read_target():
                 native,_=device.read();measured=values(device.precision_mapper.calibrated_to_observation(native,raw=device.last_raw))
                 return np.array([measured[n] for n in JOINTS])
+            retry_state=None
             while count<opts['episodes']:
                 number=max((r['attempt'] for r in history(owner.root)),default=0)+1;segment=owner.segment('source-'+str(number));claim=owner.claim_attempt(segment);eid='source-'+str(number)
-                env.reset();reset_placements(plan,env,claim['seed'])
+                from .state import restore_episode
+                from ...robot.control import checked_target
+                import copy
+                if retry_state is None:
+                    env.reset();placements=reset_placements(plan,env,claim['seed']);retry_state=initial_state(env)
+                current=copy.deepcopy(retry_state);limits=np.asarray(env.cfg.workbench_joint_limits_rad)
+                current['articulation']['robot']['joint_position']=checked_target(read_target(),limits=limits,applied_dtype=np.float32)[None]
+                current['articulation']['robot']['joint_velocity'][:]=0
+                restore_episode(env,[0],current)
                 from ...robot.control import TargetRejected
                 try:
-                    ep,media,initial,status=collect_episode(env,segment,kin,episode_id=eid,seed=claim['seed'],frames=int(np.ceil(opts['episode_time_s']*30)),read_target=read_target,events=events,commands=commands,duration_s=opts['episode_time_s'],realtime=True)
+                    ep,media,initial,status=collect_episode(env,segment,kin,plan=plan,episode_id=eid,seed=claim['seed'],frames=int(np.ceil(opts['episode_time_s']*30)),read_target=read_target,events=events,commands=commands,duration_s=opts['episode_time_s'],realtime=True)
                 except TargetRejected as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'category':'action_safety_rejection',**error.diagnostics})
                     segment.commit();raise
                 if ep is not None:
-                    segment.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'initial_state_owner':'this_source_episode','seed':claim['seed']},media=media)
+                    segment.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'placements':placements,'initial_state_owner':'this_source_episode','seed':claim['seed']},media=media)
                     for path in media.values():Path(path).unlink()
-                    segment.record_attempt(claim,status='success',episode_id=eid);segment.commit();count+=1;publish_event(owner.root,eid,events)
+                    segment.record_attempt(claim,status='success',episode_id=eid);segment.commit();count+=1;retry_state=None;publish_event(owner.root,eid,events)
                 else:
                     for path in segment.folder.glob('*.mp4'):path.unlink()
                     segment.record_attempt(claim,status='cancelled' if status=='cancelled' else 'failure',diagnostics={'reason':status});segment.commit()
@@ -268,7 +301,7 @@ def run_recorded(plan,*,events,commands):
                     from robot_learning_workbench.data.recording import recorded_initial
                     restore_episode(env,[0],recorded_initial(recorded),is_relative=True)
                 segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment);eid='source-'+str(attempt)
-                try:ep,media,initial,status=collect_episode(env,segment,kin,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
+                try:ep,media,initial,status=collect_episode(env,segment,kin,plan=plan,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
                 except Exception as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'code':getattr(error,'code','COLLECTION_ERROR'),'reason':str(error),'effect':getattr(error,'effect','unknown')});segment.commit();raise
                 if ep is not None:

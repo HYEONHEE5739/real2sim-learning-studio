@@ -13,19 +13,13 @@ def accept_annotation(physical_passed,frames,mode,marks):
 
 
 def evaluation_result(*,placed,grasp,steps,limit):
-    return dict(success=bool(placed),category='placement_success' if placed else 'max_steps' if steps>=limit else 'task_failure',
+    return dict(success=bool(placed),category='task_success' if placed else 'max_steps' if steps>=limit else 'task_failure',
                 steps=steps,grasp_latched=bool(grasp),placement=bool(placed))
 
 
 
 def evaluation_execution(plan,execution,record):
     from ..recipe import _plain
-    if any(b.kind=='placement' and b.name not in ('placement.fixed_xy','placement.random_workspace') for b in plan.function_bindings.values()):raise ValueError('Evaluation supports Fixed or Workspace Random placement')
-    params=plan.function_bindings['success'].params
-    if plan.function_bindings['success'].name!='pick_place.v8_evaluation':raise ValueError('P01 preserves explicit v8 Placement evaluation')
-    for binding in plan.function_bindings.values():
-        if binding.kind=='tracker' and getattr(binding.params,'object',None)!=params.object:raise ValueError('P01 tracker must observe the evaluated object')
-        if binding.kind=='metrics' and (getattr(binding.params,'object',None)!=params.object or getattr(binding.params,'target',None)!=params.target):raise ValueError('P01 metric object/target mismatch')
     steps=max(1,int(np.ceil(plan.effective_settings['execution'].get('timeout_s',10)*30)))
     execution.update(policy_identity=digest(record),policy_checkpoint_step=record['step'],policy_files=record['files'],policy_training_dataset=record.get('dataset_identity'),
         evaluation_contract=digest({'bindings':_plain(plan.function_bindings),'max_steps':steps,'control_policy':'position_saturation_inward_v1','policy_device':'cpu','task_instruction':plan.effective_settings['execution'].get('task_instruction')}),
@@ -42,15 +36,18 @@ def trackers_for(plan,eid,*,env_index=0):
 
 def post_evaluation(plan,row,trackers,signals,state,initial_positions,report):
     from ..tasks.pick_place import object_metrics
-    for name,tracker in trackers.items():signals[name]=tracker.update(row)
-    row['signals']=dict(signals);binding=plan.function_bindings['success'];placed=plan.tasks.functions[binding.name].callable(row,params=binding.params)
-    if type(placed) is not bool:raise ValueError('Evaluation predicate must return bool')
+    from .execution import update_signals,success_at
+    update_signals(plan,row,trackers,signals)
+    binding=plan.function_bindings['success'];placed=success_at(plan,row)
     grasp=bool(signals.get('grasp') and signals['grasp'].value)
-    for key,value in (('first_grasp_post_tick',grasp),('first_placement_post_tick',placed)):
+    placement_task=binding.name in('pick_place.v8_evaluation','pick_place.placement')
+    for key,value in (('first_grasp_post_tick',grasp),('first_placement_post_tick',placed and placement_task),('first_task_success_post_tick',placed)):
         if value and report.get(key) is None:report[key]=row['tick']
-    report['metrics']=object_metrics(plan.object_order,binding.params.object,{n:p[:3,3] for n,p in row['object_poses'].items()},row['eef_pose'][:3,3],state,grasp,placed,initial_positions)
+    if binding.name in('pick_place.v8_evaluation','pick_place.placement'):
+        report['metrics']=object_metrics(plan.object_order,binding.params.object,{n:p[:3,3] for n,p in row['object_poses'].items()},row['eef_pose'][:3,3],state,grasp,placed,initial_positions)
+    report['success_function']=binding.name
     for role,b in plan.function_bindings.items():
-        if b.kind=='metrics':report.setdefault('declared_metrics',{})[role]=plan.tasks.functions[b.name].callable(row,params=b.params)
+        if b.kind=='metrics'and b.phase==row['phase']:report.setdefault('declared_metrics',{})[role]=plan.tasks.functions[b.name].callable(row,params=b.params)
     return placed,grasp
 
 

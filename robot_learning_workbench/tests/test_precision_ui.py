@@ -1,7 +1,7 @@
 from test_ui_restoration import qt
 
 
-def test_precision_tab_records_references_and_applies_only_an_explicit_saved_revision(tmp_path):
+def test_precision_tab_records_calculates_and_saves_without_separate_activation(tmp_path):
     qt('''
 from pathlib import Path
 import sys
@@ -10,18 +10,21 @@ from robot_learning_workbench.ui.app import Window
 from robot_learning_workbench.ui.precision_page import PrecisionPage
 app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'workspace');p=w.sessions['precision'];assert isinstance(p,PrecisionPage)
 assert w.tabs.widget(3)is p and 'precision_calibration'not in w.workflows
-p.client.running=True;sent=[];p.client.send=lambda kind,payload=None:sent.append((kind,payload));p.buttons()
-p.angle.setValue(0);p.record.click();assert sent[-1]==('precision_record',{'joint':'shoulder_pan','angle_rad':0.,'split':'train'})
-p.split.setCurrentIndex(1);p.angle.setValue(45);p.record.click();assert sent[-1][1]['split']=='validation'
+p.client.running=True;sent=[]
+def send(kind,payload=None):
+    sent.append((kind,payload));return str(len(sent))
+p.client.send=send;p.latest={'torque':0};p.buttons()
+p.angle.setValue(0);p.record.click();assert sent[-1]==('precision_record',{'joint':'shoulder_pan','angle_rad':0.})
+p.pending.clear()
 reference={'reference_id':'one','raw':1500,'angle_rad':0,'split':'train','before_model_rad':0.1}
-projection={'kind':'precision_fit','result':{},'joint':'shoulder_pan','candidate':{'status':'VALIDATED_MANUAL','errors_rad':[.001]},'references':[reference]}
-p.update_progress({'precision_result':projection});assert p.references.rowCount()==1 and not p.apply_button.isEnabled()
-p.joint.setCurrentIndex(2);assert 'VALIDATED_MANUAL'not in p.fit_result.text()
-p.update_progress({'precision_result':projection});assert p.references.rowCount()==0
-p.joint.setCurrentIndex(0);p.update_progress({'precision_result':{**projection,'kind':'precision_select'}});assert p.references.item(0,5).text()!='—'
-p.update_progress({'precision_result':{'kind':'precision_save','result':{'path':'/saved/profile.json','sha256':'a'*64},'joint':'shoulder_pan','candidate':None,'references':[]}});assert p.apply_button.isEnabled()
-assert 'precision_activate'not in [r[0]for r in sent]
-received=[];p.activated.connect(received.append);p.update_progress({'precision_result':{'kind':'precision_activate','result':{'configuration_path':'/new/config.yaml','source_configuration_path':'/old/config.yaml'},'joint':'shoulder_pan','candidate':None,'references':[]}});assert received
+projection={'kind':'precision_record','result':{},'joint':'shoulder_pan','candidate':{'status':'CALIBRATED_MANUAL','errors_rad':[.001]},'references':[reference]}
+p.update_progress({'precision_result':projection});assert p.references.rowCount()==1 and p.save_as_button.isEnabled()
+p.joint.setCurrentIndex(2);assert p.references.rowCount()==0
+p.pending.clear();p.joint.setCurrentIndex(0);p.pending.clear();assert p.references.item(0,5).text()!='—'
+received=[];p.profile_saved.connect(received.append)
+saved={'path':'/saved/profile.json','sha256':'a'*64,'configuration_path':'/new/config.yaml','source_configuration_path':'/old/config.yaml'}
+p.update_progress({'precision_result':{**projection,'kind':'precision_save','result':saved}})
+assert received==[saved]and p.profile_file.text()=='/saved/profile.json'
 p.client.running=False;w.close();app.processEvents()
 ''',tmp_path)
 

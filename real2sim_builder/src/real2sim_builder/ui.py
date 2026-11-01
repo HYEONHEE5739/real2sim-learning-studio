@@ -76,6 +76,9 @@ class Window(QMainWindow):
 
     def setup_result(self):
         tab=QWidget();box=QVBoxLayout(tab);self.tabs.addTab(tab,'Result');self.result=QTextEdit();self.result.setReadOnly(True);box.addWidget(self.result)
+        self.execution_usd=QLineEdit();self.execution_usd.setPlaceholderText('선택: 물리 Articulation SO101 USD 경로 (Isaac 실행용)');box.addWidget(self.execution_usd)
+        self.execution_mjcf=QLineEdit();self.execution_mjcf.setPlaceholderText('선택: 관절·Position actuator를 포함한 전체 MJCF 경로');box.addWidget(self.execution_mjcf)
+        self.export_calibration=QLineEdit();self.export_calibration.setPlaceholderText('선택: Scene Calibration 선언 JSON');box.addWidget(self.export_calibration)
         export_=QPushButton('Export new revision');export_.clicked.connect(lambda:self.guard(self.export_selected));box.addWidget(export_)
         open_=QPushButton('Open export folder');open_.clicked.connect(lambda:self.guard(self.open_export));box.addWidget(open_)
         viewer=QPushButton('Open accepted MJCF in MuJoCo viewer');viewer.clicked.connect(lambda:self.guard(self.open_mujoco));box.addWidget(viewer)
@@ -225,7 +228,11 @@ class Window(QMainWindow):
             destination,_=QFileDialog.getSaveFileName(self,'New Scene package directory')
         if not destination:return
         if Path(destination).exists():raise ValueError('A new destination is required; existing packages are immutable')
-        self.start_worker(['-u','-m','real2sim_builder.cli','export',str(self.project.root),'--destination',str(destination)],'export')
+        args=['-u','-m','real2sim_builder.cli','export',str(self.project.root),'--destination',str(destination)]
+        if self.execution_usd.text().strip():args+=['--isaac-robot-asset',self.execution_usd.text().strip()]
+        if self.execution_mjcf.text().strip():args+=['--mujoco-robot-asset',self.execution_mjcf.text().strip()]
+        if self.export_calibration.text().strip():args+=['--calibration',self.export_calibration.text().strip()]
+        self.start_worker(args,'export')
 
     def export_path(self):
         if not self.project:raise ValueError('Select a project')

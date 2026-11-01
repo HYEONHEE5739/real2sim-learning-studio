@@ -28,9 +28,9 @@ from robot_learning_workbench.ui.app import Window
 from pathlib import Path
 import sys
 app=QApplication([]);root=Path(sys.argv[1]);w=Window(sys.argv[2],root/'task_modules.yaml',root/'workspace');w.show();app.processEvents()
-assert w.navigation.count()==15 and w.stack.count()==15
+assert w.navigation.count()==10 and w.stack.count()==10
 assert not w.workflows['datagen'].start_button.isEnabled()
-assert w.source.images.keys()=={'side','wrist'}
+assert w.source.previews.keys()=={'side','wrist'}
 assert not any(n in sys.modules for n in ['torch','mujoco','isaaclab','lerobot'])
 w.close();app.processEvents();assert not w.isVisible()
 '''
@@ -43,7 +43,7 @@ def test_qt_backend_start_failure_is_terminal_not_busy_forever(tmp_path):
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtTest import QTest
 from robot_learning_workbench.ui.jobs import BackendJob
-app=QApplication([]);j=BackendJob('/no/such/python');rows=[];j.finished.connect(rows.append);j.start('scene',path='missing')
+app=QApplication([]);j=BackendJob('/no/such/python');rows=[];j.finished.connect(rows.append);j.start('catalog',path='missing')
 for _ in range(20):app.processEvents();QTest.qWait(10)
 assert rows and not rows[0]['ok']
 '''

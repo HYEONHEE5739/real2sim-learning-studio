@@ -73,14 +73,11 @@ def test_fake_supervised_cycle_records_native_targets_and_next_feedback(tmp_path
     from robot_learning_workbench.robot.session_devices import construct
     from robot_learning_workbench.data.native import load_catalog,read_array
     from test_precision_calibration import OLD
-    from test_supervised_session import approval
     import yaml
     path,project,spec=session_recipe(tmp_path);spec['inputs']['source_robot_model']=str(OLD);path.write_text(yaml.safe_dump(spec));plan=prepare_recipe(read_recipe(path))
     devices,cameras,bounds=construct(plan);events=[];s=HardwareSession(plan,devices,cameras,bounds,events=events.append)
     try:
-        s.connect();s.command({'kind':'teleop_prepare','command_id':'proposal','payload':{}})
-        assert s.teleoperation.proposal is not None
-        s.command({'kind':'teleop_start','command_id':'start','payload':approval(s.teleoperation.proposal)})
+        s.connect();s.command({'kind':'teleop_start','command_id':'start','payload':{}})
         assert s.teleoperation.active
         for _ in range(4):s.observe();time.sleep(.035)
         s.command({'kind':'teleop_stop','command_id':'stop','payload':{}});assert not s.teleoperation.active

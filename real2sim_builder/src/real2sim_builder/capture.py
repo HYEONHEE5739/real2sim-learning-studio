@@ -144,6 +144,13 @@ def align(samples, timestamp, names, discrete=(), max_skew_ns=100000000):
     return q
 
 
+def _capture_destination(project,root,session_id):
+    base=(project.root/'input/captures').resolve();source=Path(root).resolve()
+    # A closed dataset may already belong to a run folder in this Project.
+    # Register it in place rather than copying the images/model a second time.
+    return source if source.is_relative_to(base)and source.name==session_id else base/session_id
+
+
 def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     project.require_writable()
     m, samples, events = loaded or load_session(root)
@@ -152,7 +159,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     known_groups = {i.get('group_id'): i['split'] for i in project.evidence['images'] if i.get('group_id')}
     if m['group_id'] in known_groups and known_groups[m['group_id']] != m['split']:
         raise ValueError('Train/holdout group leakage')
-    destination = project.root / 'input/captures' / m['session_id']
+    destination = _capture_destination(project,root,m['session_id'])
     in_place=root.resolve()==destination.resolve()
     if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')
@@ -315,7 +322,7 @@ def import_session(project, root, max_skew_ns=100000000, loaded=None):
     project.require_writable()
     'Restore project metadata on failed import; never alter immutable source input.'
     m, _, _ = loaded or load_session(root)
-    destination = project.root / 'input/captures' / m['session_id']
+    destination = _capture_destination(project,root,m['session_id'])
     in_place=root.resolve()==destination.resolve()
     if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')

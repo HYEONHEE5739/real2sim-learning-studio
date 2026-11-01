@@ -26,7 +26,7 @@ def main(argv=None):
     p=sub.add_parser('run');p.add_argument('project');p.add_argument('--renderer',choices=['software-egl','egl','osmesa'],default='software-egl');p.add_argument('--max-iterations',type=int,default=8);p.add_argument('--mae',type=float,default=.12);p.add_argument('--reprojection-px',type=float,default=5);p.add_argument('--silhouette-iou',type=float,default=.8)
     p=sub.add_parser('control');p.add_argument('project');p.add_argument('action',choices=['pause','resume','stop'])
     p=sub.add_parser('status');p.add_argument('project')
-    p=sub.add_parser('export');p.add_argument('project');p.add_argument('--destination',required=True);p.add_argument('--calibration');p.add_argument('--required-file',action='append',default=[]);p.add_argument('--allow-unvalidated',action='store_true');p.add_argument('--candidate')
+    p=sub.add_parser('export');p.add_argument('project');p.add_argument('--destination',required=True);p.add_argument('--calibration');p.add_argument('--required-file',action='append',default=[]);p.add_argument('--allow-unvalidated',action='store_true');p.add_argument('--candidate');p.add_argument('--isaac-robot-asset');p.add_argument('--mujoco-robot-asset')
     p=sub.add_parser('verify');p.add_argument('package')
     p=sub.add_parser('ui');p.add_argument('--projects',default='projects')
     args=parser.parse_args(argv)
@@ -138,7 +138,7 @@ def main(argv=None):
         from dataclasses import asdict
         identity=export_revision(project,destination=Path(args.destination),candidate=args.candidate,
             calibration=read(args.calibration) if args.calibration else None,
-            required_files=tuple(Path(p) for p in args.required_file),allow_unvalidated=args.allow_unvalidated)
+            required_files=tuple(Path(p) for p in args.required_file),allow_unvalidated=args.allow_unvalidated,isaac_robot_asset=args.isaac_robot_asset,mujoco_robot_asset=args.mujoco_robot_asset)
         if not project.read_only:project.update(export_destination=str(Path(args.destination).resolve()),export_identity=asdict(identity))
         print(json.dumps({'identity':asdict(identity),'destination':str(Path(args.destination).resolve())},indent=2))
 

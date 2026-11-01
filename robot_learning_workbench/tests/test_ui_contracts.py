@@ -101,21 +101,15 @@ from pathlib import Path
 import sys
 from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.workflow import WorkflowPage
+from robot_learning_workbench.ui.source_page import SourcePage
 app=QApplication([])
-p=WorkflowPage('source',sys.executable,'modules')
-assert p.source_kind.count()==2
-assert 'Live Leader' in p.source_kind.itemText(1)
-assert 'device_profile' in p.inputs
+p=SourcePage(sys.executable,'modules',Path(sys.argv[1]))
+assert p.editor.data()['stage']=='source'
 assert {'save','discard'}<=set(p.commands)
 q=WorkflowPage('real_evaluation',sys.executable,'modules')
-assert q.mode.findText('observe_only')>=0
-assert q.mode.findText('full_robot')<0
-assert q.gripper_button.isEnabled() is False
-t=WorkflowPage('teleoperation',sys.executable,'modules')
-assert not t.counts and hasattr(t,'live_frames')
-for page in (p,q,t):page.timer.stop();page.close()
+for page in (p,q):page.timer.stop();page.close()
 '''
-    result=subprocess.run([UI,'-B','-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
+    result=subprocess.run([UI,'-B','-c',code,str(tmp_path)],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
     assert result.returncode==0,result.stderr
 
 

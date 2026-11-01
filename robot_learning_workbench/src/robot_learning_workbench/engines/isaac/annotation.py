@@ -12,21 +12,26 @@ from robot_learning_workbench.tasks.evaluation import accept_annotation
 from robot_learning_workbench.data.recording import validate_recording, validate_source_ranges
 from ...data.native import native_api,open_native,load_catalog,NativeRun
 from ...data.video import AsyncVideoWriter
+from ...data.recording import record_metrics
 
 
-def task_sample(env,plan,phase,tick,episode_id,signals,*,params=None,env_index=0):
+def task_sample(env,plan,phase,tick,episode_id,signals,*,env_index=0):
     """Preserve original GPU float32 target-local corners and speed comparison."""
     import torch
     from isaaclab.utils.math import subtract_frame_transforms,quat_apply
-    params=plan.function_bindings['acceptance'].params if params is None else params
-    row=read_sample(env,env_index,phase,tick,episode_id=episode_id,object_id=params.object);row['signals']=dict(signals)
-    cube=env.scene[params.object];target=env.scene[params.target]
-    pos,quat=subtract_frame_transforms(target.data.root_pos_w,target.data.root_quat_w,cube.data.root_pos_w,cube.data.root_quat_w)
-    size=plan.scene.scene['objects'][params.object]['task_geometry']['dimensions_m']
-    corners=torch.tensor([[a*size[0]/2,b*size[1]/2,c*size[2]/2] for a in (-1,1) for b in (-1,1) for c in (-1,1)],device=env.device)
-    points=quat_apply(quat[:,None,:].expand(-1,8,-1).reshape(-1,4),corners[None].expand(env.num_envs,-1,-1).reshape(-1,3)).reshape(env.num_envs,8,3)+pos[:,None,:]
-    row['placement_points']={params.object:{'target_id':params.target,'points':points[env_index]}}
-    row['linear_velocities'][params.object]=cube.data.root_lin_vel_w[env_index].clone()
+    from ...tasks.execution import contact_object,placement_bindings
+    row=read_sample(env,env_index,phase,tick,episode_id=episode_id,object_id=contact_object(plan));row['signals']=dict(signals);row['placement_points']={}
+    bindings=placement_bindings(plan)
+    if not bindings:return row
+    for binding in bindings:
+        params=binding.params
+        cube=env.scene[params.object];target=env.scene[params.target]
+        pos,quat=subtract_frame_transforms(target.data.root_pos_w,target.data.root_quat_w,cube.data.root_pos_w,cube.data.root_quat_w)
+        size=plan.scene.scene['objects'][params.object]['task_geometry']['dimensions_m']
+        corners=torch.tensor([[a*size[0]/2,b*size[1]/2,c*size[2]/2] for a in (-1,1) for b in (-1,1) for c in (-1,1)],device=env.device)
+        points=quat_apply(quat[:,None,:].expand(-1,8,-1).reshape(-1,4),corners[None].expand(env.num_envs,-1,-1).reshape(-1,3)).reshape(env.num_envs,8,3)+pos[:,None,:]
+        row['placement_points'][params.object]={'target_id':params.target,'points':points[env_index]}
+        row['linear_velocities'][params.object]=cube.data.root_lin_vel_w[env_index].clone()
     return row
 
 
@@ -37,7 +42,7 @@ def replay_episode(plan,env,source,segment,*,events,commands):
 
 def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
     import torch
-    from ...tasks.pick_place import v8_placement
+    from ...tasks.execution import placement_signal,recorded_signals,update_signals,metrics,annotation_events,predicate
     handler=open_native(source)
     try:recorded=handler.load_episode(source.key,'cpu')
     finally:handler.close()
@@ -51,6 +56,7 @@ def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
         if binding.kind=='tracker':trackers[role.split('.',1)[1]]=plan.tasks.functions[binding.name].callable(params=binding.params,episode={'episode_id':eid,'env_index':env_index,'control_dt_s':env.step_dt})
     controls=dict(paused=False,steps=0,cancelled=False,marks=[],skipped=False);videos={};previous=None;first=None;trace=[];tick=0
     acceptance=plan.function_bindings['acceptance']
+    start=task_sample(env,plan,'episode_start',0,eid,signals,env_index=env_index);update_signals(plan,start,trackers,signals);record_metrics(ep,metrics(plan,start),'episode_start')
     try:
         for name in ('side','wrist'):videos[name]=AsyncVideoWriter(segment.folder/(name+'.mp4'),env_index=env_index)
         while tick<len(targets):
@@ -58,27 +64,30 @@ def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
             control_commands(commands(),controls,events,tick=tick,episode_id=eid,env_index=env_index)
             if controls['cancelled'] or controls['skipped']:return None,{},dict(status='cancelled' if controls['cancelled'] else 'skipped',frames=tick)
             if controls['paused'] and not controls['steps']:yield None;continue
-            before=task_sample(env,plan,'pre_step',tick,eid,signals,env_index=env_index);pregrasp=bool(signals.get('grasp') and signals['grasp'].value)
+            before=task_sample(env,plan,'pre_step',tick,eid,signals,env_index=env_index);update_signals(plan,before,trackers,signals);pre_metrics=metrics(plan,before);record_metrics(ep,pre_metrics,'pre_step');pregrasp=bool(signals.get('grasp') and signals['grasp'].value)
             target=applied_targets[tick]
-            record_frame(ep,before,goals[tick],target,time_s=tick/30,base=base,signals={'grasp':pregrasp,'place':v8_placement(before,params=acceptance.params)},previous_pose=previous,command_requested=targets[tick],command_limits=bounds[tick])
+            record_frame(ep,before,goals[tick],target,time_s=tick/30,base=base,signals={**recorded_signals(signals),'grasp':pregrasp,'place':placement_signal(plan,before)},previous_pose=previous,command_requested=targets[tick],command_limits=bounds[tick])
             for name,writer in videos.items():writer.write(before['cameras'][name]['rgb'])
             yield target
             post=task_sample(env,plan,'post_step',tick,eid,signals,env_index=env_index)
-            for name,tracker in trackers.items():signals[name]=tracker.update(post)
+            update_signals(plan,post,trackers,signals)
+            post_metrics=metrics(plan,post);record_metrics(ep,post_metrics,'post_step')
             if signals.get('grasp') and signals['grasp'].value and first is None:first=tick
-            trace.append({'tick':tick,'pre_grasp':pregrasp,'post_grasp':bool(signals.get('grasp') and signals['grasp'].value),'q':post['joint_positions'].tolist(),'qd':post['joint_velocities'].tolist(),'object_pose':post['object_poses'][acceptance.params.object].tolist(),'forces':post['contacts']['force_w'].tolist()})
+            trace.append({'tick':tick,'pre_grasp':pregrasp,'post_grasp':bool(signals.get('grasp') and signals['grasp'].value),'q':post['joint_positions'].tolist(),'qd':post['joint_velocities'].tolist(),'object_poses':{n:p.tolist()for n,p in post['object_poses'].items()},'forces':post['contacts']['force_w'].tolist(),'metrics':{**pre_metrics,**post_metrics}})
             previous=goals[tick];step_completed(controls,events,tick);tick+=1
-        final=task_sample(env,plan,'episode_end',tick-1,eid,signals,env_index=env_index);passed=plan.tasks.functions[acceptance.name].callable(final,params=acceptance.params)
+        final=task_sample(env,plan,'episode_end',tick-1,eid,signals,env_index=env_index);update_signals(plan,final,trackers,signals);record_metrics(ep,metrics(plan,final),'episode_end');passed=predicate(plan,'acceptance',final)
         if type(passed) is not bool:raise ValueError('Task acceptance must return bool')
         accepted,mark=accept_annotation(passed,tick,plan.effective_settings['execution']['mode'],controls['marks'])
+        if plan.effective_settings['execution']['mode']=='manual'and acceptance.name!='pick_place.v8_annotation':
+            accepted=passed and bool(controls.get('event_marks'))and all(0<v<tick-1 for v in controls['event_marks'].values());mark=None
         report=dict(env_index=env_index,initial_frame='scene_world',engine_env_origin=env.scene.env_origins[env_index].cpu().numpy().tolist(),status='success' if accepted else 'failure',physical_replay_passed=passed,frames=tick,first_grasp_post_tick=first,trace=trace,initial_state_owner='annotation_replay_start',source_initial_state=original)
         from robot_learning_workbench.data.recording import command_summary
         report['saturation']=command_summary(ep)
         if not accepted:return None,{},report
-        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1
+        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1 if acceptance.name=='pick_place.v8_annotation'else ep.data['obs']['events']['place'][-1]
         if mark is not None:
             signal=torch.from_numpy((np.arange(tick)>=mark).astype(np.uint8)[:,None]);ep.data['obs']['events']['grasp']=signal;ep.data['obs']['datagen_info']['subtask_term_signals']['grasp']=signal
-        report['annotation']={'grasp':int(torch.nonzero(ep.data['obs']['events']['grasp'][:,0])[0]),'method':'manual' if mark is not None else 'auto'}
+        report['annotation']={**annotation_events(ep,manual_frame=mark,manual_events=controls.get('event_marks')),'method':plan.effective_settings['execution']['mode'],'acceptance_function':acceptance.name}
         for writer in videos.values():writer.close()
         return ep,{k:v.video_path for k,v in videos.items()},report
     finally:
@@ -88,7 +97,7 @@ def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
 
 def validate_source(catalog):
     validate_source_ranges(catalog)
-    if catalog.execution.get('stage')!='source' or catalog.execution.get('engine')!='isaac':raise ValueError('Original Isaac Source required')
+    if catalog.execution.get('stage')!='source':raise ValueError('Original Source Dataset required')
     validate_recording(catalog.execution.get('recording',{}))
     if not catalog.episodes:raise ValueError('Nonempty complete Source episodes required')
 
@@ -100,10 +109,14 @@ def run(plan,*,events,commands):
     from ...recipe import verify_prepared_inputs,_plain
     from ...run import StageResult
     verify_prepared_inputs(plan);catalog=load_catalog(plan.resolved_inputs['dataset']['path'])
-    validate_source(catalog);settings=settings_for(plan,catalog.execution.get('model_config'))
-    if catalog.execution.get('model_sha256')!=model_identity(plan.scene,settings):raise ValueError('Source physics/model identity differs')
-    if any(b.kind=='metrics' for b in plan.function_bindings.values()):raise ValueError('Standalone metrics execution is unsupported')
-    execution={**catalog.execution,'stage':'annotation','source_dataset':_plain(catalog.identity),'annotation_mode':plan.effective_settings['execution']['mode'],'task_code':_plain(plan.effective_settings['task_modules_sha256']),'workflow_code':_plain(plan.effective_settings['code_files'])}
+    from ...data.recording import replay_settings
+    validate_source(catalog);settings=settings_for(plan,replay_settings(plan,catalog))
+    if catalog.execution.get('engine')=='isaac'and catalog.execution.get('model_sha256')!=model_identity(plan.scene,settings):raise ValueError('Source Isaac physical model differs from replay configuration')
+    from .env_cfg import execution_inputs
+    from ...data.native import file_sha256
+    urdf_sha=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf'])
+    if catalog.execution.get('urdf_sha256',urdf_sha)!=urdf_sha:raise ValueError('Source robot model coordinates differ from replay URDF')
+    execution={**catalog.execution,'engine':'isaac','model_sha256':model_identity(plan.scene,settings),'urdf_sha256':urdf_sha,'model_config':settings,'replay_source_engine':catalog.execution.get('engine'),'physics_equivalence_verified':False,'stage':'annotation','source_dataset':_plain(catalog.identity),'annotation_mode':plan.effective_settings['execution']['mode'],'task_code':_plain(plan.effective_settings['task_modules_sha256']),'workflow_code':_plain(plan.effective_settings['code_files'])}
     execution['recording']={**execution['recording'],'position_target_policy':'saturation_inward_v1','joint_targets_role':'applied'}
     env=None;saved=0;cancelled=False;reports=[]
     plan.output_path.parent.mkdir(parents=True,exist_ok=True)

@@ -26,7 +26,7 @@ assert page.start_button.objectName()=='primaryAction' and page.cancel_button.ob
 assert not page.details.isChecked() and not page.editor.isVisible()
 assert not page.input_rows['resume_dataset'].isVisible()
 assert page.object_table.isVisible() and page.counts['num_episodes'].isVisible()
-assert not page.gripper_button.isVisible() and page.loss_chart is None
+assert page.loss_chart is None
 page.timer.stop();page.close()
 assert not any(n in sys.modules for n in ('torch','lerobot','isaaclab','mujoco','serial'))
 ''',tmp_path)
@@ -53,19 +53,19 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.app import Window
 app=QApplication([]);root=Path(sys.argv[1]);window=Window('/no/worker',root/'modules.yaml',root/'workspace')
-assert [window.tabs.tabText(i)for i in range(window.tabs.count())]==['1 · Real2Sim Capture','2 · Real / Sim','3 · Workspace Pipeline','4 · Precision Calibration']
+assert [window.tabs.tabText(i)for i in range(window.tabs.count())]==['1 · Scene Prepare','2 · Real / Sim','3 · Workspace Pipeline','4 · Precision Calibration']
 assert window.navigation_panel.width()==200 and window.navigation.objectName()=='stageNavigation'
 p=window.workflows['source'];recipe=root/'source.yaml'
 recipe.write_text('schema_version: 1\\nstage: source\\nengine: mujoco\\ninputs: {}\\nexecution: {num_episodes: 1}\\noutput: {directory: source}\\n')
-p.load_recipe(recipe);p.counts['num_episodes'].setValue(3)
+p.settings.load_script(recipe);p.editor.text.setPlainText(p.editor.text.toPlainText().replace('num_episodes: 1','num_episodes: 3'))
 for size in ((1320,900),(1920,1080)):
     window.resize(*size);window.show();app.processEvents()
     assert (window.width(),window.height())==size
     window.tabs.setCurrentIndex(2)
-    window.navigation.setCurrentRow(4);app.processEvents()
+    window.navigation.setCurrentRow(window.page_rows['Mimic / Datagen']);app.processEvents()
     assert window.stack.currentWidget() is window.workflows['datagen']
-    window.navigation.setCurrentRow(1);app.processEvents()
-    assert p.editor.dirty and p.counts['num_episodes'].value()==3 and not p.start_button.isEnabled()
+    window.navigation.setCurrentRow(window.page_rows['Source Demo']);app.processEvents()
+    assert p.editor.dirty and p.editor.data()['execution']['num_episodes']==3 and not p.start_button.isEnabled()
 window.close();app.processEvents();assert not window.isVisible()
 assert not any(n in sys.modules for n in ('torch','lerobot','isaaclab','mujoco','serial'))
 ''',tmp_path)
@@ -174,11 +174,10 @@ c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.sessions['precision']
 assert hasattr(c,'snapshot_table')and hasattr(c,'client')
 assert set(r.previews)=={'side','wrist','sim_side','sim_wrist'}
 assert not c.start_teleop_button.isEnabled()and not hasattr(r,'start_teleop_button')
-assert p.references.columnCount()==6 and not p.record.isEnabled()and not p.apply_button.isEnabled()
+assert p.references.columnCount()==6 and not p.record.isEnabled()and not p.save_as_button.isEnabled()
 for page in (w.workflows['real_evaluation'],):
-    assert not page.gripper_button.isEnabled()
     assert not any(b.isEnabled() and any(word in b.text()for word in ('힘 풀기','Home','Start Teleop','Torque Enable'))for b in page.findChildren(QPushButton))
-w.navigation.setCurrentRow(5);app.processEvents();assert w.curation_dialog.isVisible()
+w.navigation.setCurrentRow(w.page_rows['Data Curation']);app.processEvents();assert w.curation_dialog.isVisible()
 w.curation_dialog.close();w.close();app.processEvents()
 ''',tmp_path)
 
@@ -195,24 +194,21 @@ def test_precision_presentation_is_a_read_only_projection_of_existing_profile(tm
     assert file_sha256(path)==before
 
 
-def test_source_shortcuts_target_existing_r03_commands_and_keep_recipe_dirty(tmp_path):
+def test_source_shortcuts_target_existing_r03_commands_and_keep_script_dirty(tmp_path):
     qt('''
 from pathlib import Path
 import sys
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtTest import QTest
 from PyQt6.QtCore import Qt
-from robot_learning_workbench.ui.workflow import WorkflowPage
-app=QApplication([]);root=Path(sys.argv[1]);p=WorkflowPage('source','/no/worker','modules');p.show();app.processEvents()
+from robot_learning_workbench.ui.source_page import SourcePage
+app=QApplication([]);root=Path(sys.argv[1]);p=SourcePage('/no/worker','modules',root);p.show();app.processEvents()
 seen=[];p.command=lambda kind:seen.append(kind)
 p.commands['save'].setEnabled(True);p.commands['discard'].setEnabled(True)
 p.viewer.setFocus();QTest.keyClick(p.viewer,Qt.Key.Key_Right);QTest.keyClick(p.viewer,Qt.Key.Key_Left)
 assert seen==['save','discard']
-r=root/'source.yaml';r.write_text('schema_version: 1\\nstage: source\\nengine: mujoco\\ninputs: {source_dataset: recorded}\\nexecution: {num_episodes: 1}\\noutput: {directory: data}\\n')
-p.load_recipe(r);assert p.input_rows['device_profile'].isHidden()
-p.source_kind.setCurrentIndex(1)
-assert p.editor.dirty and 'source_dataset'not in p.editor.data()['inputs'] and not p.input_rows['device_profile'].isHidden()
-assert '편집'in p.recipe_status.text() and not p.start_button.isEnabled()
+p.editor.text.setPlainText(p.editor.text.toPlainText().replace('num_episodes: 10','num_episodes: 3'))
+assert p.editor.dirty and not p.start_button.isEnabled()
 p.timer.stop();p.close()
 ''',tmp_path)
 
@@ -241,29 +237,15 @@ from pathlib import Path
 import sys
 from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.app import Window
-app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'space');w.resize(1320,900);w.show();w.tabs.setCurrentIndex(2);w.navigation.setCurrentRow(1);app.processEvents()
+app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'space');w.resize(1320,900);w.show();w.tabs.setCurrentIndex(2);w.navigation.setCurrentRow(w.page_rows['Source Demo']);app.processEvents()
 p=w.workflows['source'];assert p.previews['side'].height()>=250
-w.navigation.setCurrentRow(6);app.processEvents();t=w.workflows['train']
+w.navigation.setCurrentRow(w.page_rows['모델 학습']);app.processEvents();t=w.workflows['train']
 assert t.input_rows['policy'].isHidden() and t.input_rows['checkpoint'].isHidden()
 assert t.training_settings.mapTo(t.settings_content,t.training_settings.rect().topLeft()).y()<400
 w.close();app.processEvents()
 ''',tmp_path)
 
 
-def test_source_env_selector_follows_edited_environment_count(tmp_path):
-    qt('''
-from pathlib import Path
-import sys
-from PyQt6.QtWidgets import QApplication
-from robot_learning_workbench.ui.workflow import WorkflowPage
-app=QApplication([]);root=Path(sys.argv[1]);p=WorkflowPage('source','/no/worker','modules');p.show()
-r=root/'source.yaml';r.write_text('schema_version: 1\\nstage: source\\nengine: mujoco\\ninputs: {}\\nexecution: {env_num: 1, num_episodes: 1}\\noutput: {directory: output}\\n')
-p.load_recipe(r);app.processEvents();assert not p.preview_env.isVisible()
-p.counts['env_num'].setValue(4);app.processEvents()
-assert p.preview_env.isVisible() and p.preview_env.maximum()==3
-p.counts['env_num'].setValue(1);app.processEvents();assert not p.preview_env.isVisible()
-p.timer.stop();p.close()
-''',tmp_path)
 
 
 def test_saved_episode_training_and_fractional_time_settings_are_displayed_truthfully(tmp_path):

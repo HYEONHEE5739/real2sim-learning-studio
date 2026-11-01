@@ -63,7 +63,7 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
     if plan.stage not in('capture','real_evaluation'):raise ValueError('Live Real/Sim uses paired_session; real_sim is offline inspection only')
     verify_prepared_inputs(plan)
     frames=opts.get('max_frames',1)
-    if type(frames)is not int or not 1<=frames<=300:raise ValueError('Explicit bounded max_frames in 1..300 required')
+    if type(frames)is not int or frames<1:raise ValueError('Positive observation max_frames required')
     policy=None
     if plan.stage=='real_evaluation':
         from ..learning.policy import observation_batch,infer,action_queue_depth

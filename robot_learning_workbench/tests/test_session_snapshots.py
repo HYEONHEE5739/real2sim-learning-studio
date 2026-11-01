@@ -65,6 +65,7 @@ def test_snapshot_store_repeats_without_reopening_devices_or_duplication(tmp_pat
         a=store.prepare('capture1',state,rgb,now_ns=t);one=store.finish(a)
         packets={n:{**p,'sequence':2}for n,p in packets.items()};state=snapshot_state(f,history,packets,state['real_stability'])
         b=store.prepare('capture2',state,rgb,now_ns=t);two=store.finish(b)
+        assert Path(one['path']).parent==Path(two['path']).parent==project.root/'input/captures/session1'
         assert len(project.evidence['capture_sessions'])==2 and len(project.evidence['images'])==4
         assert trace.count('connect')==1 and not one['calibration_approved']and not two['calibration_approved']
         for root in(one['path'],two['path']):

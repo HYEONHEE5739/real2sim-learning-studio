@@ -282,7 +282,14 @@ def import_robot(project, urdf, joints=None, base=None, recorded_links=None):
         objects, poses = reference_geometry(urdf, joints or {}, asset_importer(project, scene), recorded_links=recorded_links)
     else:
         objects, poses = reference_model(urdf, joints or {}, asset_importer(project, scene), project.root / 'scratch/reference_model')
-    copy_input(project, urdf, 'models')
+    from .export import copy_native_asset
+    model=copy_native_asset(Path(urdf).resolve(),project.root/'input/robot')
+    import xml.etree.ElementTree as ET
+    xml=ET.parse(model).getroot()
+    names=[j.get('name')for j in xml.findall('joint')if j.get('type')!='fixed']if model.suffix.lower()=='.urdf'else list(joints or {})
+    previous=scene.get('robot_model',{})
+    scene['robot_model']={'format':'urdf'if model.suffix.lower()=='.urdf'else'mjcf','path':model.relative_to(project.root).as_posix(),'model_sha256':sha(model),'joint_names':names,'mapping_verified':False}
+    if previous.get('model_sha256')==sha(model):scene['robot_model'].update({k:v for k,v in previous.items()if k not in('path','simulation_joint_offsets_rad')})
     scene['objects'] = [o for o in scene['objects'] if o['role'] != 'reference_robot'] + objects
     for name, t in poses.items():
         scene['frames']['robot_link_' + name] = {'parent': 'robot_base', 'transform': value(t.tolist(), 'derived')}

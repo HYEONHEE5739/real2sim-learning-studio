@@ -39,7 +39,7 @@ def record_frame(episode,sample,target_pose,target,*,time_s,requested=None,signa
         add('collection/action',collection_coordinates(target))
     for name,value in (signals or {}).items():
         add('obs/events/'+name,np.array([value],dtype=np.uint8))
-        if name=='grasp':add('obs/datagen_info/subtask_term_signals/grasp',np.array([value],dtype=np.uint8))
+        add('obs/datagen_info/subtask_term_signals/'+name,np.array([value],dtype=np.uint8))
 
 
 
@@ -94,3 +94,27 @@ def validate_source_ranges(catalog):
     if any(ep.start!=0 or ep.stop not in (None,ep.num_frames) for ep in catalog.episodes):
         raise ValueError('Annotation requires complete Source episodes and original initial state; use a numerical Source stream to collect a new episode from a trim')
 
+
+
+def replay_settings(plan,catalog):
+    """Cross-engine replay uses canonical measured state and explicit engine config.
+
+    This permits trying a replay; it never asserts equivalent physics or Task success.
+    """
+    from ..recipe import _plain
+    validate_recording(catalog.execution.get('recording',{}))
+    expected=_plain(plan.scene_identity)
+    if catalog.execution.get('scene_identity')!=expected:raise ValueError('Replay Scene differs from recorded Scene; select the matching package or explicitly transform the dataset')
+    same=catalog.execution.get('engine')==plan.engine
+    if not same and 'engine_config'not in plan.input_documents:raise ValueError('Cross-engine replay needs inputs.engine_config for the selected engine; recorded engine settings are not portable')
+    return catalog.execution.get('model_config')if same and 'engine_config'not in plan.input_documents else None
+
+
+def record_metrics(episode,results,phase):
+    """Store declared numeric metrics in the existing Native tensor tree."""
+    import torch
+    for role,payload in results.items():
+        for name,value in(payload.items()if isinstance(payload,dict)else(('value',payload),)):
+            array=np.asarray(value)
+            if array.dtype.kind not in'bifu'or not np.isfinite(array).all():raise ValueError(role+'.'+name+': metrics must return finite numeric values')
+            episode.add('metrics/'+phase+'/'+role+'/'+name,torch.from_numpy(np.array(array,copy=True)))

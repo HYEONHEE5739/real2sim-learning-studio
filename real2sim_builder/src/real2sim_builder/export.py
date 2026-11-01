@@ -293,7 +293,7 @@ def verify_package(path):
 
 
 def export_revision(project,*,destination,candidate=None,calibration=None,required_files=(),engine_sources=None,
-                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,asset_resolutions=None):
+                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,mujoco_robot_asset=None,asset_resolutions=None):
     """Publish a new revision only after file/closure checks; never replace originals.
 
     Inputs are project-owned edit data or explicit read-only source files. Calibration
@@ -353,7 +353,11 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
             stage=Usd.Stage.Open(str(target))
             if stage is None or not stage.GetDefaultPrim():raise ExportError('ASSET_INVALID','isaac_robot_asset','execution USD default prim required')
             spec['robot'].setdefault('bindings',{})['isaac']={'asset_path':target.relative_to(staging).as_posix()}
-        if working.get('robot_model') and working['robot_model'].get('joint_names')==['shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll','gripper']:
+        if mujoco_robot_asset is not None:
+            source=Path(mujoco_robot_asset);source=source.resolve()if source.is_absolute()else local_path(project.root,str(source))
+            target=copy_native_asset(source,staging,copied=copied,report=derivations)
+            spec['robot'].setdefault('bindings',{})['mujoco']={'asset_path':target.relative_to(staging).as_posix()}
+        if working.get('robot_model')and any(p.name in('finger_convex_parts.json','usd_contact_pads.json')for p in copied):
             spec['robot']['collision']=_collision_binding(staging,copied)
         calibration=copy.deepcopy(calibration) if calibration is not None else {'schema_version':1,'records':{},'evidence':{}}
         # Paths in explicit calibration records refer to this package. Missing model

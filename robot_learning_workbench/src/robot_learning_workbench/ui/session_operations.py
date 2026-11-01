@@ -4,48 +4,31 @@ from pathlib import Path
 
 def catalog(path,workspace=None):
     from real2sim_builder.project import Project
-    from real2sim_builder.files import read
     project=Project(path,read_only=True)
-    evidence=read(project.root/'input/evidence.yaml')
-    snapshots=[]
-    from real2sim_builder.files import sha
-    for source in evidence.get('capture_sessions',[]):
-        path=project.root/source['path']
-        if sha(path)!=source['sha256']:raise ValueError('Registered Capture manifest changed')
-        manifest=read(path)
-        if manifest.get('schema')!='real2sim.snapshot/1':continue
-        for row in manifest['snapshots']:
-            shot=path.parent/row['path'];metadata=read(shot/'metadata.json')
-            if sha(shot/'metadata.json')!=row['metadata_sha256'] or sha(shot/'state.json')!=metadata['files']['state.json']:raise ValueError('Capture metadata changed')
-            state=read(shot/'state.json');images={i['camera']:str(shot/i['path'])for i in metadata['images']}
-            if 'pair.json'in metadata['files']:
-                if sha(shot/'pair.json')!=metadata['files']['pair.json']:raise ValueError('Pair metadata changed')
-                pair=read(shot/'pair.json');images.update({'sim_'+n:str(shot/file)for n,file in pair['sim_images'].items()})
-            snapshots.append(dict(id=row['id'],path=str(path.parent),status='SAVED',q_measured=state['q_measured'],timestamp_ns=state['timestamp_ns'],unix_ns=state.get('timestamps',{}).get('follower',{}).get('end',{}).get('unix_ns'),quality=metadata.get('quality_warnings',[]),paired='pair.json'in metadata['files'],images=images,calibration_approved=False))
-    for record in sorted((project.root/'input/observations').glob('*/COMPLETE')):
-        root=record.parent;observation=read(root/'observation.json');snapshots.append({'id':root.name,'path':str(root),'unix_ns':observation['camera_timing']['side']['read_end']['unix_ns'],'q_measured':[],'images':{n:str(root/(n+'.png'))for n in('side','wrist')},'quality':[observation['reason']],'paired':False,'kind':'scene_materials'})
     from ..scene_preparation import scene_details
     details=scene_details(project.root)
+    evidence=project.evidence;observations=project.root/'input/observations'
+    capture_paths={row['path']for row in evidence.get('images',[])if row.get('capture_manifest')or Path(row.get('source')or'').is_relative_to(observations)}
+    capture_paths.update(row['path']for row in evidence.get('documents',[])if row.get('role')=='unbound_sdk_camera_observation')
+    # The preparation sidebar edits supplied materials, not the capture archive.
+    details['inputs']=[row for row in details['inputs']if row['kind']!='capture'and row['path']not in capture_paths]
     if workspace:
         from ..robot.registration import bound_configuration
         binding=bound_configuration(project.root,workspace);details['configuration_path']=str(binding)if binding else None
-    return {**details,'snapshots':snapshots,'project':str(project.root),'name':project.info['name'],'id':project.info['id'],'captures':evidence.get('capture_sessions',[])}
+    return {**details,'project':str(project.root),'name':project.info['name'],'id':project.info['id']}
 
 
 def execution_scenes(workspace):
     from ..scene_preparation import list_scenes
     from real2sim_builder.project import Project
-    from real2sim_builder.files import read
+    from scene_contract.package import load_scene,SceneIdentity
     rows=[]
     for item in list_scenes(workspace):
         project=Project(item['project'],read_only=True);registered=project.info.get('execution_packages',[])
         for record in registered:
             scene=(project.root/record['path']/'scene.json').resolve()
             try:
-                from scene_contract.package import SceneIdentity
-                from real2sim_builder.export import verify_package
-                package=verify_package(scene.parent)
-                if package.identity!=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']):continue
+                package=load_scene(scene,expected=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']))
             except (ValueError,OSError):continue
             rows.append({'name':item['name'],'revision':record['revision'],'project':item['project'],'project_id':project.info['id'],'scene_id':record['scene_id'],'scene':str(scene),'engines':sorted(set(record.get('engine_config',{}))&set(package.scene['engines']))})
     return {'scenes':rows}
@@ -62,7 +45,7 @@ def real_sim_setup(workspace,project,scene,engine):
     registered=matches[0];load_scene(scene,expected=SceneIdentity(registered['scene_id'],registered['revision'],registered['manifest_sha256']))
     if engine_key not in('isaac','mujoco')or engine_key not in matches[0].get('engine_config',{}):raise ValueError('Selected Scene has no bound configuration for this engine')
     config=bound_configuration(project.root,workspace)
-    if config is None:raise ValueError('장치 구성이 없습니다. Real2Sim Capture의 장치 설정을 먼저 저장하세요.')
+    if config is None:raise ValueError('장치 구성이 없습니다. Scene Prepare의 장치 설정을 먼저 저장하세요.')
     data=read(config);keys=('device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model','source_robot_model');inputs={k:str((config.parent/v).resolve())for k,v in data['inputs'].items()if k in keys}
     required={'device_profile','calibration_profile','camera_config','robot_model'}
     if not required<=inputs.keys():raise ValueError('Follower의 Model/Precision/Camera 구성을 확인하세요.')
@@ -70,17 +53,13 @@ def real_sim_setup(workspace,project,scene,engine):
     if not settings.is_relative_to(project.root):raise ValueError('Scene engine settings escaped selected Project')
     inputs.update(project=str(project.root),scene=str(scene),engine_config=str(settings))
     recipe={'schema_version':1,'stage':'paired_session','engine':engine,'inputs':inputs,'execution':{'device_source':data['execution']['device_source']},'output':{'directory':'new-real-sim'}}
-    details=catalog(project.root,workspace)
-    return {'project':str(project.root),'name':project.info['name'],'recipe':recipe,'snapshots':[r for r in details['snapshots']if r.get('paired')],'configuration':str(config)}
+    return {'project':str(project.root),'name':project.info['name'],'recipe':recipe,'configuration':str(config)}
 
 
 def execute(operation,arguments):
     if operation=='session_execution_scenes':return execution_scenes(arguments['workspace'])
     if operation=='session_real_setup':return real_sim_setup(**arguments)
     if operation=='session_project':return catalog(arguments['path'],arguments.get('workspace'))
-    if operation=='session_catalog':
-        from ..scene_preparation import list_scenes
-        return {'scenes':list_scenes(arguments['workspace'])}
     if operation=='session_materials':
         from ..scene_preparation import save_inputs
         save_inputs(arguments['path'],arguments['files'],arguments['notes']);return catalog(arguments['path'],arguments['workspace'])

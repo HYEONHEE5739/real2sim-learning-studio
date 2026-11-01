@@ -79,24 +79,25 @@ def _matrix(pose):
 
 def read_sample(env,env_index,phase,tick,*,episode_id='episode',object_id=None):
     """Owned current PhysX/Camera/ContactSensor snapshot, no tracker updates."""
-    if phase not in ('pre_step','post_step','episode_end') or type(tick) is not int or tick<0 or env_index<0 or env_index>=env.num_envs:raise ValueError('Invalid sample phase/tick/env')
+    if phase not in ('episode_start','pre_step','post_step','episode_end') or type(tick) is not int or tick<0 or env_index<0 or env_index>=env.num_envs:raise ValueError('Invalid sample phase/tick/env')
     from scipy.spatial.transform import Rotation
     robot=env.scene['robot'];index=env_index;joints=[robot.joint_names.index(n) for n in env.cfg.workbench_joint_order]
     def cpu(value):return value.detach().cpu().numpy().copy()
     base=_matrix(cpu(robot.data.root_pose_w[index]));inverse=np.linalg.inv(base)
     tool=robot.body_names.index('tool0');eef=inverse@_matrix(cpu(robot.data.body_link_pose_w[index,tool]))
     poses={n:inverse@_matrix(cpu(o.data.root_pose_w[index])) for n,o in env.scene.rigid_objects.items()}
-    pick=object_id or env.cfg.workbench_active_objects[0]
-    if pick not in env.cfg.workbench_active_objects:raise ValueError('Selected contact object is not active')
-    filter_index=env.cfg.workbench_active_objects.index(pick)
-    forces=[cpu(env.scene[name].data.force_matrix_w[index,0,filter_index]) for name in ('grasp_fixed_contact','grasp_moving_contact')]
-    contact=[bool(np.linalg.norm(force)>1e-4) for force in forces]
-    relative=np.linalg.inv(eef)@poses[pick]
+    pick=object_id;forces=[];contact=[False,False];grasp={}
+    if pick is not None:
+        if pick not in env.cfg.workbench_active_objects:raise ValueError('Selected contact object is not active: '+pick)
+        filter_index=env.cfg.workbench_active_objects.index(pick)
+        forces=[cpu(env.scene[name].data.force_matrix_w[index,0,filter_index])for name in('grasp_fixed_contact','grasp_moving_contact')]
+        contact=[bool(np.linalg.norm(force)>1e-4)for force in forces];relative=np.linalg.inv(eef)@poses[pick]
+        grasp={'object_id':pick,'relative':relative[:3,3].copy(),'relative_quat':Rotation.from_matrix(relative[:3,:3]).as_quat(),'quaternion_order':'xyzw','ee_position':eef[:3,3].copy(),'object_position':poses[pick][:3,3].copy()}
     return {'episode_id':episode_id,'env_index':index,'tick':tick,'phase':phase,'dt_s':env.step_dt,'pose_frame':'robot_base',
         'joint_order':tuple(env.cfg.workbench_joint_order),'joint_positions':cpu(robot.data.joint_pos[index,joints]),'joint_velocities':cpu(robot.data.joint_vel[index,joints]),
         'object_poses':poses,'eef_pose':eef,'linear_velocities':{n:cpu(o.data.root_lin_vel_w[index]) for n,o in env.scene.rigid_objects.items()},
         'contacts':{'left':contact[0],'right':contact[1],'source_definition':'isaac_contact_sensor_gt_1e_4_n','force_w':np.asarray(forces)},
-        'grasp_inputs':{'object_id':pick,'relative':relative[:3,3].copy(),'relative_quat':Rotation.from_matrix(relative[:3,:3]).as_quat(),'quaternion_order':'xyzw','ee_position':eef[:3,3].copy(),'object_position':poses[pick][:3,3].copy()},
+        'grasp_inputs':grasp,
         'cameras':{name:{'pos_w':cpu(env.scene['camera_'+name].data.pos_w[index]),'quat_w_ros':cpu(env.scene['camera_'+name].data.quat_w_ros[index]),'K':cpu(env.scene['camera_'+name].data.intrinsic_matrices[index]),'rgb':cpu(env.scene['camera_'+name].data.output['rgb'][index,:,:,:3])} for name in ('side','wrist')},'signals':{}}
 
 

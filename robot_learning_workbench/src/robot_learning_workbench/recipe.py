@@ -1,6 +1,6 @@
 """Saved declarative Recipe validation/preparation. No engine, device or training loop."""
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 import hashlib
@@ -67,10 +67,10 @@ _INPUTS={
  'precision_session':({'configuration','device_profile','robot_model'},{'calibration_profile','source_robot_model'}),
  'scene_capture':({'project','camera_config'},{'device_profile','leader_device_profile','calibration_profile','leader_calibration_profile','robot_model','source_robot_model'}),
  'sdk_calibration':({'device_profile'},set()),
- 'capture_session':({'project','device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model'},{'source_robot_model'}),
+ 'capture_session':({'project','device_profile','calibration_profile','camera_config','robot_model'},{'source_robot_model','leader_device_profile','leader_calibration_profile'}),
  'paired_session':({'project','scene','engine_config','device_profile','calibration_profile','camera_config','robot_model'},{'source_robot_model','leader_device_profile','leader_calibration_profile'}),
  'teleoperation':({'device_profile','calibration_profile'},{'leader_device_profile','leader_calibration_profile','scene','camera_config'}),
- 'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene'}),'datagen':({'scene','dataset'},{'resume_dataset'}),
+ 'source':({'scene'},{'device_profile','engine_config','resume_dataset','source_dataset'}),'annotation':({'dataset'},{'scene','engine_config'}),'datagen':({'scene','dataset'},{'resume_dataset','engine_config'}),
  'simulation_evaluation':({'scene','policy'},{'engine_config','resume_dataset','policy_contract'}),'real_evaluation':({'policy','device_profile'},{'scene','camera_config','calibration_profile','capture_session','policy_contract'}),
  'train':({'dataset','training_config'},{'policy','checkpoint'}),'offline_validation':({'dataset','policy'},{'policy_contract'}),
  'convert':({'dataset'},{'feature_mapping'}),'merge':({'datasets'},set()),'hub_upload':({'artifact','repo_id'},{'revision'}),
@@ -84,7 +84,7 @@ _EXEC={
  'paired_session':({'device_source'},set()),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
  'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
- 'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps'}),
+ 'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps','mimic_object','mimic_target'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
  'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction','max_frames','max_gripper_delta_raw'}),'train':({'mode'},set()),
  'offline_validation':(set(),{'batch_size','max_batches'}),'convert':(set(),{'task_instruction'}),'merge':(set(),{'task_instruction'}),
@@ -143,6 +143,8 @@ def _validate(data,path):
             if type(value) not in (int,float) or not math.isfinite(value) or (value<0 if key=='reset_time_s' else value<=0):_fail(where,'finite valid seconds required',path)
         elif key=='gripper_target_rad':
             if type(value)not in (int,float) or not math.isfinite(value):_fail(where,'explicit finite gripper target rad required',path)
+        elif key in('mimic_object','mimic_target'):
+            if not isinstance(value,str)or not value.strip():_fail(where,'explicit Scene object ID required',path)
         elif key=='task_instruction':
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
@@ -153,13 +155,13 @@ def _validate(data,path):
         opts=data['execution'];count='episodes' if stage=='source' else 'target_successes'
         if ('num_episodes' in opts)==(count in opts):_fail('execution','Specify exactly one of num_episodes (additional) or '+count+' (legacy cumulative)',path)
         if opts.get('resume') and ('num_episodes' not in opts or 'resume_dataset' in data['inputs']):_fail('execution.resume','Same-path append needs additional num_episodes, without legacy resume_dataset',path)
-    if stage=='source' and ('device_profile' in data['inputs'])==('source_dataset' in data['inputs']):_fail('inputs','Choose one approved device_profile or explicit recorded simulation source_dataset',path)
+    if stage=='source' and {'device_profile','source_dataset'}<=data['inputs'].keys():_fail('inputs','Leader input and recorded Source input cannot be combined',path)
     if 'env_num' in data['execution'] and 'num_envs' in data['execution']:_fail('execution','Use env_num only, not two environment-count names',path)
     _mapping(data['output'],{'directory'}|({'repo_id'} if stage in ('convert','merge') else set()),{'directory'},'output',path)
     if any(not isinstance(v,str) or not v.strip() for v in data['output'].values()):_fail('output','nonempty paths/IDs required',path)
     objects=data.get('objects',{})
     if stage in ('source','datagen','simulation_evaluation'):
-        if not isinstance(objects,dict) or (not objects and not (stage=='source' and 'source_dataset' in data['inputs'])):_fail('objects','explicit creation list required',path)
+        if not isinstance(objects,dict):_fail('objects','explicit creation list required',path)
         for name,value in objects.items():
             if not isinstance(name,str) or not name:_fail('objects','nonempty Object ID required',path)
             _mapping(value,{'placement'},{'placement'},'objects.'+name,path);_declaration(value['placement'],'objects.'+name+'.placement',path)
@@ -353,6 +355,20 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     from scene_contract.package import load_scene
     from .data.native import load_catalog
     spec=doc.spec;resolved={};documents={};dataset=None;catalog=inputs or {}
+    if spec.stage=='source':
+        selected=_resolve(doc,spec.inputs['scene'])
+        if selected.is_dir()and(selected/'project.yaml').is_file():
+            from .scene_preparation import source_inputs
+            binding=source_inputs(selected,spec.engine);expanded=dict(binding['inputs'])
+            for key,value in spec.inputs.items():
+                if key=='scene':continue
+                if key in expanded and _resolve(doc,value)!=Path(expanded[key]):_fail('inputs.'+key,'differs from the selected Scene binding',doc.path)
+                expanded[key]=value
+            spec=replace(spec,inputs=_freeze(expanded))
+            resolved['source_project_binding']=_freeze(_artifact(selected/'project.yaml'))
+            resolved['source_device_configuration']=_freeze(_artifact(Path(binding['configuration'])))
+        if ('device_profile'in spec.inputs)==('source_dataset'in spec.inputs):
+            _fail('inputs.scene','Scene Project에서 Leader 연결을 찾을 수 없습니다. 등록된 Scene 최상위 폴더를 선택하세요.',doc.path)
     for key,value in spec.inputs.items():
         if key in ('repo_id','revision'):
             resolved[key]=_freeze({'kind':'identifier','value':value});continue
@@ -390,13 +406,11 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if path.is_file() and path.suffix=='.json':
                     data,digest=_json_input(path)
                     if entry['files'][path.name]!=digest:_fail('inputs.'+key,'changed during read',doc.path,code='INPUT_CHANGED')
-                    if key=='training_config' and isinstance(data.get('policy'),dict) and str(data['policy'].get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.training_config','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents[key]=_freeze(data)
                 if key=='policy':
                     folder=policy_model_path(path);config_path=folder/'config.json'
                     config,digest=_json_input(config_path)
                     if entry['files'][config_path.relative_to(path).as_posix()]!=digest:_fail('inputs.policy','changed config',doc.path,code='INPUT_CHANGED')
-                    if str(config.get('type','')).lower() in ('minivla','legacy_minivla'):_fail('inputs.policy','MiniVLA is excluded',doc.path,code='POLICY_UNSUPPORTED')
                     documents['policy_config']=_freeze(config)
                 if key=='dataset' and spec.stage in ('train','offline_validation') and (not path.is_dir() or not (path/'meta/info.json').is_file()):
                     _fail('inputs.dataset','official Dataset metadata required; legacy inputs need explicit conversion',doc.path)
@@ -445,7 +459,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         for name in order:
             if name not in scene.scene['objects'] or scene.scene['objects'][name].get('role')!='task_object':_fail('objects.'+name,'unknown/non-task object',doc.path)
     selected=order if order else tuple(dataset.execution.get('active_objects',())) if dataset else ()
-    if dataset is not None and spec.stage in ('annotation','datagen') and not selected:_fail('inputs.dataset','recorded object selection missing',doc.path)
+    if dataset is not None and spec.stage=='datagen' and not selected:_fail('inputs.dataset','Object-relative Mimic needs a recorded moving object selection',doc.path)
     bindings=_function_bindings(doc,scene,tasks,selected,engine)
     output=_resolve(doc,spec.output['directory'])
     if spec.stage=='train':
@@ -464,7 +478,11 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         previous=load_catalog(output)
         if previous.kind!='native' or previous.execution.get('stage')!=spec.stage or previous.execution.get('engine')!=engine:_fail('output.directory','Matching native stage/engine required for append',doc.path,code='RESUME_INCOMPATIBLE')
         resolved['append_dataset']=_freeze({'kind':'native_dataset','path':str(output),'identity':_plain(previous.identity)})
-    elif output.exists():_fail('output.directory','new output required; official Trainer resume needs its own validated output policy',doc.path,code='OUTPUT_EXISTS')
+    elif output.exists():
+        reason=f'출력 폴더가 이미 존재합니다: {output}. 새 수집/실행에는 아직 사용하지 않은 output.directory를 지정하세요.'
+        if spec.stage in ('source','datagen'):reason+=' resume: true는 동일 계약의 기존 Dataset에 추가 수집할 때만 사용합니다.'
+        elif spec.stage=='train':reason+=' 공식 Trainer Resume에는 별도로 검증된 출력 정책이 필요합니다.'
+        _fail('output.directory',reason,doc.path,code='OUTPUT_EXISTS')
     source_files={}
     for entry in resolved.values():
         rows=entry if isinstance(entry,tuple) else (entry,)
@@ -476,24 +494,32 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
                 if row['kind']=='scene' and output.is_relative_to(p.parent):_fail('output.directory','must not write inside immutable Scene package',doc.path)
                 if output==p or output in p.parents or (p.is_dir() and output.is_relative_to(p)):_fail('output.directory','must be separate from all immutable inputs',doc.path)
     if tasks is not None:
-        for name,digest in tasks.source_sha256.items():source_files[name]=digest
+        import inspect
+        used={Path(inspect.getsourcefile(tasks.functions[b.name].callable)).resolve()for b in bindings.values()}
+        used.update(Path(inspect.getsourcefile(tasks.validators[b.name])).resolve()for b in bindings.values()if b.name in tasks.validators)
+        used.update(Path(inspect.getsourcefile(tasks.functions[b.name].params_type)).resolve()for b in bindings.values())
+        source_files={name:digest for name,digest in tasks.source_sha256.items()if Path(name).resolve()in used}
     code_names=['recipe.py','run.py','cli.py']
-    if spec.stage=='precision_session':code_names+=['robot/precision.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/configuration.py','robot/teleoperation.py','robot/offline.py']
+    if spec.stage=='precision_session':code_names+=['robot/precision.py','robot/precision_storage.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/configuration.py','robot/teleoperation.py','robot/offline.py']
     if engine in ('mujoco','isaac') and spec.stage in ('source','annotation','datagen','simulation_evaluation'):
-        code_names += ['engines/'+engine+'/'+name+'.py' for name in ('source','annotation','datagen','model','state','control')]
+        code_names += ['engines/'+engine+'/'+name+'.py' for name in ('source','model','state','control',{'simulation_evaluation':'evaluation'}.get(spec.stage,spec.stage))]
         if spec.stage=='simulation_evaluation':code_names += ['engines/'+engine+'/evaluation.py']
         if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py']
-        code_names += ['generation/mimic.py','data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
+        code_names += ['data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
+        code_names += ['tasks/execution.py','tasks/registry.py','tasks/placement.py']
+        if engine=='isaac'and spec.stage in('datagen','simulation_evaluation'):code_names+=['engines/isaac/annotation.py']
+        if spec.stage in('datagen','simulation_evaluation')or engine=='isaac':code_names+=['generation/mimic.py']
         if spec.stage=='simulation_evaluation':code_names += ['learning/policy.py','learning/smol_compat.py']
     if spec.stage in ('convert','merge'):code_names += ['data/lerobot.py','data/native.py','data/curation.py']
     if spec.stage in ('train','offline_validation'):code_names += ['learning/train.py','learning/policy.py','learning/validate.py','learning/smol_compat.py','data/lerobot.py']
     if spec.stage in ('hub_download','hub_upload'):code_names += ['learning/hub.py','learning/train.py']
     if spec.stage in ('capture','precision_calibration','real_evaluation','real_sim','teleoperation'):code_names += ['robot/teleoperation.py','robot/live.py','robot/offline.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py','learning/policy.py','learning/smol_compat.py']
     if spec.stage=='capture_session':code_names += ['robot/session.py','robot/supervised.py','robot/pairs.py','robot/snapshots.py','robot/session_devices.py','robot/telemetry.py','robot/configuration.py','robot/control.py','robot/calibration.py','robot/capture.py','robot/devices.py']
-    if spec.stage in('scene_capture','sdk_calibration'):code_names+=['robot/scene_observation.py','robot/sdk_calibration.py','robot/registration.py','robot/devices.py','robot/offline.py','ui/session_operations.py']
+    if spec.stage in('scene_capture','sdk_calibration'):code_names+=['robot/scene_observation.py','robot/sdk_calibration.py','robot/registration.py','robot/devices.py','robot/offline.py']
     if spec.stage in('capture_session','paired_session'):code_names+=['robot/teleop_loop.py']
     if spec.stage=='capture_session':code_names+=['robot/registration.py']
     if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/authored_render.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','robot/supervised.py','robot/control.py','robot/telemetry.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
+    if spec.stage=='source':code_names+=['scene_preparation.py','robot/registration.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
     if spec.stage in ('capture','real_sim','real_evaluation','scene_capture','capture_session','paired_session'):
         from .robot.offline import capture_reader

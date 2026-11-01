@@ -57,7 +57,7 @@ class CurationPage(QWidget):
         stat_controls=QHBoxLayout();analysis.addLayout(stat_controls);self.stats_field=QComboBox();self.stats_component=QSpinBox();self.stats_component.setRange(0,0);stat_controls.addWidget(self.stats_field);stat_controls.addWidget(self.stats_component)
         self.histogram=HistogramPlot();analysis.addWidget(self.histogram);self.stats_field.currentTextChanged.connect(self.update_histogram);self.stats_component.valueChanged.connect(self.update_histogram)
         position=QFormLayout();analysis.addLayout(position);self.position_object=QLineEdit();self.position_object.setPlaceholderText('기록된 Object ID');self.position_frame=QComboBox();self.position_frame.setEditable(True);self.position_frame.addItems(['robot_base','world']);position.addRow('Object',self.position_object);position.addRow('좌표 Frame',self.position_frame)
-        locate=QPushButton('선택 시작 Object 분포 · 검사 Scene 필요');locate.clicked.connect(self.positions);analysis.addWidget(locate);self.scatter=ReviewPlot('scatter');analysis.addWidget(self.scatter)
+        locate=QPushButton('기록 Scene 선택 · 시작 Object 분포');locate.clicked.connect(self.positions);analysis.addWidget(locate);self.scatter=ReviewPlot('scatter');analysis.addWidget(self.scatter)
         self.advanced_toggle,self.advanced_panel,advanced=self.fold(page,'Dataset 구성 · Trim / Train·Validation / 상세 표')
         self.table=QTableWidget(0,6);self.table.setHorizontalHeaderLabels(['사용','Episode','원본 시작','원본 끝(미포함)','원 Episode 판정','Split']);self.table.itemChanged.connect(self.edited);self.table.itemSelectionChanged.connect(self.selection_changed);advanced.addWidget(self.table)
         ratio=QGridLayout();advanced.addLayout(ratio);self.train_ratio=QDoubleSpinBox();self.train_ratio.setRange(1,99);self.train_ratio.setValue(80);self.train_ratio.setSuffix('%');self.split_seed=QSpinBox();self.split_seed.setRange(0,2147483647)
@@ -162,11 +162,9 @@ class CurationPage(QWidget):
 
     def positions(self):
         if not self.stable():return
-        owner=self.parentWidget()
-        while owner is not None and not hasattr(owner,'scene'):owner=owner.parentWidget()
-        scene=getattr(owner,'scene',None)
-        if scene is None or not scene.valid:self.state.setText('정확한 기록 Scene을 먼저 검사하세요');return
-        self.perform('positions',source=self.source,object_id=self.position_object.text().strip(),scene=scene.scene_path,frame=self.position_frame.currentText(),split=None if self.scope.currentIndex()==0 else self.scope.currentText())
+        scene,_=QFileDialog.getOpenFileName(self,'Dataset에 기록된 Scene Revision 선택',str(self.workspace/'scenes'),'Scene Package (scene.json)')
+        if not scene:return
+        self.perform('positions',source=self.source,object_id=self.position_object.text().strip(),scene=scene,frame=self.position_frame.currentText(),split=None if self.scope.currentIndex()==0 else self.scope.currentText())
 
     def request_plot(self):
         i=self.table.currentRow()
@@ -179,7 +177,7 @@ class CurationPage(QWidget):
         self.plot_busy=False
         if self.plot_active!=self.plot_target:self.request_plot();return
         if not response.get('ok'):self.metrics.setText(response.get('error',{}).get('message','기록된 plot 없음'));return
-        data=response['result'];self.plot_data=data;times=data['timestamps'];row={'actions':data['targets'],'frames':data['frames'],'sample_indices':data['indices'],'timestamps':times,'duration':float(times[-1]-times[0]),'events':data['events'],'target_unit':data['target_unit'],'joint_order':data['joint_order']}
+        data=response['result'];self.plot_data=data;times=data['timestamps'];row={'states':data.get('states'),'state_action_comparable':data.get('state_action_comparable',False),'actions':data['targets'],'frames':data['frames'],'sample_indices':data['indices'],'timestamps':times,'duration':float(times[-1]-times[0]),'events':data['events'],'target_unit':data['target_unit'],'joint_order':data['joint_order']}
         self.actions.row=row
         self.trajectory.row={**row,'ee':data['eef'],'display_frame':data['eef_frame'],'eef_unit':data['eef_unit']}if data['eef']is not None else None;self.update_plot_cursor()
         self.sync_timeline_events();self.metrics.setText('기록 Target · '+data['target_unit']+' · '+str(data['frames'])+' frame'+(' · 그래프 최대512점 표본'if data['sampled']else'')+'\n'+data['event_phase'])

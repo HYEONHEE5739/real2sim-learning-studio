@@ -78,7 +78,7 @@ KINDS = frozenset({'predicate', 'tracker', 'placement', 'metrics', 'acceptance'}
 STAGES = frozenset({'source', 'annotation', 'datagen', 'simulation_evaluation', 'real_evaluation', 'real_sim'})
 ENGINES = frozenset({'isaac', 'mujoco', 'independent'})
 PHASES = frozenset({'episode_start', 'pre_step', 'post_step', 'episode_end'})
-SAMPLE_FIELDS = frozenset({'episode_id', 'env_index', 'tick', 'phase', 'dt_s', 'pose_frame', 'object_poses', 'eef_pose', 'joint_positions', 'joint_order', 'contacts', 'linear_velocities', 'signals', 'grasp_inputs', 'placement_points'})
+SAMPLE_FIELDS = frozenset({'episode_id', 'env_index', 'tick', 'phase', 'dt_s', 'pose_frame', 'object_poses', 'eef_pose', 'joint_positions', 'joint_velocities', 'joint_order', 'contacts', 'linear_velocities', 'signals', 'grasp_inputs', 'placement_points'})
 
 @dataclass(frozen=True)
 class FunctionSpec:
