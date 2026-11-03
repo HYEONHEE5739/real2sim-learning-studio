@@ -154,6 +154,8 @@ class Project:
         collect(evidence)
         collect(scene['assets'])
         collect(scene.get('derived_observations', {}))
+        collect(scene.get('reconstruction_observations', {}))
+        collect(scene.get('reconstruction_configuration',{}))
 
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()

@@ -1,58 +1,21 @@
-# Codex를 통한 Scene 제작·정합 가이드
+# 자동 Scene 제작·정합 가이드
 
-이 문서는 현재 `real2sim_builder`의 Scene 제작 진입점이다. 기존 Builder 문서의 입력 감사·후보 편집·카메라/기하 정합 원칙을 현재 코드의 CLI와 Workspace 구조로 정리했다. 과거 실행 성적이나 기존 Scene의 보정값을 새 Scene의 검증 근거로 가져오지 않는다. 문서의 명령은 사용 예시이며, 이번 문서 작성에서 실행하지 않았다.
+2026-11-03. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**과 Builder의 **Start Reconstruction**이다. Codex가 매번 좌표를 수작업으로 작성하는 방식을 기본 사용자 흐름으로 삼지 않는다. 구현·실행 범위와 남은 공백은 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [단계별 기록](../docs/automated-reconstruction.md)을 따른다.
 
-제작을 시작하기 전에 [Scene 제작 규칙](SCENE_RULES.md)을 함께 읽는다. 실측 우선순위·GLB/접촉·좌표·Camera/FK·독립 검증·Blender·물성 규칙을 주제별로 정리했다. [기존 문서 이관 지도](SOURCE_DOCUMENTS.md)는 원본 AGENTS와 docs 전체에서 가져온 내용 및 현재 방식과의 차이를 기록한다.
+## 1. 사용자 흐름과 현재 범위
 
-## 1. 사용자와 Codex의 역할
+1. 새 Project에 사진/영상·Capture·메모를 모은다. 정적 배치가 바뀌면 `scene_state_id`를 분리한다.
+2. Auto Reconstruction의 사진·실측 탭에서 사진의 Camera/렌즈 ID·유형·배치를 등록하고, 물체 ID·실측 치수(mm)·역할·SAM 설명을 입력한다. 외부 영상은 기존 Video 추출을 통해 배치·시각·영상 group을 함께 등록한다. Wrist는 공식 동기 관측을 사용한다.
+3. 기존 모델 환경 탭에서 설치된 SAM Python/Checkpoint와 DA3 Python/로컬 snapshot을 한 번 선택한다. Project 구성에 저장된다. 설치·다운로드하지 않는다.
+4. 같은 Candidate에서 SAM → DA3 → 등록된 metric 점군 → ICP/공동 Landmark/실제 렌더 Mask 정합을 실행한다. 모호한 Mask는 상태 탭에서 선택하거나 원 해상도의 수정 PNG를 지정하고 다시 실행한다.
+5. Camera 등록·Anchor·치수·독립 검증 자료가 부족하면 Candidate와 추론 캐시를 유지하고 필요한 자료를 표시한다. Current와 기존 Export는 바꾸지 않는다.
+6. 검토·기존 Candidate 평가/승격·새 Revision Export는 기존 Builder 기능을 사용한다. 자동 재구성 실행만으로 ACCEPTED/Physics-Ready가 되지 않는다.
 
-사용 흐름은 **Scene Prepare에서 새 Project·자료·메모 저장 → Codex에 제작 요청 → Builder로 Scene 제작 → Real/Sim에서 촬영 → Codex에 정합 수정 요청**이다.
+고정 Side와 측정 q/FK가 있는 Wrist는 기존 검증된 Calibration을 우선한다. External은 알려진 K와 측정 World 코너로 PnP 등록한다. 실측 World 위치·크기가 있는 보드의 네 코너를 사진에서 지정하는 UI를 제공하며 4×4 행렬을 작성할 필요가 없다. 새 Camera/Robot Calibration을 자연어 메모에서 발명하지 않는다.
 
-사용자는 Builder 편집 UI를 직접 조작할 필요가 없다. Codex가 Project의 사진·Snapshot·메모를 읽고 물체와 배치에 관한 가설을 세운 다음, Builder Python API/CLI로 Candidate를 작성한다. Builder는 입력 소유권·좌표/스키마·후보 이력·렌더·수치 fitting·비교·Export를 처리한다. Markdown을 넣으면 자동으로 완성하는 내장 LLM 명령은 없다. `run`도 자연어 Scene 제작기가 아닌 기존 수치 처리 파이프라인이다.
+현재 자동 경로의 Camera는 metric 점군 생성 후 고정이다. 미검증 shared Camera/Mount의 기존 Landmark joint fitter는 디버깅 API로 남아 있으나 **Camera/depth 공동 bundle adjustment, 일반 자동 렌즈 보정, Isaac PhysX/Articulation 완전 검증, Backend 최종 선정은 미완료**다. 실제 Side/Wrist 추론을 수행했으며, 독립 validation/external 사진은 사용자 확인 결과 없다. 이를 완전 자동 Physics-Ready Scene 생성 완료로 보고하지 않는다.
 
-작업 시작 시 사용자의 실행 범위를 확인한다. 코드/문서 작성만 요청했거나 테스트 금지 지시가 있으면 아래 렌더·평가·엔진 명령을 자동 실행하지 않는다. Builder 제작 자체에 실제 로봇 연결이나 모터 명령은 필요하지 않다.
-
-## 1-A. “Scene 만들어줘” 요청의 기본 처리 — Codex가 직접 Builder 호출
-
-이 Builder의 실질 사용자는 **Codex**다. 사용자는 Scene Prepare UI에 사진/영상, 실측 치수, GLB, 로봇 모델과 작업 메모를 등록하고, 필요하면 Side/Wrist 여러 자세를 Capture할 뿐이다. **사용자에게 Builder의 fit target, Landmark 좌표 입력, CLI 사용을 요구하지 않는다.** Codex는 Project를 확인해 Builder CLI/Python API를 실행하고 후보 Scene을 생성·수정한다. 추가 LLM 런타임이나 UI 자동 클릭을 구현할 필요는 없다.
-
-### Codex가 수행할 기본 순서
-
-1. `project.yaml`, `input/evidence.yaml`, capture manifest, scene-state, 요구 메모, `working/current_scene.yaml`, OPEN Candidate, `exports/` 목록을 먼저 읽는다. 미등록 원본을 임의로 미디어 전체 검색하여 학습 입력으로 섞지 않는다.
-2. 치수·Robot Base·URDF·measured q·실측 K 등 **신뢰할 수 있는 Anchor를 잠근다.** 한 layout에서만 물체 world pose를 공유하고, layout이 바뀌면 분리한다.
-3. 기존 Candidate 생성·편집 API로 Geometry·Frame·Camera·Collision을 갖춘 **초기 Metric Scene Candidate**를 만든다. 알려진 GLB/치수가 있는데 영상을 보고 새 기하를 발명하지 않는다.
-4. `auto-observe`로 Side/Wrist 이미지에서 Marker·Block·Cup·Gripper의 landmark/mask 후보를 추출한다. **자동 제안은 곧 실측이 아니다.** Codex가 물체 ID·3D/2D 대응점·가림을 검토하고 신뢰할 수 있는 관측을 선택한다.
-5. Side/Wrist/공통 Object Pose **공동 Multi-view Fit**을 호출한다. Side는 공유 world camera pose, Wrist는 공유 link-local mount/FK, Object는 공유 world pose다. 하나의 pose를 View마다 다르게 만들지 않는다. K가 미측정이면 기존 bootstrap을 먼저 사용하고 fitting 상태를 estimated/optimized로 표시한다.
-6. 다섯 자세 등 모든 사용 관측을 카메라·자세·물체별로 비교한다. Global RGB MAE만 낮추는 변경은 지양한다. Obj-mask 경계/코너 오차, robot/gripper 윤곽, supporter-plane 등을 구분한다.
-7. Camera 오차를 Object geometry/물리량/Joint Offset으로 숨기지 않는다. 데이터가 모자라면 추정 Candidate를 저장하고, **어떤 시점에서 무엇을 추가 촬영하면 되는지**만 구체적으로 요청한다.
-8. Candidate 검토 후 기존 `export_revision`으로 **새 Revision**을 내보낸다. ACCEPTED를 증빙할 독립 자료가 없으면 검토용 UNVALIDATED Export로 구분한다. 원본/기존 Scene은 덮어쓰지 않는다.
-
-### 구현된 CLI 진입점
-
-기존 Candidate·개별 정합·검토·Export:
-
-```bash
-python -m real2sim_builder.cli inspect PROJECT
-python -m real2sim_builder.cli candidate PROJECT create initial
-python -m real2sim_builder.cli candidate PROJECT fit initial --target bootstrap:side
-python -m real2sim_builder.cli candidate PROJECT fit initial --target camera:wrist
-python -m real2sim_builder.cli candidate PROJECT evaluate initial --engine mujoco
-python -m real2sim_builder.cli export PROJECT --destination PROJECT/exports/revision-002 --candidate initial --allow-unvalidated
-```
-
-이번에 소스로 연결한 자동 제안·명시 반영·공동 정합(실행 검증 미수행):
-
-```bash
-python -m real2sim_builder.cli auto-observe PROJECT --candidate initial --scene-state layout_01
-python -m real2sim_builder.cli auto-observe PROJECT --commit scratch/agent/initial/observations/DIGEST/proposals.json --selections selections.json
-python -m real2sim_builder.cli candidate PROJECT fit initial --target joint:scene --options fit-options.json
-```
-
-이 API의 구현 책임·관측 제안 스키마·최적화 변수·Codex 사용 순서는 [`AUTO_SCENE_FITTING.md`](AUTO_SCENE_FITTING.md)를 따른다. 현재 MVP는 검토된 3D–2D Landmark로 공동 최적화하며, 승인 silhouette는 기존 평가에서 비교한다. 렌더 Mask 반복 최적화와 자동 3D corner 확정은 구현하지 않았다. 실행 허용 범위는 사용자의 요청을 따른다.
-
-### Codex에게 요청할 최소 사용자 문장
-
-> `real2sim_builder/SCENE_AUTHORING.md를 읽고, 내가 Scene Prepare에 등록한 Project의 사진/GLB/실측/Side·Wrist Capture로 새 Scene 만들어줘. 기존 원본은 보존하고 새 Candidate·Export Revision을 만들어.`
+GLB/glTF 입력·출력과 전용 Scan 모듈/CLI/UI는 제거했다. 일반 OBJ/STL·Robot URDF/USD·실측 Geometry constraint와 기존 Revision 계약은 유지한다. 아래 편집 명령은 수동 디버깅/특수 Scene용 도구이며 일반 사용자의 필수 절차가 아니다.
 
 ## 1-B. 선택형 작업 물체와 실행 구성
 
@@ -139,7 +102,7 @@ workbench_runs/devices/        # Scene과 연결된 장치 구성·보정
 |---|---|
 | Scene 메모/요구사항 MD | 물체 이름·역할·사용자가 명시한 실측·배치·목표 작업. 자연어만으로 측정 정확도를 인증하지 않음 |
 | 사진·영상 | 외형·색·가림·상대 배치. RGB만으로 절대 크기나 Camera/Base를 확정하지 않음 |
-| GLB/Scan | 표면·상대 배치의 초기 추정. 실측과 충돌하면 실측 제약을 반영하고 차이를 기록 |
+| SAM/DA3 | Mask와 상대 Depth의 파생 관측. 측정 Anchor·Camera 등록 전에는 World 미터 자료가 아님 |
 | Snapshot | 원 RGB·측정 q·시각·Model/Mapping/Calibration identity. commanded q와 measured q 구분 |
 | Real/Sim Pair | 같은 관측의 Real2장·Sim2장·선택 Revision·렌더 q·비교 결과. Sim 이미지는 새 실측이 아님 |
 | URDF/Mesh/SDK/Precision | 모델과 좌표 변환의 출처. SDK Encoder 보정과 model-rad Precision은 별개 |
@@ -163,14 +126,14 @@ python -m real2sim_builder.cli candidate PROJECT edit initial_scene --edits edit
 
 `edits.json`은 편집 연산의 JSON 목록이다. 지원 연산/필드는 [editing.py](src/real2sim_builder/editing.py), Scene 형식은 [scene.py](src/real2sim_builder/scene.py)를 기준으로 작성한다. `add_object`, `update_pose`, `update_dimensions`, `set_visual_mesh`, `set_collision`, `set_camera`, `set_material`, `set_lighting`, `set_workflow` 등을 사용한다. 수치 예제를 그대로 실제 Scene 값으로 쓰지 않는다.
 
-외부 Mesh는 먼저 `candidate PROJECT asset initial_scene --path /path/to/mesh.obj --kind visual`로 소유 경로에 등록하고 반환된 asset ID로 참조한다. 입력 추가는 `add PROJECT PATH --kind brief|image|reference|video|measurements|calibration|scene|robot` 중 실제 종류를 하나 선택한다. GLB는 `scan PROJECT import --path /path/to/scan.glb` 경로다.
+외부 Mesh는 먼저 `candidate PROJECT asset initial_scene --path /path/to/mesh.obj --kind visual`로 소유 경로에 등록하고 반환된 asset ID로 참조한다. 입력 추가는 `add PROJECT PATH --kind brief|image|reference|video|measurements|calibration|scene|robot` 중 실제 종류를 하나 선택한다. GLB/glTF와 Scan 명령은 삭제했다. 과거 의존 Scene은 `LEGACY_UNSUPPORTED`이며 원본을 변환하지 않는다.
 
 Python에서는 `real2sim_builder.project.Project`와 `Candidate`를 사용한다. `Candidate.create`는 Current Scene 또는 빈 Scene에서 시작한다. 다른 OPEN 후보를 자동 baseline으로 고르지 않는다. `Candidate.edit`는 잠금과 스키마/보호 필드 검사를 포함한다. 직접 `Candidate.save`를 사용할 때도 Project의 `exclusive` 잠금 안에서 수행한다. 실행 중 YAML 문자열 치환이나 lock 삭제로 충돌을 우회하지 않는다.
 
 ## 5. 제작과 정합 반복
 
 1. **입력 감사:** Project·원본 SHA·촬영 Session/scene-state·해상도·q와 Mapping 출처를 확인한다. 물체를 움직인 서로 다른 장면을 하나의 고정 배치로 합치지 않는다.
-2. **초기 Scene:** 물체/Frame/Camera ID, 역할, visual과 collision을 분리해 작성한다. GLB의 모든 점을 충돌 형상으로 쓰지 않는다. 빈 컵에는 바닥과 벽/내부 공간이 있는 collision이 필요하다.
+2. **초기 Scene:** 물체/Frame/Camera ID, 역할, visual과 collision을 분리해 작성한다. 가시 점군을 곧바로 전체 충돌 형상으로 쓰지 않는다. 빈 컵에는 바닥과 벽/내부 공간이 있는 collision이 필요하다.
 3. **원인별 정합:** Robot/FK·Base와 카메라 초기값을 확인하고 자동 제안을 검토한 뒤 `joint:scene`으로 공유 Camera·물체 배치를 공동 정합한다. Side/Wrist·물체별 잔차로 지배적 원인을 좁혀 개별 fitting을 보완한다. Camera 오차를 물체 크기나 관절 q 변경으로 숨기지 않는다.
 4. **후보 비교:** baseline, 가설, 변경/고정 변수, 사용 관측, 수치·overlay, 채택/거절 이유를 남긴다. 실제 측정 제약 위반이나 중요한 자세의 회귀를 숨기지 않는다.
 5. **반복 종료:** 추가 개선이 없거나 원인을 구별할 자료가 부족하면 무엇을 더 촬영/측정해야 하는지 보고한다. 모든 후보를 승인 상태로 바꾸지 않는다.

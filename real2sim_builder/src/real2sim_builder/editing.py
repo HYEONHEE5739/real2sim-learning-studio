@@ -1,5 +1,5 @@
 """Existing Builder editing responsibilities; authoring schemas unchanged."""
-from .scene import cameras_audited, identifier, validate, value
+from .scene import identifier, validate, value
 import copy
 import numpy as np
 
@@ -32,8 +32,6 @@ def check_scope(before, after, scope):
         return
     name = scope['target_object']
     fields = set(scope['allow'])
-    if before.get('scan_initialization') and fields & {'pose', 'dimensions'} and (not cameras_audited(before)):
-        raise ValueError('Scan object pixel refinement requires audited camera calibration first')
     old = {o['id']: o for o in before['objects']}
     new = {o['id']: o for o in after['objects']}
     if old.keys() != new.keys():
@@ -64,8 +62,6 @@ def apply(scene, operations, root):
     for operation in operations:
         op = operation['op']
         name = operation.get('id')
-        if result.get('scan_initialization') and op in ('update_pose', 'update_dimensions') and (not cameras_audited(result)):
-            raise ValueError('Scan object pixel refinement requires camera audit first; use measurement/registration evidence for metric initialization')
         if name:
             identifier(name)
         if op == 'add_object':

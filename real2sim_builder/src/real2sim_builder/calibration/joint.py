@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 from ..capture import observation_scene
 from ..editing import preserve
 from ..files import sha
-from ..observations import annotation_evidence, registered_images
+from ..observations import annotation_evidence, registered_images,camera_type
 from ..scene import frame_world, local_path, validate, value, world_pose
 from .camera import project_point
 
@@ -65,7 +65,7 @@ def fit_joint_scene(project, scene, options=None):
     report = {'target': 'joint:scene', 'status': 'NEEDS_MORE_DATA', 'physical_verified': False,
               'scope': 'OPTIMIZED_UNVERIFIED_DRAFT', 'needs': [], 'mask_loss': 'NOT_IMPLEMENTED',
               'mask_metrics': 'Use Candidate.evaluate with approved silhouette annotations'}
-    images, state, needs = registered_images(project, options.get('scene_state'))
+    images, state, needs = registered_images(project, options.get('scene_state'),scene=scene)
     report.update(scene_state_id=state, needs=needs)
     if not images:
         return scene, report
@@ -76,19 +76,20 @@ def fit_joint_scene(project, scene, options=None):
     by_id = {i['id']: i for i in images}
     cameras = {c['id']: c for c in scene['cameras']}
     missing = [i['camera'] for i in images if i['camera'] not in cameras or
-               any(cameras[i['camera']][field]['value'] is None for field in ('pose', 'K', 'distortion'))]
+               any(cameras[i['camera']][field]['value'] is None for field in ('K', 'distortion'))or
+               (cameras[i['camera']]['pose']['value']is None and not scene.get('view_registrations',{}).get(i['id'],{}).get('T_world_camera'))]
     if missing:
         report['needs'] = ['Initialize camera pose/K/distortion before joint fitting: ' + ', '.join(sorted(set(missing))),
                            'Use existing bootstrap/intrinsics fitting with explicit CAD correspondences']
         return scene, report
     model = scene.get('robot_model')
-    if not model:
+    if not model and any(i.get('session_id')or camera_type(i)=='wrist'for i in images):
         report['needs'] = ['Import the actual robot model and measured-joint mapping']
         return scene, report
-    if sha(local_path(project.root, model['path'])) != model['model_sha256']:
+    if model and sha(local_path(project.root, model['path'])) != model['model_sha256']:
         raise ValueError('Robot model bytes differ from Candidate identity')
     for image in images:
-        if image['joint_names'] != model['joint_names'] or image['resolution'] != cameras[image['camera']]['resolution']:
+        if (image.get('q_measured')is not None and(not model or image['joint_names']!=model['joint_names']))or image['resolution']!=cameras[image['camera']]['resolution']:
             raise ValueError('Observation robot order or camera resolution differs')
     rows = [r for r in evidence.get('landmarks', []) if r.get('observation') in by_id
             and r.get('visible', True) and r.get('occluded') is not True
@@ -119,12 +120,13 @@ def fit_joint_scene(project, scene, options=None):
     if not np.isfinite([translation, angle]).all() or min(translation, angle) <= 0:
         raise ValueError('Positive finite pose bounds required')
     observed_cameras = {by_id[r['observation']]['camera'] for r in train}
-    for name in options.get('cameras', ['side', 'wrist']):
+    for name in options.get('cameras', sorted(observed_cameras)):
         if name not in observed_cameras:
             continue
         if name not in camera_nodes:
             continue
         cam = camera_nodes[name]
+        if cam['pose']['value']is None:continue  # External views have separate registered poses.
         if cam['pose']['provenance'] in ('measured', 'calibrated'):
             continue
         if (name == 'wrist') != _mounted(scene, cam['frame']):
@@ -260,14 +262,14 @@ def fit_joint_scene(project, scene, options=None):
     anchored = any(o['id'] in observed_objects and
                    (o['dimensions']['provenance'] in ('measured', 'calibrated') or o.get('link'))
                    for o in scene['objects'])
-    registration = scene.get('scan_initialization', {}).get('registration', {})
+    registration = scene.get('world_registration', {})
     if registration and not registration.get('metric_scale_verified'):
         anchored = False
     used_ids = {r['observation'] for r in train}
     used_images = [i for i in images if i['id'] in used_ids]
     report.update(before=before, after=after, holdout_before=held_before, holdout_after=held_after,
                   independent_verification=False, coverage={'eligible_images': len(images), 'images': len(used_images),
-                                                          'poses': len({tuple(i['q_measured']) for i in used_images}),
+                                                          'poses': len({tuple(i.get('q_measured')or[])for i in used_images}),
                                                           'cameras': sorted(observed_cameras), 'layout': state},
                   changed_variables=[{'kind': b[0], 'id': b[1], 'mode': 'xy_yaw_on_support' if b[5] else 'pose6'} for b in blocks],
                   bounds={'lower': lower, 'upper': upper}, bound_hits=np.flatnonzero(np.isclose(abs(solution.x), radius, atol=1e-6)).tolist(),

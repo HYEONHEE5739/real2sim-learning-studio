@@ -329,6 +329,25 @@ class Renderer:
         self.model=mujoco.MjModel.from_xml_path(str(scratch/'scene.xml'));self.data=mujoco.MjData(self.model)
         mujoco.mj_forward(self.model,self.data)
 
+    def set_object_pose(self,name,pose):
+        """Move a World-root object for static mask refinement, without a step.
+
+        Geometry, cameras, frames and robot kinematics stay compiled and fixed.
+        This renderer-local operation never writes a Candidate or input file.
+        """
+        from .scene import transform
+        from scipy.spatial.transform import Rotation
+        pose=transform(pose);body=self.mj.mj_name2id(self.model,self.mj.mjtObj.mjOBJ_BODY,name)
+        if body<0 or self.model.body_parentid[body]!=0:raise ValueError('Static fitting requires a World-root object body')
+        obj=next(o for o in self.scene['objects']if o['id']==name)
+        if obj.get('link')or obj['role']=='reference_robot':raise ValueError('Robot pose is locked during object fitting')
+        quaternion=Rotation.from_matrix(pose[:3,:3]).as_quat();quaternion=np.r_[quaternion[3],quaternion[:3]]
+        joint=self.model.body_jntadr[body]
+        if joint>=0 and self.model.jnt_type[joint]==self.mj.mjtJoint.mjJNT_FREE:
+            address=self.model.jnt_qposadr[joint];self.data.qpos[address:address+7]=np.r_[pose[:3,3],quaternion]
+        else:self.model.body_pos[body]=pose[:3,3];self.model.body_quat[body]=quaternion
+        self.mj.mj_forward(self.model,self.data)
+
     def rgb(self,camera):
         c=next(c for c in self.scene['cameras'] if c['id']==camera);w,h=c['resolution']
         if camera not in self.renderers:self.renderers[camera]=self.mj.Renderer(self.model,height=h,width=w)
@@ -360,7 +379,7 @@ from contextlib import contextmanager
 
 @contextmanager
 def for_observation(project,scene,image,default,folder):
-    if not image.get('session_id'):
+    if not image.get('session_id')and image.get('id')not in scene.get('view_registrations',{}):
         yield default;return
     from .project import observation_scene
     from .rendering import BlenderRenderer

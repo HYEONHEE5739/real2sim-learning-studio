@@ -18,25 +18,13 @@ Precision 화면은 **Precision 파일 선택 → 연결·선택 로봇 전체 �
 
 **저장**은 선택한 Workspace Precision JSON을 교체하고, **다른 이름으로 저장**은 새 Precision JSON을 만든다. 둘 다 사용 장치 구성에 자동 반영되며, 새 구성이 필요하면 기존 구성에 정확히 연결된 Project Binding도 갱신한다. 기존 파일 bytes는 `calibration/history/<SHA>.json`에 보존한다. Workspace의 devices/calibration 밖 파일·SDK 보정 파일·닫힌 Scene Package를 덮어쓰지 않는다. Scene Package의 기존 Mapping identity를 자동으로 바꾸거나 새 물리 Calibration을 승인하지 않는다.
 
-**Codex가 Builder를 사용하는 방법:** 사용자는 Scene Prepare에서 만든 Project 경로와 제작 요구사항 Markdown을 Codex에 전달한다. Codex는 파일·이미지와 `input/evidence.yaml`에 등록된 메모를 읽고, 이 저장소의 `real2sim_builder` Python API 또는 CLI를 호출한다. 별도 Workflow Scene 화면을 열 필요는 없다. 그 화면과 전용 검사/GUI 실행 코드는 제거했으며, 실행 단계는 각자 선택한 Scene Package를 기존 Recipe/R03 경로에서 검사한다.
+**자동 Scene 제작:** Scene Prepare → Auto Reconstruction에서 사진의 배치·Camera/렌즈 ID, 실측 Geometry, SAM 설명과 기존 모델 환경 경로를 등록한다. 생성/수정은 Candidate 안에서 수행하고 Current·기존 Export를 유지한다. 일반적인 사용자 흐름에서 Codex가 매번 좌표를 작성하도록 요구하지 않는다. 현재 사용법과 Camera/Depth 공동 보정·PhysX·독립 Backend 선정의 미완료 범위는 [자동 정합 안내](../real2sim_builder/AUTO_SCENE_FITTING.md)를 따른다.
 
-예를 들어 다음은 Codex가 기존 Project 내용을 조회하고 첫 작업 후보를 만드는 실제 CLI 형식이다. 준비된 Builder Python 환경에서 실행하는 예시이며, 여기서 실행한 명령은 아니다.
+GLB/glTF·전용 Scan Import/등록은 제거했다. 일반 Mesh는 OBJ/STL을 사용한다. Robot은 기존 URDF/USD 및 Mapping/FK를 사용하며 AI가 관절값·모델을 만들지 않는다. 단순 물체는 실측 Box/Cylinder/열린 Container를 사용한다. 없는 Camera/Base·Depth scale은 `NEEDS_MORE_DATA`로 남긴다.
 
-```bash
-python -m real2sim_builder.cli inspect /path/to/my-first-scene
-python -m real2sim_builder.cli candidate /path/to/my-first-scene create initial-scene
-```
+등록된 실측 World 보드의 사진 코너를 지정할 수 있다. Wrist는 실제 촬영 q/시각이 연결된 기존 Capture/Snapshot을 사용한다. 미등록 External을 정밀 World fitting에 포함하지 않는다. SAM→DA3는 별도 설치 환경에서 순서대로 실행하며 동일 입력은 캐시를 사용한다. 모호한 Mask를 선택/수정한 뒤 같은 Candidate에서 재실행할 수 있다.
 
-첫 후보는 Current Scene이 없으면 빈 Scene에서 시작한다. Codex가 물체·좌표·카메라·물성을 정리해 `Candidate.edit`/`Candidate.save`로 작성하고, Builder의 렌더·평가·승격·Export를 호출한다. Builder는 입력 소유권·Scene 스키마·Revision·파일 무결성과 Export를 처리한다. Markdown을 이해하고 어떤 수정을 할지 판단하는 주체는 Codex이며, Builder에 프롬프트만 주면 완성 Scene이 나오는 단일 명령은 없다. 사진만으로 확정할 수 없는 치수·Camera/Base 보정은 추가 근거를 요구하거나 estimated/unknown으로 남긴다.
-
-제작한 Scene을 Real/Sim에서 비교한 뒤에는 새 Capture 폴더와 수정 지시를 Codex에 전달한다. Codex는 같은 Project에서 다음 Candidate를 편집하고 새 Export Revision을 만든다. 원 촬영 자료와 기존 Export는 보존한다. 사용자 작업 순서는 **Scene Prepare 자료 준비 → Codex의 Builder 제작 → Real/Sim 비교 → Codex의 Builder 수정**이다.
-
-1. **자료 준비:** 사진/영상, GLB·Mesh, 물체별 실측 치수(m), 역할, Robot Base 위치, SO-101 URDF와 Mesh closure, Side/Wrist Intrinsic·Extrinsic·해상도, 필요하면 Capture/Snapshot을 준비한다. 미측정 값은 estimated/unknown으로 구분한다.
-2. **Builder 입력:** Scene Prepare의 새 Project에 사진/영상·GLB·치수/카메라 Metadata·Robot Model·Capture와 메모를 저장한다. Codex는 이 Project를 Builder로 열어 사용한다. `add --kind robot`은 URDF closure와 모델 정보를 Project가 소유하도록 저장한다. 관측자료만 등록한 상태와 Reconstruction 가능한 보정자료를 구분한다.
-3. **Scene 작성:** `working/current_scene.yaml` 또는 Candidate 편집 API로 Object·Frame·Geometry·물성·카메라를 정의한다. 동적 물체에는 양수 질량을 선언한다. 관절은 SO-101 6축 이름/순서, rad 단위를 유지한다. Camera를 wrist link에 부착하려면 해당 `robot_link_*` Frame을 명시한다.
-4. **검토/보정:** Candidate Render·Real/Sim Pair·Landmark/Mask·측정 자료로 비교하고 Builder의 Review/Validation/Promote를 수행한다. Pixel 차이를 물리 Calibration 정확도로 간주하지 않는다. Precision은 SDK Encoder 보정과 별도이며 런타임 q offset을 추가하지 않는다.
-5. **실행 자산:** MuJoCo는 선언된 URDF로 현재 SO-101 Position Servo 모델을 구성하거나, 관절·Position Actuator·물체 Free Joint·EEF Site·Camera를 포함한 전체 MJCF를 제공한다. Isaac은 Articulation/Collision/관절 물성이 있는 SO-101 USD를 제공한다. Builder의 정적 Robot reference USD를 실행 Articulation으로 대체하지 않는다.
-6. **Export:** 기존 Export API/CLI/UI로 새 경로에 게시한다. UI의 실행 USD·전체 MJCF·Calibration 경로는 선택 사항이며, 선언하지 않은 실행 모델/보정은 자동으로 만들어 넣지 않는다. 성공한 Export는 Project의 Real/Sim 목록에 자동 등록된다.
+기존 Candidate 평가·승격·새 Revision Export를 사용하며, 자동 재구성 실행만으로 검증 완료/실물 승인/Task 성공이 되지 않는다. 실행 자산은 기존 Articulation/Actuator/Camera·초기 관절·Task 접촉 정보를 별도로 갖춰야 한다.
 
 ```bash
 python -m real2sim_builder.cli export /path/to/project \
@@ -50,7 +38,7 @@ python -m real2sim_builder.cli export /path/to/project \
 ```text
 project/
   project.yaml
-  input/                    # 소유 사진·Scan·URDF closure·실측 근거
+  input/                    # 소유 사진·URDF closure·실측 근거
   working/current_scene.yaml
   scratch/agent/<candidate>/
   exports/revision-001/

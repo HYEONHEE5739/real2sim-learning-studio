@@ -294,9 +294,9 @@ def fit(project,scene,target,options=None):
         from .joint import fit_joint_scene
         return fit_joint_scene(project, scene, options)
     candidate=copy.deepcopy(scene);kind,name=target.split(':',1)
-    registration=scene.get('scan_initialization',{}).get('registration')
+    registration=scene.get('world_registration')
     if registration and (registration.get('status')=='NEEDS_MORE_DATA' or not registration.get('metric_scale_verified')):
-        return scene,{'status':'NEEDS_MORE_DATA','need':'Register scan to metric robot world before camera/image optimization'}
+        return scene,{'status':'NEEDS_MORE_DATA','need':'Establish the metric World registration before camera/image optimization'}
     if kind=='bootstrap':
         return bootstrap(project,scene,name,options)
     if kind=='quality':
@@ -306,9 +306,6 @@ def fit(project,scene,target,options=None):
     elif kind=='base':node=candidate['frames'][name];field='transform'
     elif kind in ('object','dimensions'):
         node=next(o for o in candidate['objects'] if o['id']==name);field='dimensions' if kind=='dimensions' else 'pose'
-        if scene.get('scan_initialization'):
-            if not cameras_audited(scene):
-                return scene,{'status':'NEEDS_MORE_DATA','need':'Camera calibration confidence must be established before scan object pixel refinement'}
     else:raise ValueError('Fit one camera/intrinsics/base/object/dimensions group')
     if node[field]['provenance'] in ('measured','calibrated'):raise ValueError('Measured/calibrated parameter locked')
     observations={i.get('id'):i for i in annotation_evidence(project,scene)['images'] if i.get('id')}
@@ -396,8 +393,6 @@ def bootstrap(project,scene,name,options):
             obj=next(o for o in scene['objects'] if o['id']==row['object'])
             if any(obj[k]['provenance'] not in ('measured','calibrated') for k in ('pose','dimensions')):
                 return need('Measured object pose/dimensions required for camera anchors; isolate object refinement')
-        if row.get('source')=='registered_scan' and not scene.get('scan_initialization',{}).get('registration',{}).get('metric_scale_verified'):
-            return need('Scan landmarks require metric world registration')
     # Pose camera-frame points once per measured q. q is never adjusted.
     point_sets={};points=[]
     for row in train:
@@ -429,7 +424,7 @@ def bootstrap(project,scene,name,options):
             for p,row in entries:
                 q=(inv@np.r_[p,1])[:3];z=max(q[2],1e-6)
                 uv=[x[0]*q[0]/z+w/2,x[0]*aspect*q[1]/z+h/2]
-                confidence=.25 if row.get('source') in ('estimated','registered_scan') else 1.
+                confidence=.25 if row.get('source') in ('estimated','derived') else 1.
                 result.extend((np.asarray(uv)-row['uv'])*np.sqrt(row.get('weight',1)*confidence))
                 result.append(max(0,.001-q[2])*1e4)
         return np.asarray(result)

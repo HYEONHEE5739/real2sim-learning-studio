@@ -20,7 +20,7 @@ def create_scene(workspace,name):
 
 def scene_details(path):
     project=Project(path,read_only=True);evidence=project.evidence;inputs=[]
-    for kind,key in [('image','images'),('video','videos'),('scan','scans'),('document','documents'),('robot','robot_inputs'),('capture','capture_sessions')]:
+    for kind,key in [('image','images'),('video','videos'),('document','documents'),('robot','robot_inputs'),('capture','capture_sessions')]:
         for row in evidence.get(key,[]):
             file=project.root/row['path'];status='MISSING'if not file.is_file()else'CHANGED'if row.get('sha256')and sha(file)!=row['sha256']else'REGISTERED'
             inputs.append({'kind':kind,'path':row['path'],'sha256':row.get('sha256'),'status':status})
@@ -41,14 +41,13 @@ def scene_details(path):
 def save_inputs(path,files,notes):
     """No input is required. Store context first; geometry import is explicit later."""
     from real2sim_builder.evidence import add_image,add_video,copy_input,add_brief
-    from real2sim_builder.scan import import_scan
     project=Project(path);project.require_writable()
     if not isinstance(notes,str):raise ValueError('Scene notes must be text')
     files=[Path(p).resolve()for p in files]
     for file in files:
         if not file.is_file():raise FileNotFoundError(file)
+        if file.suffix.lower() in ('.glb','.gltf'):raise ValueError('LEGACY_UNSUPPORTED: GLB/glTF 입력은 제거되었습니다. 실측 치수와 RGB 또는 OBJ/STL을 사용하세요.')
     for file in files:
-        if file.suffix.lower()=='.glb':import_scan(project,file);continue
         with exclusive(project):
             suffix=file.suffix.lower()
             if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):add_image(project,file,camera='reference',context_only=True)

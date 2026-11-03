@@ -88,6 +88,8 @@ def _declared_children(source,resolutions):
 
 def copy_native_asset(source,destination,*,resolutions=None,copied=None,report=None,_layout=None):
     """Copy explicit local native dependencies once; only derived paths are rewritten."""
+    if Path(source).suffix.lower() in ('.glb','.gltf'):
+        raise ExportError('LEGACY_UNSUPPORTED',str(source),'GLB/glTF is retired; explicitly supply OBJ/STL or native Robot assets')
     source=Path(source).resolve();destination=Path(destination).resolve();destination.mkdir(parents=True,exist_ok=True)
     copied={} if copied is None else copied;resolutions=resolutions or {};report=[] if report is None else report
     if source in copied:return copied[source]
@@ -329,6 +331,17 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
                 raise ExportError('INPUT_CHANGED', mask['path'], 'approved mask changed')
             target = copy_native_asset(source, staging, copied=copied, report=derivations)
             mask['path'] = target.relative_to(staging).as_posix()
+        for cloud in working.get('reconstruction_observations',{}).get('clouds',[]):
+            for key,digest in(('path','sha256'),('mask','mask_sha256')):
+                source=local_path(project.root,cloud[key])
+                if sha(source)!=cloud[digest]:raise ExportError('INPUT_CHANGED',cloud[key],'reconstruction observation changed')
+                target=copy_native_asset(source,staging,copied=copied,report=derivations)
+                cloud[key]=target.relative_to(staging).as_posix()
+        if working.get('reconstruction_configuration'):
+            config=working['reconstruction_configuration'];source=local_path(project.root,config['path'])
+            if sha(source)!=config['sha256']:raise ExportError('INPUT_CHANGED',config['path'],'reconstruction configuration changed')
+            target=copy_native_asset(source,staging,copied=copied,report=derivations)
+            config['path']=target.relative_to(staging).as_posix()
         model_path=None
         if working.get('robot_model'):
             source=local_path(project.root,working['robot_model']['path'])

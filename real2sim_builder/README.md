@@ -2,11 +2,11 @@
 
 Offline project/candidate reconstruction, calibration, review and immutable Scene packages. Runtime files follow the existing Architecture; Native Dataset storage is owned by the Workbench and is unchanged.
 
-**Codex로 Scene을 만들거나 정합할 때는 [Scene 제작·정합 가이드](SCENE_AUTHORING.md)를 먼저 읽으세요.** Scene Prepare 입력/메모 → Builder Candidate 제작 → Export → Real/Sim 비교의 현재 절차와 CLI, 다음 작업 요청 예시를 정리했습니다.
+기본 진입점은 Scene Prepare의 **Auto Reconstruction** 또는 Builder의 **Start Reconstruction**입니다. 기존 SAM 3.1/DA3 환경을 순차 실행하고 실측 Geometry·등록된 Camera·Candidate 기반 정합으로 연결합니다. 사용법은 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md), 제작 규칙은 [SCENE_RULES.md](SCENE_RULES.md), 이관 내역은 [SOURCE_DOCUMENTS.md](SOURCE_DOCUMENTS.md)를 따릅니다.
 
-상세 제작 기준은 [SCENE_RULES.md](SCENE_RULES.md), 기존 AGENTS/docs 전체의 반영 내역은 [SOURCE_DOCUMENTS.md](SOURCE_DOCUMENTS.md)에 있습니다.
+GLB/glTF 입력·Scan 모듈/CLI/UI는 제거했습니다. 과거 의존 자산은 원본 그대로 보존하며 새 정합/Export에서 `LEGACY_UNSUPPORTED`를 반환합니다. 실측 Geometry constraint는 `candidate PROJECT constrain NAME --options constraints.yaml`로 사용합니다.
 
-자동 이미지 관측 제안과 공유 Side/Wrist/Object 정합은 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)를 따릅니다. `auto-observe` → Codex 제안 검토/반영 → `candidate fit --target joint:scene`을 기존 Candidate·평가·Export에 연결했습니다. 이번 추가 구현은 소스·문서만 작성했으며 실행 검증하지 않았습니다.
+현재 구현과 미완료 항목·실제 검증은 [단계별 기록](../docs/automated-reconstruction.md)에 있습니다. Camera/depth bundle adjustment·독립 Backend 선정·Isaac PhysX/Articulation 검증을 완료한 자동 Scene 생성기는 아직 아닙니다.
 
 See [BU01–BU04 results](../docs/builder-bundle.md) for commands, fixed installed environments, original-source comparisons, test evidence and limitations.
 

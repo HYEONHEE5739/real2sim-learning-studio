@@ -1,4 +1,4 @@
-"""Bounded reconstruction review loop; scan and initialization own their inputs."""
+"""Bounded reconstruction review and measured/image-based initialization."""
 from PIL import Image, ImageOps
 from pathlib import Path
 import copy
@@ -7,8 +7,7 @@ from real2sim_builder.scene import empty, local_path, validate, value
 from real2sim_builder.evidence import extract_videos
 import numpy as np
 from real2sim_builder.files import read, write
-from .scan import load, inspect_file, import_scan, registration, scale_from_lengths, plane, selection, mesh_asset, segment, preview
-from .initialization import apply_geometry_constraints, constrain, initialize
+from .initialization import apply_geometry_constraints, constrain
 
 
 def analyze(project):
@@ -224,15 +223,6 @@ def validate_scene(project, scene, renderer, folder, thresholds):
         quality = camera_quality.get(camera['id'])
         if quality and quality['state'] == 'CALIBRATED' and (quality.get('input_sha256') != camera_calibration_signature(scene, camera)):
             quality.update(state='ESTIMATED', reason='Calibration audit is stale after camera/registration/FK changes')
-    if scene.get('scan_initialization'):
-        if not camera_quality:
-            needs.append({'need': 'Actual observation cameras with metric calibration evidence', 'reason': 'Inspection cameras do not validate the physical Side/Wrist projection'})
-        registration = scene['scan_initialization']['registration']
-        if registration.get('status') == 'NEEDS_MORE_DATA' or not registration.get('metric_scale_verified'):
-            needs.append({'need': 'Metric scan-to-robot-world registration', 'reason': 'Nominal glTF local preview is not a registered physical workspace'})
-        for camera, quality in camera_quality.items():
-            if quality.get('state') != 'CALIBRATED':
-                needs.append({'need': camera + ' metric camera calibration with independent evidence', 'reason': 'Scan pixel similarity does not establish camera/geometry consistency'})
     photometric = bool(held_images) and all((r['mae'] <= thresholds['mae'] for r in held_images))
     geometric = all((m['iou'] >= thresholds['silhouette_iou'] and m['center_error_px'] is not None and (m['center_error_px'] <= thresholds['reprojection_px']) for r in held_images for m in r['silhouettes']))
     if held:

@@ -45,7 +45,7 @@ def cameras_audited(scene):
 def camera_calibration_signature(scene, camera):
     import hashlib, json
     data = {k: camera.get(k) for k in ('id', 'frame', 'purpose', 'resolution', 'K', 'pose', 'distortion')}
-    data['world_registration'] = scene.get('scan_initialization', {}).get('registration')
+    data['world_registration'] = scene.get('world_registration')
     data['world'] = scene['frames']['world']
     if camera['frame'].startswith('robot_link_'):
         data['robot_model'] = scene.get('robot_model')
@@ -73,6 +73,8 @@ def local_path(root, relative):
 def validate(scene, root=None, complete=False):
     if scene.get('schema') != SCHEMA or scene.get('units') != 'm':
         raise ValueError('Unsupported scene schema/units')
+    if scene.get('scan_initialization') or any(Path(a.get('path','')).suffix.lower() in ('.glb','.gltf') for a in scene.get('assets',{}).values()):
+        raise ValueError('LEGACY_UNSUPPORTED: Scan/GLB Scene remains inspectable; explicitly rebuild with measured geometry or OBJ/STL before fitting/export')
     convention = empty('')['coordinates']
     if scene.get('coordinates') != convention:
         raise ValueError('Unsupported coordinate convention; explicitly convert to metre/+Z/optical frames')

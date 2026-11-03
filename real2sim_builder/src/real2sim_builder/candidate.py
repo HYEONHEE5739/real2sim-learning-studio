@@ -2,6 +2,7 @@
 from pathlib import Path
 from .editing import apply, check_scope, preserve
 from contextlib import contextmanager
+from contextvars import ContextVar
 import copy
 from .scene import empty, identifier, local_path, validate
 import os
@@ -9,18 +10,26 @@ from .files import read, sha, write
 import shutil
 
 
+_held_projects=ContextVar('builder_held_projects',default=frozenset())
+
+
 @contextmanager
 def exclusive(project):
     project.require_writable()
+    if project.root in _held_projects.get():
+        yield
+        return
     lock = project.root / 'working/run.lock'
     try:
         with lock.open('x') as stream:
             stream.write(str(os.getpid()))
     except FileExistsError:
         raise RuntimeError('Project is busy; stop the active worker before editing')
+    token=_held_projects.set(_held_projects.get()|{project.root})
     try:
         yield
     finally:
+        _held_projects.reset(token)
         lock.unlink(missing_ok=True)
 
 
@@ -86,6 +95,8 @@ class Candidate:
     def asset(self, path, kind='visual'):
         if kind not in ('visual', 'collision', 'textures'):
             raise ValueError('Unknown asset category')
+        if Path(path).suffix.lower() in ('.glb','.gltf'):
+            raise ValueError('LEGACY_UNSUPPORTED: import an OBJ/STL asset or measured primitive instead of GLB/glTF')
         with exclusive(self.project):
             self.require_open()
             path = Path(path).resolve()
@@ -201,6 +212,10 @@ class Candidate:
                 with (self.project.root / 'working/calibration_holdout_usage.jsonl').open('a') as stream:
                     stream.write(json.dumps({'candidate': self.name, 'target': target, 'holdout_observations': ids, 'status': report['status']}) + '\n')
         return report
+
+    def constrain(self, path):
+        from .initialization import constrain
+        return constrain(self,path)
 
     def reject(self):
         with exclusive(self.project):

@@ -78,7 +78,7 @@ def scene():
     return measured_scene()
 
 from real2sim_builder.project import preserve,check_scope,nonregression,add_video,extract_videos
-from real2sim_builder.reconstruction import run,import_scan,initialize
+from real2sim_builder.reconstruction import run
 
 
 # Original offline cases: test_core.py
@@ -262,7 +262,7 @@ def test_invalid_scope_does_not_leave_candidate_directory(tmp_path, scene):
         Candidate.create(p, 'invalid', 'absent', ['pose'])
     assert not (p.root / 'scratch/agent/invalid').exists()
 
-# Original offline cases: test_scan_initialization.py
+# Measured geometry constraints are independent of media formats
 def measured_pair_scene():
     s = empty('distorted cups')
     for name, position in [('cup_a', [0.094, -0.045, 0.116]), ('cup_b', [0.107, 0.032, 0.115])]:
@@ -270,7 +270,6 @@ def measured_pair_scene():
         pose[:3, 3] = position
         geometry = {'type': 'container', 'round': True, 'wall': value(0.004, 'estimated')}
         s['objects'].append(dict(id=name, role='receptacle', frame='world', pose=value(pose.tolist(), 'estimated'), dimensions=value([0.07, 0.07, 0.065], 'measured', ['user dimensions']), visual=copy.deepcopy(geometry), collision=geometry, color=value([0.9] * 3, 'estimated'), physics={'mass_kg': value(None), 'friction': value(None)}))
-    s['scan_initialization'] = {'registration': {'status': 'NEEDS_MORE_DATA', 'scale': 0.3146254628948635, 'metric_scale_verified': False}}
     return s
 
 def measured_pair_constraints():
@@ -289,8 +288,8 @@ def test_measured_constraints_change_scene_preserve_gauge_and_unknown_world():
     assert np.allclose((before[1] - before[0])[:2] / np.linalg.norm((before[1] - before[0])[:2]), (after[1] - after[0])[:2] / 0.09)
     metrics = geometry_constraint_metrics(revised, revised['geometry_constraints']['distances'][0])
     assert abs(metrics['rim_gap_m'] - 0.02) < 1e-12 and metrics['derived_distance_m'] == pytest.approx(0.09)
-    assert report['constraints'][0]['scan_conflict']
-    assert s == original and revised['scan_initialization']['registration'] == s['scan_initialization']['registration']
+    assert report['constraints'][0]['prior_conflict']
+    assert s == original and 'world_registration'not in revised
     assert all((o['pose']['provenance'] == 'estimated' for o in revised['objects']))
     assert all((o['dimensions'] == old['dimensions'] for o, old in zip(revised['objects'], s['objects'])))
 
@@ -325,33 +324,11 @@ def test_future_scene_edits_cannot_break_relative_measurements_but_pair_can_tran
     with pytest.raises(ValueError, match='geometry constraint violated'):
         validate(broken)
     from real2sim_builder.project import apply
-    with pytest.raises(ValueError, match='camera audit'):
+    with pytest.raises(ValueError, match='geometry constraint violated'):
         apply(s, [{'op': 'update_pose', 'id': 'cup_a', 'value': both['objects'][0]['pose']['value']}], None)
 
-def test_initialization_enforces_existing_measured_distance(tmp_path):
-    import trimesh
-    from real2sim_builder.project import import_metadata
-    p = Project.create(tmp_path / 'projects', 'pair scan')
-    source = tmp_path / 'cups.glb'
-    scan_scene = trimesh.Scene()
-    for i in range(2):
-        scan_scene.add_geometry(trimesh.creation.box(extents=[0.06, 0.06, 0.05]), node_name='cup' + str(i), transform=trimesh.transformations.translation_matrix([i * 0.078, 0, 0]))
-    source.write_bytes(scan_scene.export(file_type='glb'))
-    scan = import_scan(p, source)
-    measurements = tmp_path / 'measurements.yaml'
-    write(measurements, {'units': 'm', 'objects': [{'id': 'cup_a', 'role': 'receptacle', 'dimensions': [0.07, 0.07, 0.065]}, {'id': 'cup_b', 'role': 'receptacle', 'dimensions': [0.07, 0.07, 0.065]}], 'distances': [{'objects': ['cup_a', 'cup_b'], 'distance_m': 0.09, 'source': 'measured', 'evidence': ['fixture']}]})
-    import_metadata(p, measurements)
-    c = Candidate.create(p, 'initialized')
-    config = tmp_path / 'scan.yaml'
-    write(config, {'schema': 'real2sim.scan-initialization/1', 'registration': registered(), 'objects': [{'id': 'cup_a', 'role': 'receptacle', 'shape': 'container', 'roi_scan': [[-0.031, -0.031, -0.026], [0.031, 0.031, 0.026]], 'wall_m': 0.002}, {'id': 'cup_b', 'role': 'receptacle', 'shape': 'container', 'roi_scan': [[0.047, -0.031, -0.026], [0.109, 0.031, 0.026]], 'wall_m': 0.002}]})
-    before = sha(p.root / 'working/current_scene.yaml')
-    report = initialize(c, scan['id'], config)
-    assert report['status'] == 'INITIALIZED_ESTIMATED'
-    assert report['distance_comparison'][0]['candidate_distance_m'] == pytest.approx(0.09)
-    assert report['geometry_constraints']['constraints'][0]['scan_conflict']
-    assert sha(p.root / 'working/current_scene.yaml') == before
 
-def test_constraints_keep_scan_mesh_only_as_visual_prior():
+def test_constraints_keep_existing_obj_mesh_only_as_visual_prior():
     from real2sim_builder.reconstruction import apply_geometry_constraints
     s = measured_pair_scene()
     s['assets']['oldmesh'] = {'path': 'input/assets/old.obj'}
@@ -360,12 +337,11 @@ def test_constraints_keep_scan_mesh_only_as_visual_prior():
     config['measured_visuals'] = ['cup_a']
     revised, _ = apply_geometry_constraints(s, config)
     assert revised['objects'][0]['visual']['type'] == 'container'
-    assert revised['objects'][0]['scan_visual_prior'] == s['objects'][0]['visual']
+    assert revised['objects'][0]['visual_geometry_prior'] == s['objects'][0]['visual']
     assert revised['assets'] == s['assets']
     repeated, _ = apply_geometry_constraints(revised, config)
-    assert repeated['objects'][0]['scan_visual_prior'] == s['objects'][0]['visual']
+    assert repeated['objects'][0]['visual_geometry_prior'] == s['objects'][0]['visual']
 
-from test_builder_reconstruction import glb,registered
 
 
 def test_unmarked_original_projects_are_view_only_and_clone_is_explicit(tmp_path):

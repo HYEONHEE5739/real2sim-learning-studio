@@ -53,6 +53,7 @@ class CapturePage(QWidget):
         self.settings_button=QPushButton('장치 설정');self.settings_button.clicked.connect(self.edit_settings);project_row.addWidget(self.settings_button)
         self.device_state=QLabel('저장 구성 선택 · 자동 연결 없음');self.device_state.setWordWrap(True);left.insertWidget(0,self.device_state)
         self.materials=SceneInputs(workspace,self);right.addWidget(self.materials,1);self.materials.saveRequested.connect(self.store_materials)
+        self.materials.backend_python=python
         self.input_button=self.materials.add;self.notes=self.materials.notes;self.save_materials=self.materials.save
         right.addStretch(1);self.session_label=QLabel('세션 없음');self.session_label.setWordWrap(True);right.addWidget(self.session_label)
         note=QLabel('종료: 로봇·카메라 연결 해제, Torque 유지');note.setWordWrap(True);note.setObjectName('mutedLabel');right.addWidget(note)

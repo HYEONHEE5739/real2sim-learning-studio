@@ -40,7 +40,6 @@ class Window(QMainWindow):
         for title,kind in [('스마트폰 사진 추가','image'),('Add Videos','video'),('Camera Calibration','calibration'),('Measurements / Geometry','measurements'),('Canonical Scene','scene'),('Robot URDF / MJCF / USD','robot')]:
             button=QPushButton(title);button.clicked.connect(lambda _,k=kind:self.guard(lambda:self.add(k)));box.addWidget(button)
         imports=QHBoxLayout();box.addLayout(imports)
-        self.scan_button=QPushButton('iPad GLB 추가');self.scan_button.clicked.connect(lambda:self.guard(lambda:self.add('scan')));imports.addWidget(self.scan_button)
         self.capture_button=QPushButton('Capture / Snapshot 등록');self.capture_button.clicked.connect(lambda:self.guard(lambda:self.add('capture')));imports.addWidget(self.capture_button)
         self.input_table=QTableWidget(0,5);self.input_table.setHorizontalHeaderLabels(['종류','Source / Path','SHA256','상태','필요한 근거']);self.input_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch);box.addWidget(self.input_table)
         self.candidates=QComboBox();box.addWidget(self.candidates)
@@ -117,11 +116,8 @@ class Window(QMainWindow):
             path=QFileDialog.getExistingDirectory(self,'공식 Capture / Snapshot Dataset')
             if path:self.start_worker(['-u','-m','real2sim_builder.cli','import-capture',str(self.project.root),path],'add')
             return
-        paths,_=QFileDialog.getOpenFileNames(self,'Add '+kind,'','GLB (*.glb)'if kind=='scan'else'All files (*)')
+        paths,_=QFileDialog.getOpenFileNames(self,'Add '+kind,'','Images / native assets / metadata (*.*)')
         if not paths:return
-        if kind=='scan':
-            if len(paths)!=1:raise ValueError('GLB는 한 번에 하나씩 등록하세요')
-            self.start_worker(['-u','-m','real2sim_builder.cli','scan',str(self.project.root),'import','--path',paths[0]],'add');return
         args=['-u','-m','real2sim_builder.cli','add',str(self.project.root),*paths,'--kind',kind,'--camera',self.camera.text(),'--split',self.split.currentText()]
         if kind=='robot':
             states,_=QFileDialog.getOpenFileName(self,'Optional joint states in model radians (needed for articulated URDF/MJCF)')
@@ -147,7 +143,9 @@ class Window(QMainWindow):
 
     def start(self):
         self.require_idle();self.log.clear()
-        self.start_worker(['-u','-m','real2sim_builder.cli','run',str(self.project.root),'--renderer',self.renderer.currentText()],'run');self.tabs.setCurrentIndex(1)
+        from .ui_reconstruction import ReconstructionDialog
+        dialog=ReconstructionDialog(self.project.root,self.python.text(),self);dialog.exec()
+        self.refresh();self.poll(force=True)
 
     def command(self,name):
         if not self.project:raise ValueError('Select a project')
@@ -176,10 +174,10 @@ class Window(QMainWindow):
             state=self.project.state;self.name.setText(self.project.info['name']);self.status.setText(
                 f"{state['status']} · {state.get('stage')} · Iteration {state['iteration']}\n{state.get('task','')}\nDecision: {state['decision']}\n"+json.dumps(state.get('metrics',{}),ensure_ascii=False))
             self.stages.setCurrentRow(STAGES.index(state['stage']) if state.get('stage') in STAGES else -1)
-            evidence=self.project.evidence;rows=[(kind,row)for key,kind in [('capture_sessions','Capture'),('scans','GLB'),('images','Image')]for row in evidence.get(key,[])]
+            evidence=self.project.evidence;rows=[(kind,row)for key,kind in [('capture_sessions','Capture'),('images','Image')]for row in evidence.get(key,[])]
             self.input_table.setRowCount(len(rows))
             for i,(kind,row)in enumerate(rows):
-                values=[kind,row.get('path',''),row.get('sha256',''),row.get('status','REGISTERED'if kind=='GLB'else'ELIGIBLE'if row.get('eligible')else'UNVERIFIED'),', '.join(row.get('needs',row.get('exclusion_reasons',[])))]
+                values=[kind,row.get('path',''),row.get('sha256',''),row.get('status','ELIGIBLE'if row.get('eligible')else'UNVERIFIED'),', '.join(row.get('needs',row.get('exclusion_reasons',[])))]
                 for j,value in enumerate(values):self.input_table.setItem(i,j,QTableWidgetItem(str(value)))
             self.inputs.setPlainText(json.dumps(self.project.evidence,indent=2,ensure_ascii=False));self.result.setPlainText(json.dumps(state,indent=2,ensure_ascii=False))
             names=[p.parent.name for p in sorted((self.project.root/'scratch/agent').glob('*/candidate.json'))]

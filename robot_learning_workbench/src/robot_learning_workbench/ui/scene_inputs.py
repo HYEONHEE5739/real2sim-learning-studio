@@ -28,10 +28,18 @@ class SceneInputs(QWidget):
         self.files=QListWidget();self.files.setTextElideMode(Qt.TextElideMode.ElideMiddle);self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff);self.files.setMaximumHeight(170);box.addWidget(self.files)
         box.addWidget(QLabel('Scene 메모'));self.notes=QPlainTextEdit();self.notes.setPlainText(DEFAULT_NOTES);self.notes.setMinimumHeight(140);self.notes.setStyleSheet('QPlainTextEdit { background: #f4f5f7; color: #18212d; border: 1px solid #abb9c8; border-radius: 6px; padding: 8px; }');box.addWidget(self.notes,1)
         self.save=QPushButton('Scene 자료 저장');self.save.clicked.connect(lambda:self.saveRequested.emit(self.pending,self.notes.toPlainText()));box.addWidget(self.save)
+        self.reconstruct=QPushButton('Auto Reconstruction');box.addWidget(self.reconstruct);self.reconstruct.setEnabled(False)
+        self.reconstruct.clicked.connect(self.open_reconstruction);self.project_path=None;self.backend_python=None
+
+    def open_reconstruction(self):
+        if not self.project_path or not self.backend_python:return
+        from real2sim_builder.ui_reconstruction import ReconstructionDialog
+        dialog=ReconstructionDialog(self.project_path,self.backend_python,self);dialog.exec()
     def choose(self):
-        files,_=QFileDialog.getOpenFileNames(self,'Scene Input Data 선택',self.workspace,'Builder inputs (*.urdf *.stl *.obj *.glb *.png *.jpg *.jpeg *.json *.yaml *.csv *.txt *.pdf);;All files (*)')
+        files,_=QFileDialog.getOpenFileNames(self,'Scene Input Data 선택',self.workspace,'Builder inputs (*.urdf *.stl *.obj *.png *.jpg *.jpeg *.mp4 *.mov *.avi *.json *.yaml *.csv *.txt *.pdf);;All files (*)')
         for file in files:
             if file not in self.pending:self.pending.append(file);self.files.addItem('추가 예정 · '+file)
     def load(self,data):
+        self.project_path=data.get('project');self.reconstruct.setEnabled(bool(self.project_path and self.backend_python))
         self.pending=[];self.files.clear();self.notes.setPlainText(data.get('notes','')if data.get('notes_saved')or data.get('notes')else DEFAULT_NOTES)
         for row in data.get('inputs',[]):self.files.addItem(row.get('status','등록')+' · '+row.get('path',''))

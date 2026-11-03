@@ -10,7 +10,7 @@
 | `docs/INPUTS.md` | 단위/좌표, 영상 split, Metadata·Mask·URDF·Depth·운동 근거 | 샘플 숫자를 실측으로 사용 |
 | `docs/MULTIPOSE_CAPTURE.md` | 측정 q 고정, 공유 Camera/FK, scene-state·train/holdout, 원본 hash | 옛 UI/Session 폴더 구조·당시 downstream 미지원 상태를 현재 상태로 단정 |
 | `docs/PAIRED_CAPTURE.md` | Real fitting / Runtime baseline / 새 Candidate 렌더의 세 방향 비교 | 과거 Workspace import 경로 |
-| `docs/SCAN_INITIALIZATION.md` | GLB 검사·ROI·등록·실측 우선·상대 기하·불확실성 | 예시 scale/좌표·특정 Polycam 결과 |
+| `docs/SCAN_INITIALIZATION.md` | 실측 우선·일반 강체 등록·상대 기하·불확실성 | GLB/Scan 실행 경로는 2026-11-03 제거; 과거 자산은 보존 |
 | `docs/UNKNOWN_CAMERA_CALIBRATION.md` | Bootstrap/변수 그룹·rank·독립 quality·수동 FK 한계 | bootstrap 성공을 물리 Calibration 완료로 해석 |
 | `docs/ARCHITECTURE.md` | Canonical 기반 양 exporter, 책임 분리, geometry/physics 경계 | 옛 app 패키지 구조·기존 export 교체 방식 |
 | `docs/CONSUMING_SCENES.md` | Portable closure·엔진 좌표·reference/articulation·실행 범위 분리 | 옛 SO Adapter/registry/프로필 선택 절차 |
@@ -36,3 +36,7 @@
 `set_spawn` 편집법은 `SCENE_AUTHORING.md` §1-B, 제작 규칙은 `SCENE_RULES.md` §1-A를 따른다.
 Scene Prepare의 편집 가능한 메모 양식에 물체 크기·기본 구성·선택형 물체·물리 조건을 적고,
 Codex가 그 내용을 Builder Object와 새 Export에 반영한다.
+
+## 2026-11-03 자동 재구성 개편
+
+사용자 제공 Automated Real2Sim Reconstruction 구현 지시서가 현재 목표다. Codex 수동 좌표 편집 중심의 과거 흐름을 기본 UI에서 교체했다. GLB/Scan 전용 코드는 제거하고 실측·Camera 등록·SAM/DA3·ICP/Mask 및 기존 Candidate/Revision을 사용한다. 과거 문서의 GLB 명령은 현재 API가 아니다. 구현/검증/미완료는 [단계별 기록](../docs/automated-reconstruction.md)을 따른다.

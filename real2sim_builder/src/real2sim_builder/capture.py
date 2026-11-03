@@ -294,11 +294,22 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
 
 
 def observation_scene(scene, image, root, complete=True):
-    if not image.get('session_id'):
+    registration=scene.get('view_registrations',{}).get(image.get('id'))
+    if not image.get('session_id')and not registration:
         return scene
-    if not image.get('eligible') or image.get('q_measured') is None:
-        raise ValueError('Observation excluded: ' + str(image.get('exclusion_reasons')))
     result = copy.deepcopy(scene)
+    if registration:
+        if registration['source_image_sha256']!=image['sha256']or registration['scene_state_id']!=image['scene_state_id']:
+            raise ValueError('View registration identity differs')
+        if registration['status']not in('REGISTERED_ESTIMATED','REGISTERED_CALIBRATED'):raise ValueError('View is not World registered')
+        if registration.get('T_world_camera')is not None:
+            camera=next(c for c in result['cameras']if c['id']==image['camera'])
+            camera['frame']='world';camera['pose']=value(registration['T_world_camera'],'optimized',registration['calibration_evidence'])
+    if not image.get('session_id')and image.get('camera_type')!='wrist':
+        validate(result,root,complete=complete)
+        return result
+    if (not image.get('eligible')and not registration) or image.get('q_measured') is None:
+        raise ValueError('Observation excluded: ' + str(image.get('exclusion_reasons')))
     model = result['robot_model']
     if image['joint_names'] != model['joint_names']:
         raise ValueError('Observation joint order differs')

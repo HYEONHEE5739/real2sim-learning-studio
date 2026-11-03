@@ -137,6 +137,59 @@ from scipy.spatial.transform import Rotation
 TOLERANCE=1e-5
 
 
+def physics_probe(project,scene,folder,*,steps=500):
+    """Execute passive MuJoCo object settling; never certify robot/PhysX by proxy.
+
+    Uses the existing MJCF collision exporter. Unknown mass/friction are reported
+    rather than assigning values solely to pass a simulation-readiness gate.
+    """
+    from pathlib import Path
+    from .scene import validate
+    from .exporters import mjcf
+    from .files import write
+    from .calibration.geometry import parts
+    import mujoco
+    if type(steps)is not int or not 1<=steps<=2500:raise ValueError('Physics probe requires 1..2500 actual steps')
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    report={'status':'NEEDS_MORE_DATA','physical_verified':False,'robot_articulation':'NOT_TESTED',
+            'isaac':{'status':'NOT_TESTED','physics_steps':0},'scope':'passive object gravity/contact only; not a Task or articulated robot test',
+            'needs':[],'mujoco':{'status':'NOT_TESTED','steps':0},'containers':[]}
+    try:validate(scene,project.root,complete=True)
+    except ValueError as error:
+        report['needs'].append(str(error));write(folder/'physics.json',report);return report
+    dynamic=[o for o in scene['objects']if o['role']=='manipulable_object']
+    for obj in dynamic:
+        for field in('mass_kg','friction'):
+            v=obj['physics'][field]['value']
+            if v is None or(field=='mass_kg'and v<=0):report['needs'].append(obj['id']+': specify '+field+' with provenance')
+    for obj in scene['objects']:
+        if obj['collision']['type']=='container':
+            report['containers'].append({'id':obj['id'],'open_geometry_declared':True,
+                'collision_parts':len(parts(obj,'collision')),'block_drop_test':'NOT_TESTED'})
+    if report['needs']:write(folder/'physics.json',report);return report
+    path=folder/'scene.xml';mjcf.export(scene,project.root,path)
+    model=mujoco.MjModel.from_xml_path(str(path));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
+    def contacts():
+        return [{'a':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom1)),
+                 'b':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom2)),
+                 'distance_m':float(c.dist)}for c in data.contact[:data.ncon]]
+    initial=contacts();finite=True;completed=0
+    for index in range(steps):
+        project.checkpoint();mujoco.mj_step(model,data);completed=index+1
+        if not np.isfinite(data.qpos).all()or not np.isfinite(data.qvel).all():finite=False;break
+    final=contacts();speed=float(np.max(abs(data.qvel)))if model.nv else 0.
+    penetrations=[r for r in initial if r['distance_m']<-.001]
+    report['mujoco']={'status':'STEPPED','steps':completed,'simulation_seconds':completed*float(model.opt.timestep),
+        'finite':finite,'initial_contacts':initial,'initial_penetrations':penetrations,'final_contacts':final,
+        'contact_count':len(final),'max_final_generalized_speed':speed,'settled':finite and speed<.01,
+        'parameters':{o['id']:o['physics']for o in dynamic}}
+    if penetrations:report['needs'].append('Initial inter-object penetration exceeds 1mm')
+    if not finite or speed>=.01:report['needs'].append('Objects did not reach the settling threshold')
+    report['needs']+=['Isaac/PhysX steps and robot articulation collision require native execution validation',
+                       'Open-container block-drop and independent physical parameter validation remain required']
+    write(folder/'physics.json',report);return report
+
+
 def check(scene,root,mjcf,usd):
     from .project import world_pose,local_path,render_pose
     from .calibration.geometry import parts,mesh_data

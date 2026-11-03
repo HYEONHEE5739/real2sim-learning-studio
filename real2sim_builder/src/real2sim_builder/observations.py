@@ -20,15 +20,13 @@ def _scene_digest(scene):
     return _digest({k: v for k, v in scene.items() if k != 'derived_observations'})
 
 
-def registered_images(project, scene_state=None):
-    """Select one declared layout; do not discover media outside Evidence."""
-    images = [i for i in project.evidence['images']
-              if i.get('eligible') is True and i.get('id')
-              and i.get('camera') in ('side', 'wrist') and i.get('q_measured') is not None]
+def input_images(project,scene_state=None):
+    """Identity-checked RGB inputs, including unregistered external views."""
+    images=[i for i in project.evidence['images']if i.get('id')and i.get('scene_state_id')]
     states = {i.get('scene_state_id') for i in images if i.get('scene_state_id')}
     if scene_state is None:
         if len(states) != 1:
-            return [], None, ['Choose one scene_state_id from registered eligible captures']
+            return [], None, ['Choose one scene_state_id from registered RGB inputs']
         scene_state = next(iter(states))
     identifier(scene_state)
     images = [i for i in images if i.get('scene_state_id') == scene_state]
@@ -36,10 +34,155 @@ def registered_images(project, scene_state=None):
         path = local_path(project.root, image['path'])
         if not image.get('sha256') or sha(path) != image['sha256']:
             raise ValueError('Registered image SHA mismatch: ' + image['id'])
-        q = np.asarray(image['q_measured'], float)
-        if q.shape != (len(image['joint_names']),) or not np.isfinite(q).all():
-            raise ValueError('Invalid measured joints: ' + image['id'])
-    return images, scene_state, [] if images else ['No eligible measured-q images in this layout']
+        if image.get('q_measured')is not None:
+            q=np.asarray(image['q_measured'],float)
+            if q.shape!=(len(image['joint_names']),)or not np.isfinite(q).all():raise ValueError('Invalid measured joints: '+image['id'])
+        if camera_type(image)=='wrist'and image.get('q_measured')is None:raise ValueError('Wrist image requires measured q: '+image['id'])
+    train={i['sha256']for i in images if i.get('split')=='train'}
+    held={i['sha256']for i in images if i.get('split')=='validation'}
+    if train&held:raise ValueError('Train/holdout source-image leakage')
+    if {i['group_id']for i in images if i.get('split')=='train'}&{i['group_id']for i in images if i.get('split')=='validation'}:
+        raise ValueError('Train/holdout observation-group leakage')
+    return images,scene_state,[]if images else['No registered RGB inputs in this layout']
+
+
+def camera_type(image):
+    kind=image.get('camera_type','wrist'if image['camera']=='wrist'else'side'if image['camera']=='side'else'external')
+    if kind not in('side','wrist','external'):raise ValueError('Camera type must be side, wrist or external')
+    return kind
+
+
+def source_record_digest(image):
+    return image.get('_source_record_sha256')or _digest(image)
+
+
+def registered_images(project,scene_state=None,*,scene=None):
+    scene_state=scene_state or(scene or{}).get('reconstruction_state',{}).get('id')
+    images,state,needs=input_images(project,scene_state);result=[]
+    registrations=(scene or{}).get('view_registrations',{})
+    for original in images:
+        image=copy.deepcopy(original);registration=registrations.get(image['id'])
+        if registration:
+            if registration['source_image_sha256']!=image['sha256']or registration['image_record_sha256']!=_digest(original):raise ValueError('View registration source changed')
+            from .scene import camera_calibration_signature
+            cam=next(c for c in scene['cameras']if c['id']==image['camera'])
+            if registration.get('camera_signature')!=camera_calibration_signature(scene,cam):raise ValueError('View registration Camera calibration changed; register again')
+            image['_source_record_sha256']=_digest(original)
+            image['eligible']=registration['status']in('REGISTERED_ESTIMATED','REGISTERED_CALIBRATED')
+            image['registration_status']=registration['status']
+        if image.get('eligible')is True:result.append(image)
+    return result,state,needs or([]if result else['No World-registered eligible views in this layout'])
+
+
+def register_image(project,path,*,camera,camera_type,scene_state,split='train',timestamp=None,observed_objects=(),joint_record=None):
+    """Register RGB identity and its declared static layout; never synthesize q/pose."""
+    from .evidence import add_image
+    identifier(camera);identifier(scene_state)
+    if camera_type not in('side','wrist','external'):raise ValueError('Unknown camera type')
+    if split not in('train','validation'):raise ValueError('Invalid image split')
+    if timestamp is not None and not np.isfinite(timestamp):raise ValueError('Finite image timestamp required')
+    if camera_type=='wrist':
+        if not joint_record or any(k not in joint_record for k in('q_measured','joint_names','mapping_sha256','robot_model_sha256','image_timestamp_ns','joint_timestamp_ns')):
+            raise ValueError('Wrist requires measured q, mapping identity and image/joint timestamps; use Capture import')
+        q=np.asarray(joint_record['q_measured'],float)
+        if q.shape!=(len(joint_record['joint_names']),)or not np.isfinite(q).all()or joint_record.get('joint_units')!=['rad']*len(q):raise ValueError('Wrist measured model-radian mapping required')
+        if abs(joint_record['image_timestamp_ns']-joint_record['joint_timestamp_ns'])>100_000_000:raise ValueError('Wrist image/joint skew exceeds 100ms')
+        import re
+        if any(not re.fullmatch('[0-9a-f]{64}',str(joint_record[key]))for key in('mapping_sha256','robot_model_sha256')):
+            raise ValueError('Wrist requires actual model and mapping SHA256 identities')
+    path=Path(path).resolve();digest=sha(path)
+    old=next((i for i in project.evidence['images']if i.get('sha256')==digest and i['camera']==camera),None)
+    if old and old.get('scene_state_id')and old['scene_state_id']!=scene_state:raise ValueError('The same image cannot be relabelled into another layout')
+    if old and(old.get('session_id')or old.get('snapshot_id')):
+        if old['split']!=split:raise ValueError('Image already registered as Capture; retain its original split/metadata')
+        return copy.deepcopy(old)
+    if old and old.get('camera_type'):
+        if old['camera_type']!=camera_type or old['split']!=split or old.get('observed_objects',[])!=list(observed_objects):
+            raise ValueError('Image already registered with different metadata; keep the original registration')
+        if joint_record and any(old.get(key)!=val for key,val in joint_record.items()):
+            raise ValueError('Image already registered with different measured joints; retain original metadata')
+        return copy.deepcopy(old)
+    row=add_image(project,path,camera,split,timestamp,context_only=True)
+    evidence=project.evidence;record=next(i for i in evidence['images']if i['path']==row['path']and i['camera']==camera)
+    record.update(id=camera+'_'+digest[:20],camera_type=camera_type,physical_camera_id=camera,scene_state_id=scene_state,
+                  group_id=camera+'_'+digest[:20],observed_objects=list(observed_objects),q_measured=None,
+                  registration_status='UNREGISTERED',eligible=False,exclusion_reasons=['Camera-to-World registration required'])
+    if record.get('source_video_sha256'):record['group_id']='video_'+record['source_video_sha256']
+    if joint_record:
+        for key in('q_measured','joint_names','joint_units','mapping_sha256','robot_model_sha256','image_timestamp_ns','joint_timestamp_ns'):
+            record[key]=copy.deepcopy(joint_record[key])
+    write(project.root/'input/evidence.yaml',evidence)
+    return copy.deepcopy(record)
+
+
+def register_sources(project,paths,**metadata):
+    """Register photos or sampled external video with one shared video group."""
+    from .evidence import copy_input,add_video,extract_videos
+    from .candidate import exclusive
+    rows=[]
+    with exclusive(project):
+        for path in paths:
+            path=Path(path)
+            if path.suffix.lower()not in('.mp4','.mov','.avi'):
+                rows.append(register_image(project,path,**metadata));continue
+            if metadata['camera_type']=='wrist':raise ValueError('Wrist video requires synchronized measured-q Capture import')
+            relative=copy_input(project,path);digest=sha(project.root/relative)
+            if not any(v['path']==relative and v['camera']==metadata['camera']for v in project.evidence['videos']):
+                add_video(project,path,camera=metadata['camera'],split=metadata.get('split','train'))
+            extract_videos(project,paths={relative})
+            frames=[r for r in project.evidence['images']if r.get('source_video_sha256')==digest and r['camera']==metadata['camera']]
+            for frame in frames:rows.append(register_image(project,project.root/frame['path'],**metadata))
+    return rows
+
+
+def register_views(candidate,anchors=None,*,scene_state=None):
+    """Metric PnP for external views; calibrated fixed/mounted cameras stay fixed."""
+    from .candidate import exclusive
+    from .calibration.registration import camera_from_anchors
+    from .scene import frame_world,value,world_pose
+    anchors=anchors or{}
+    with exclusive(candidate.project):
+        candidate.require_open();scene=candidate.scene;images,state,needs=input_images(candidate.project,scene_state)
+        if scene.get('reconstruction_state',{}).get('id',state)!=state:raise ValueError('Use one Candidate per static layout')
+        cameras={c['id']:c for c in scene['cameras']};registrations=copy.deepcopy(scene.get('view_registrations',{}));rows=[]
+        for image in images:
+            cam=cameras.get(image['camera']);binding=anchors.get(image['id'],{})
+            if cam is None or any(cam[k]['value']is None for k in('K','distortion')):
+                needs.append(image['id']+': known Camera Intrinsics/distortion or a separately assessed intrinsic estimate required');continue
+            if cam['resolution']!=image['resolution']:
+                needs.append(image['id']+': Camera calibration resolution differs from registered upright RGB');continue
+            kind=camera_type(image)
+            calibrated=all(cam[k]['provenance']in('measured','calibrated')for k in('K','pose','distortion'))
+            if kind in('side','wrist'):
+                if not calibrated:
+                    needs.append(image['id']+': verified fixed Camera or Wrist mount calibration required');continue
+                if kind=='wrist':
+                    model=scene.get('robot_model',{})
+                    if image.get('joint_names')!=model.get('joint_names')or not model.get('mapping',{}).get('sha256'):
+                        needs.append(image['id']+': verified measured-q model mapping required');continue
+                    from .capture import mapping_contract
+                    mapping_contract({'joint_mapping':model['mapping'],'joint_names':model['joint_names'],
+                        'joint_units':['rad']*len(model['joint_names']),'robot':model,'source_robot_sha256':model.get('source_robot_sha256')})
+                    if sha(local_path(candidate.project.root,model['path']))!=model['model_sha256']:raise ValueError('Wrist Robot model changed')
+                    if image.get('mapping_sha256',model['mapping']['sha256'])!=model['mapping']['sha256']or image.get('robot_model_sha256',model['model_sha256'])!=model['model_sha256']:
+                        raise ValueError('Wrist measured q belongs to a different model or mapping')
+                pose=None;status='REGISTERED_CALIBRATED';report={'source':'existing Camera calibration'}
+            else:
+                if binding.get('source')not in('measured','calibrated')or not binding.get('evidence'):
+                    needs.append(image['id']+': metric World anchors are required; DA3 pose alone is not registration');continue
+                report=camera_from_anchors(binding.get('world_points_m',[]),binding.get('uv_px',[]),cam['K']['value'],cam['distortion']['value'])
+                if report['status']!='ESTIMATED':needs.extend(image['id']+': '+n for n in report['needs']);continue
+                pose=report['T_world_camera'];status='REGISTERED_ESTIMATED'
+            from .scene import camera_calibration_signature
+            row={'image_id':image['id'],'source_image_sha256':image['sha256'],'image_record_sha256':_digest(image),
+                 'scene_state_id':state,'camera_type':kind,'camera':image['camera'],'status':status,'T_world_camera':pose,
+                 'camera_signature':camera_calibration_signature(scene,cam),'metric_anchors':copy.deepcopy(binding),
+                 'calibration_evidence':binding.get('evidence',cam['pose'].get('evidence',[])),
+                 'metric_scale_verified':True,'provenance':'derived','physical_verified':False,'report':report}
+            registrations[image['id']]=row;rows.append(row)
+        if rows:
+            scene['view_registrations']=registrations;scene['reconstruction_state']={'id':state,'static_layout_verified':False};candidate.save(scene)
+        return {'status':'REGISTERED_ESTIMATED'if rows and not needs else'NEEDS_MORE_DATA','views':rows,'needs':needs,'scene_state_id':state,'physical_verified':False}
 
 
 def annotation_evidence(project, scene):
@@ -60,6 +203,10 @@ def annotation_evidence(project, scene):
             raise ValueError('Approved mask changed')
     for kind in ('landmarks', 'masks'):
         result.setdefault(kind, []).extend(copy.deepcopy(layer.get(kind, [])))
+    if scene.get('view_registrations'):
+        registered,_,_=registered_images(project,scene=scene)
+        active={i['id']:i for i in registered}
+        result['images']=[active.get(i.get('id'),i)for i in result['images']]
     return result
 
 
@@ -154,7 +301,7 @@ def propose_observations(project, *, scene_state=None, options=None, candidate=N
     c = Candidate(project, name) if (project.root/'scratch/agent'/name/'candidate.json').exists() else Candidate.create(project, name)
     with exclusive(project):
         c.require_open()
-        images, state, needs = registered_images(project, scene_state)
+        images, state, needs = registered_images(project, scene_state,scene=c.scene)
         scene = c.scene
         payload = {'images': images, 'options': options, 'scene': _scene_digest(scene), 'scene_state_id': state}
         digest = _digest(payload)
@@ -191,7 +338,7 @@ def propose_observations(project, *, scene_state=None, options=None, candidate=N
                 mask = row.pop('mask', None)
                 row.update(id=key, image_id=image['id'], scene_state_id=state, camera=image['camera'],
                            object_id=None, occluded=None, source_image_sha256=image['sha256'],
-                           image_record_sha256=_digest(image),
+                           image_record_sha256=source_record_digest(image),
                            provenance='derived', correspondence_verified=False)
                 if mask is not None:
                     target = folder/(key+'.png')
@@ -244,7 +391,7 @@ def commit_observation_proposals(project, proposal_file, *, selections=None):
         if _scene_digest(scene) != proposal['scene_sha256']:
             raise ValueError('Candidate geometry changed; generate proposals again')
         objects = {o['id']: o for o in scene['objects']}
-        images, state, _ = registered_images(project, proposal['scene_state_id'])
+        images, state, _ = registered_images(project, proposal['scene_state_id'],scene=scene)
         images = {i['id']: i for i in images}
         proposals = {r['id']: r for r in proposal['proposals']}
         layer = copy.deepcopy(scene.get('derived_observations', {'landmarks': [], 'masks': [], 'sources': []}))
@@ -253,7 +400,7 @@ def commit_observation_proposals(project, proposal_file, *, selections=None):
         for selection in selections:
             row = proposals[selection['proposal_id']]
             image = images[row['image_id']]
-            if image['sha256'] != row['source_image_sha256'] or _digest(image) != row['image_record_sha256']:
+            if image['sha256'] != row['source_image_sha256'] or source_record_digest(image) != row['image_record_sha256']:
                 raise ValueError('Proposal image changed')
             object_id = selection.get('object_id')
             if object_id not in objects:
@@ -303,7 +450,7 @@ def commit_observation_proposals(project, proposal_file, *, selections=None):
                 return any(k in record and existing.get(k) == record[k] for k in ('point_m', 'point_fraction'))
             layer[kind] = [r for r in layer[kind] if not same_feature(r)]+[record]
             source = {'image_id': image['id'], 'scene_state_id': state, 'source_image_sha256': image['sha256'],
-                      'image_record_sha256': _digest(image)}
+                      'image_record_sha256': source_record_digest(image)}
             if source not in layer['sources']:
                 layer['sources'].append(source)
         scene['derived_observations'] = layer

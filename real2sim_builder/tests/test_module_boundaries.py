@@ -18,10 +18,10 @@ def test_role_imports_do_not_initialize_engine_or_gui():
 
 
 def test_role_modules_and_public_project_api_share_the_same_implementations():
-    from real2sim_builder import project,evidence,capture,candidate,scene,scan,reconstruction
+    from real2sim_builder import project,evidence,capture,candidate,scene,initialization,reconstruction
     assert project.Project.__module__=='real2sim_builder.project'
     assert project.Candidate is candidate.Candidate
     assert project.import_snapshots is capture.import_snapshots
     assert project.copy_input is evidence.copy_input
     assert project.validate is scene.validate
-    assert reconstruction.registration is scan.registration
+    assert reconstruction.apply_geometry_constraints is initialization.apply_geometry_constraints

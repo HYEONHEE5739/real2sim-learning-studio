@@ -1,3 +1,5 @@
+> 2026-11-03 개편: 아래 B 소스 매핑은 역사적 이관 기록이다. 현재 활성 재구성은 실측/RGB/Depth 기반이며 GLB Scan 경로는 제거했다. 현재 API·실행 범위는 `real2sim_builder/AUTO_SCENE_FITTING.md`와 `docs/automated-reconstruction.md`를 따른다.
+
 # SPEC: Builder 편집·정합·Export
 
 ID: `builder`. 작성: 2026-10-25. 상태: **BU01~BU04 구현·오프라인/공식 파일·정적 렌더 검증 완료, 실제 engine runtime 관문 OPEN**. [승인된 범위](CAPABILITY-MAP.md) / [개발 계획](tasks/plan.md). [구현 결과](docs/builder-bundle.md)는 실제 시험 범위와 미검증 관문을 구분한다.

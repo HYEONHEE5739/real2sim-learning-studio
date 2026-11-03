@@ -42,13 +42,12 @@
 - Real↔Runtime↔Candidate 비교 전에 q, Camera K/pose/resolution, Mapping, 엔진, Revision identity를 확인한다. 동등성이 unknown이면 RGB 차이만으로 Adapter나 렌더러가 원인이라고 확정하지 않는다.
 - 완료/Manifest에 게시된 자료와 pending을 구별한다. 원 촬영 품질 경고를 숨기거나 실패한 촬영을 정상 촬영 수로 세지 않는다.
 
-## 4. GLB·실측 기하·접촉
+## 4. RGB/Depth·실측 기하·접촉
 
-- GLB는 복원된 표면/배치의 초기 추정이다. glTF의 명목 metre/+Y up만으로 스캔의 실제 scale과 robot-world 등록이 검증되지는 않는다. GLB를 원 LiDAR depth로 표기하지 않는다.
-- 먼저 bounds, transform, 연결 성분, 퇴화면, 열린 경계, UV/재질을 확인한다. Plane 제거/voxel cluster는 분리 제안이며 의미 분류가 아니다. 사진·texture와 대조해 물체 ID/ROI를 정한다.
-- 실측 dimensions·중심 거리·rim gap을 실제 Candidate geometry에 반영하고 residual을 남긴다. Scan의 전역 scale을 무조건 고정하지 않는다. 여러 길이 비율이 다르면 부분 왜곡·누락 면·ROI 오류를 별도 가설로 남긴다.
-- Metric 등록은 최소 3개 비공선 3D–3D 대응과 근거 있는 world 좌표가 필요하다. Scale/rotation/translation·rank·residual을 함께 본다. 등록 없는 scan-local 검토 후보는 world 정합 완료가 아니다.
-- 부분 표면의 bbox는 전체 물체 bbox가 아니다. 반대편 면의 관측 근거 없이 숨은 두께를 확정하지 않는다. Depth는 optical Z이며 rectified RGB/K와 맞아야 한다. GLB 기반 추정과 실제 depth/cloud의 근거 수준을 혼동하지 않는다.
+- GLB/glTF Import/Export 및 전용 Scan 경로는 제거했다. 기존 파일은 삭제하지 않으며 의존 Scene은 신규 fitting/export에서 `LEGACY_UNSUPPORTED`로 진단한다. 일반 OBJ/STL과 Robot 모델은 유지한다.
+- 실측 치수와 기존 CAD가 Geometry의 기준이다. SAM Mask·DA3 Depth/K/Extrinsic은 derived/estimated이며 measured로 승격하지 않는다.
+- Metric World는 검증된 Camera 또는 측정 World Anchor로 등록한다. 미등록 External은 reference-only다. DA3 pose만으로 World 등록·scale=1을 가정하지 않는다.
+- Mask 원 해상도→DA3 resize/crop 변환과 K를 기록한다. 부분 표면의 bbox는 전체 물체 크기가 아니다. Depth는 optical Z이며 보이지 않는 뒷면을 관측점으로 만들지 않는다.
 - 컵 중심 거리 `d = r₁ + r₂ + rim_gap`은 측정된 원형 지름, 같은 높이, 평행한 upright 축이라는 전제가 필요하다. 같은 support plane 관계가 절대 table 높이까지 결정하지는 않는다.
 - 현재 상대 Geometry 도구는 겹치지 않는 pair 관계를 처리한다. 결합된 다물체 graph의 해결을 자동 가정하지 않는다. 불확실성을 생략했을 때 수치 tolerance는 실제 측정 정확도가 아니다.
 - Workspace 종이/marker를 물리 지지 테이블로 취급하지 않는다. Finger 접촉 사진에서 접촉면·tip 위치·가림을 확인하며 임의 tool0 점을 실제 접촉점으로 확정하지 않는다.
@@ -65,11 +64,11 @@
 - Rank/scaled Jacobian/condition/불확실성으로 focal-depth-translation 등의 구분 가능성을 본다. 현재 quality audit는 train 12개와 별도 Session verification 6개 이상의 대응 조건도 갖는다. 정확한 현재 조건은 [geometry.py](src/real2sim_builder/calibration/geometry.py)를 따른다.
 - Manual Precision/FK를 사용한 Wrist를 물리 calibration 인증으로 승격하지 않는다. K/pose/distortion/resolution/registration/FK identity가 바뀌면 이전 audit 결과를 그대로 적용하지 않는다. Inspection camera는 실제 observation camera와 구분한다.
 
-### Codex 자동 관측과 공동 정합
+### 자동 관측과 공동 정합
 
 - 종이/Workspace 테두리는 자동 Fitting의 XY 허용 영역이 아니다. 블록이 경계에 걸치거나 밖에 있어도 저장을 거부하지 않는다. `supports`는 명시한 수평면의 높이·upright 결합이며, Workspace 배치 함수나 Task의 배치 제한과는 별개다.
 
-- 본 시스템에서 영상 관측 생성/선택과 Fitting 도구 실행 주체는 **Codex**이며 일반 사용자가 Landmark 편집기를 조작하지 않는다.
+- 일반 흐름은 Scene Prepare의 자동 재구성이다. 사용자 Object 목록과 SAM prompt로 시작하며 유료 VLM이나 Codex의 반복 좌표 수정은 필수 조건이 아니다. 자동 등록이 불가능한 경우 필요한 실측·Calibration을 명시한다.
 - 자동 Detector의 mask/UV 제안은 `estimated/derived`로 기록한다. CV 검출 confidence는 Camera/3D/실측 확신이 아니다. 가려진 컵 림이나 보이지 않는 Block corner를 2D에서 임의 확정하지 않는다.
 - `same scene_state_id`의 물체는 **여러 camera×pose에서 하나의 world pose**를 공유한다. 새 layout은 다른 Scene State로 분리한다.
 - Side는 고정 extrinsic, Wrist는 `T_world_base × FK(q_measured) × T_link_camera`라는 **하나의 link-local camera mount**를 공유한다. 각 자세별로 별도 Wrist extrinsic을 만들지 않는다.
@@ -79,7 +78,7 @@
 - 외형 렌더와 접촉용 collision은 분리해서 다룬다. 픽셀을 맞추기 위해 마찰, 손가락 충돌 형상이나 측정 q를 바꾸지 않는다.
 - 최소 추가 촬영을 요청할 경우 `어느 Camera`, `어느 자세/시점`, `어떤 가림을 풀지`, `왜 해당 관측이 필요한지`를 Codex가 구체적으로 제시한다.
 
-현재 구현은 `auto-observe` → Codex의 명시 `--commit … --selections …` → `candidate … fit … --target joint:scene`이다. 승인 관측은 Candidate의 `derived_observations`에만 보존하며 원본 Evidence의 실측으로 Import하지 않는다. 공동 단계는 K·distortion·치수를 고정하고 Landmark를 최적화한다. Mask-boundary 반복 최적화는 미구현이고 전체 silhouette 비교만 기존 평가에서 제공한다. 가림 미확정 Mask/컵 rim은 전체 silhouette로 취급하지 않는다. 정확한 옵션과 소스 구현의 미검증 범위는 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)를 따른다.
+현재 기본 명령은 `reconstruct PROJECT --candidate NAME`이다. SAM→DA3는 별도 기존 환경에서 순차 실행하고, 후보의 `reconstruction_observations`에 원본 SHA·Mask·metric 점군·Camera/scale 근거를 보존한다. `auto-observe`와 `candidate fit --target joint:scene`은 기존 Landmark baseline/디버깅 도구다. 새 Mask 정합은 실제 MuJoCo segmentation을 사용하며 fragment의 미관측 영역을 배경으로 강제하지 않는다. 측정 크기는 고정이다. 현재 benchmark는 Camera를 고정하며 Camera/depth bundle adjustment와 독립 Backend 선정은 미완료다. [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 실제 API와 제한을 기록한다.
 
 ## 6. 외형·충돌·물성·작업의 분리
 

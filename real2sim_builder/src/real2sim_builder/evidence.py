@@ -14,6 +14,8 @@ PROVENANCE = {'user_measured': 'measured', 'model_asset': 'derived', 'derived': 
 def copy_input(project, path, category='media'):
     project.require_writable()
     path = Path(path).resolve()
+    if path.suffix.lower() in ('.glb','.gltf'):
+        raise ValueError('LEGACY_UNSUPPORTED: GLB/glTF inputs are retired; use measured primitives or OBJ/STL assets')
     if not path.is_file():
         raise FileNotFoundError(path)
     relative = Path('input') / category / (sha(path) + path.suffix.lower())
@@ -58,11 +60,12 @@ def add_video(project, path, camera='side', split='train', max_frames=12):
     project.invalidate()
 
 
-def extract_videos(project):
+def extract_videos(project,paths=None):
     project.require_writable()
     import cv2
     evidence = project.evidence
     for video in evidence['videos']:
+        if paths is not None and video['path']not in paths:continue
         if video['extracted']:
             continue
         capture = cv2.VideoCapture(str(local_path(project.root, video['path'])))
@@ -85,7 +88,11 @@ def extract_videos(project):
                 previous = small.astype(float)
                 path = project.root / 'scratch' / f'video_frame_{i}.png'
                 cv2.imwrite(str(path), frame)
-                add_image(project, path, video['camera'], video['split'], float(i / fps))
+                added=add_image(project, path, video['camera'], video['split'], float(i / fps))
+                current=project.evidence
+                row=next(r for r in current['images']if r['path']==added['path']and r['camera']==video['camera'])
+                row.update(source_video=video['path'],source_video_sha256=sha(local_path(project.root,video['path'])),video_frame_index=int(i))
+                write(project.root/'input/evidence.yaml',current)
             video['extracted'] = True
         finally:
             capture.release()
