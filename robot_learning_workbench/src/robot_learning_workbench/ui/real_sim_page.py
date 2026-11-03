@@ -16,7 +16,7 @@ class RealSimPage(QWidget):
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         box=QVBoxLayout(self);title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');box.addWidget(title)
-        hint=QLabel('Real/Sim 연결 시 Leader가 실제 Follower를 제어하고, Follower 측정 자세가 Sim에 반영됩니다. 중단하면 새 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('Follower 측정값을 Sim의 목표 관절값으로 사용합니다. Sim은 중력·충돌을 계산하므로 실제 자세와 차이가 날 수 있습니다. 중단하면 새 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
         selection=QHBoxLayout();box.addLayout(selection);selection.addWidget(QLabel('Scene'));self.scene_combo=QComboBox();selection.addWidget(self.scene_combo,1)
         selection.addWidget(QLabel('Simulation'));self.engine=QComboBox();self.engine.addItem('MuJoCo','mujoco');self.engine.addItem('Isaac Lab','isaaclab');selection.addWidget(self.engine)
         self.scene_combo.currentIndexChanged.connect(self.load_selected);self.engine.currentIndexChanged.connect(self.load_selected)
@@ -26,6 +26,7 @@ class RealSimPage(QWidget):
             label=QLabel(('SIM 'if name.startswith('sim_')else'REAL ')+name.removeprefix('sim_').upper()+' · 연결 대기');layout.addWidget(label)
             view=CameraView('영상 없음',(120,75));layout.addWidget(view,1);grid.addWidget(panel,i//2,i%2);self.previews[name]=view;self.camera_labels[name]=label
         self.measured=QLabel('Follower 측정값 (rad) · —');box.addWidget(self.measured)
+        self.simulated=QLabel('Sim 관절값 (rad) · —');self.simulated.setWordWrap(True);box.addWidget(self.simulated)
         actions=QHBoxLayout();box.addLayout(actions);self.connect_button=QPushButton('Real/Sim 연결 · Teleop');self.capture_button=QPushButton('Capture');self.stop_button=QPushButton('중단')
         self.connect_button.setObjectName('primaryAction');self.capture_button.setObjectName('primaryAction');self.stop_button.setObjectName('stopAction')
         for b in(self.connect_button,self.capture_button,self.stop_button):actions.addWidget(b,1)
@@ -118,6 +119,9 @@ class RealSimPage(QWidget):
         self.capture_hint.show();self.capture_hint.setText('캡처 중…'if p.get('capture_pending')else'연결 중…'if p.get('session_state')=='CONNECTING'else'멈추면 캡처할 수 있습니다.')
         self.capture_hint.setToolTip(p.get('capture_reason',''))
         if p.get('q_measured'):self.measured.setText('Follower 측정값 (rad) · '+', '.join(f'{q:.4f}'for q in p['q_measured']))
+        if p.get('simulation'):
+            simulation=p['simulation'];delta=max(abs(q)for q in simulation['sim_joint_delta_rad'])
+            self.simulated.setText('Sim 관절값 (rad) · '+', '.join(f'{q:.4f}'for q in simulation['applied_sim_joint_rad'])+f' · 최대 추종 차이 {delta:.4f}rad')
         for n,timing in p.get('camera_timing',{}).items():
             if timing:self.camera_labels[n].setText(('MEMORY 'if p.get('device_source')=='memory'else'REAL ')+n.upper()+f" · {timing.get('received_fps',0)or 0:.1f}FPS · age {timing['age_ms']:.0f}ms · Δt {timing['joint_skew_ms']:.0f}ms")
         if p.get('render_timing'):
@@ -144,6 +148,7 @@ class RealSimPage(QWidget):
             except OSError as error:self.show_error('임시 연결 설정 정리 실패: '+str(error))
             self.run_folder.hide();self.operation_message.setText('Capture 없이 종료했습니다. 저장한 촬영 결과는 없습니다.');self.operation_message.show()
         self.last_progress={};self.state.setText('DISCONNECTED · '+status);self.capture_hint.hide();self.buttons()
+        self.simulated.setText('Sim 관절값 (rad) · —')
         for name,view in self.previews.items():view.clear();view.setText('연결 종료');self.camera_labels[name].setText(('SIM 'if name.startswith('sim_')else'REAL ')+name.removeprefix('sim_').upper()+' · 연결 종료')
     def hideEvent(self,event):
         self.request_control=False

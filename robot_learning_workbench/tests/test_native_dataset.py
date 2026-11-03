@@ -198,13 +198,13 @@ def test_original_provenance_is_compressed_once_not_duplicated_in_every_native_s
     h=n.open_native(n.load_catalog(run.root).episodes[0]);assert h.get_env_name()=='SO101';h.close()
 
 
-def test_source_seed_wrap_and_partition_lock(tmp_path):
-    cfg={**execution('source'),'seed':2**32-1}
+def test_seedless_source_attempts_and_partition_lock(tmp_path):
+    cfg=execution('source');cfg.pop('seed');cfg['task_code']={'placement.py':'b'*64}
     with n.NativeRun(tmp_path/'source',cfg) as run:
-        s=run.segment('first');a=run.claim_attempt(s);assert a['seed']==2**32-1
+        s=run.segment('first');a=run.claim_attempt(s);assert 'seed'not in a
         s.write_episode(episode(),episode_id='first');s.record_attempt(a,status='success',episode_id='first');s.commit()
     with n.resume_to(run.root,tmp_path/'next',cfg) as resumed:
-        s=resumed.segment('second');assert resumed.claim_attempt(s)['seed']==0
+        s=resumed.segment('second');assert 'seed'not in resumed.claim_attempt(s)
     signed={**cfg,'partition':{'locked':True,'membership':['first']}}
     with n.NativeRun(tmp_path/'signed',signed) as run:
         s=run.segment('first');a=run.claim_attempt(s);s.write_episode(episode(),episode_id='first');s.record_attempt(a,status='success',episode_id='first');s.commit()

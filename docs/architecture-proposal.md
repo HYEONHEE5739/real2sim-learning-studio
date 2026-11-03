@@ -298,7 +298,6 @@ objects:
       region: workspace_area
 execution:
   episodes: 10
-  seed: 42
 output:
   directory: ./runs/source_red
 ```

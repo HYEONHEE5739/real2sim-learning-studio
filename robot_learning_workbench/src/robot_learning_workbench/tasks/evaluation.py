@@ -21,9 +21,9 @@ def evaluation_result(*,placed,grasp,steps,limit):
 def evaluation_execution(plan,execution,record):
     from ..recipe import _plain
     steps=max(1,int(np.ceil(plan.effective_settings['execution'].get('timeout_s',10)*30)))
-    execution.update(policy_identity=digest(record),policy_checkpoint_step=record['step'],policy_files=record['files'],policy_training_dataset=record.get('dataset_identity'),
+    execution.update(seed=plan.effective_settings['execution']['seed'],policy_identity=digest(record),policy_checkpoint_step=record['step'],policy_files=record['files'],policy_training_dataset=record.get('dataset_identity'),
         evaluation_contract=digest({'bindings':_plain(plan.function_bindings),'max_steps':steps,'control_policy':'position_saturation_inward_v1','policy_device':'cpu','task_instruction':plan.effective_settings['execution'].get('task_instruction')}),
-        episodes=plan.effective_settings['execution']['episodes'],max_steps=steps,rng_policy='entropy_workspace_poses_no_rng_resume_v1' if any(b.name=='placement.random_workspace' for b in plan.function_bindings.values()) else 'fixed_initial_base_seed_plus_attempt_minus_one')
+        episodes=plan.effective_settings['execution']['episodes'],max_steps=steps,rng_policy='evaluation_seed_entropy_placement_v1')
     execution['recording'].update(timestamp_clock='episode_control_relative',engine_clock='physics_simulation_seconds',applied_command='commands/applied_joint_rad')
     return execution
 

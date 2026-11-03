@@ -181,54 +181,58 @@ def test_projected_separation_boundary(tmp_path,delta,allowed):
         with pytest.raises(TaskError):p.contact_fixed_xy(req(xy_m=(0,0),occupied_poses={'blue':obstacle}),params=params)
 
 
-def test_random_budget_and_consumption(tmp_path):
+def test_random_budget_and_consumption(monkeypatch,tmp_path):
     class Zero:
         calls=0
         def uniform(self,low,high):self.calls+=1;return np.zeros(2)
     params=bind(write_scene(tmp_path));rng=Zero();obstacle=np.eye(4)
-    with pytest.raises(TaskError) as e:p.contact_random_xy(req(rng=rng,occupied_poses={'blue':obstacle}),params=params)
+    monkeypatch.setattr(p.np.random,'default_rng',lambda:rng)
+    with pytest.raises(TaskError) as e:p.contact_random_xy(req(occupied_poses={'blue': obstacle}),params=params)
     assert rng.calls==1000 and e.value.code=='PLACEMENT_EXHAUSTED'
     assert e.value.diagnostics['attempts']==1000 and e.value.diagnostics['support_id']=='top'
     assert e.value.diagnostics['last_reason']=='projected_overlap_or_separation'
 
 
-def test_random_fit_bounds_and_exact_rng_consumption(tmp_path):
+def test_random_fit_bounds_and_exact_rng_consumption(monkeypatch,tmp_path):
     params=bind(write_scene(tmp_path),margin_m=.05)
     rng=np.random.default_rng(1047);control=np.random.default_rng(1047)
     expected=control.uniform([-.85,-.85],[.85,.85])
-    r=p.contact_random_xy(req(rng=rng),params=params)
+    monkeypatch.setattr(p.np.random,'default_rng',lambda:rng)
+    r=p.contact_random_xy(req(),params=params)
     np.testing.assert_allclose(r.pose[:2,3],expected,atol=1e-15)
     assert r.pose[2,3]==.2 and r.attempts==1
     assert rng.bit_generator.state==control.bit_generator.state
 
 
-def test_impossible_footprint_and_bad_input_fail_before_draw(tmp_path):
+def test_impossible_footprint_and_bad_input_fail_before_draw(monkeypatch,tmp_path):
     class Never:
         def uniform(self,*a):raise AssertionError('must not draw')
+    monkeypatch.setattr(p.np.random,'default_rng',Never)
     params=bind(write_scene(tmp_path,collision=[spec_box((3,3,1))]))
-    with pytest.raises(TaskError) as e:p.contact_random_xy(req(rng=Never()),params=params)
+    with pytest.raises(TaskError) as e:p.contact_random_xy(req(),params=params)
     assert e.value.code=='INVALID_PLACEMENT' and e.value.diagnostics['attempts']==0
     params=bind(write_scene(tmp_path))
-    with pytest.raises(TaskError):p.contact_random_xy(req(rng=Never(),occupied_poses={'missing':np.eye(4)}),params=params)
+    with pytest.raises(TaskError):p.contact_random_xy(req(occupied_poses={'missing': np.eye(4)}),params=params)
 
 
-def test_random_retains_explicit_orientation_and_no_legacy_clearance(tmp_path):
+def test_random_retains_explicit_orientation_and_no_legacy_clearance(monkeypatch,tmp_path):
     params=bind(write_scene(tmp_path));rot=rx(.7)
-    r=p.contact_random_xy(req(rng=np.random.default_rng(3),orientation=rot),params=params)
+    r=p.contact_random_xy(req(orientation=rot),params=params)
     np.testing.assert_array_equal(r.pose[:3,:3],rot)
     assert r.pose[2,3]==pytest.approx(.1*np.sin(.7)+.2*np.cos(.7))
 
 
 @pytest.mark.parametrize('angle',[0.,.4,1.2])
-def test_random_rotated_support_and_input_frames_have_valid_contact(tmp_path,angle):
+def test_random_rotated_support_and_input_frames_have_valid_contact(monkeypatch,tmp_path,angle):
     support=np.eye(4);support[:3,:3]=rx(.5);support[:3,3]=[.3,-.1,.8]
     rz=np.array([[np.cos(angle),-np.sin(angle),0],[np.sin(angle),np.cos(angle),0],[0,0,1.]])
     input_pose=np.eye(4);input_pose[:3,:3]=rz;input_pose[:3,3]=[-.2,.3,-.5]
     frames={name:{'parent':'world','T_parent_from_frame':value.tolist(),'state':'reference'} for name,value in [('surface',support),('input',input_pose)]}
     params=bind(write_scene(tmp_path,frames=frames),margin_m=.03)
     rng=np.random.default_rng(6)
+    monkeypatch.setattr(p.np.random,'default_rng',lambda:rng)
     for _ in range(12):
-        result=p.contact_random_xy(req(rng=rng,orientation=rx(.7)),params=params)
+        result=p.contact_random_xy(req(orientation=rx(0.7)),params=params)
         actual=(np.linalg.inv(support)@input_pose@result.pose)
         vertices=box((.2,.2,.4))@actual[:3,:3].T+actual[:3,3]
         assert vertices[:,2].min()==pytest.approx(0.,abs=1e-12)
@@ -268,17 +272,18 @@ def test_invalid_support_is_preparation_error(tmp_path,change):
 
 
 @pytest.mark.parametrize('draw',[[float('nan'),0],[10.,0],[0.],True])
-def test_invalid_rng_never_retries(tmp_path,draw):
+def test_invalid_rng_never_retries(monkeypatch,tmp_path,draw):
     class Bad:
         calls=0
         def uniform(self,*args):self.calls+=1;return draw
     rng=Bad()
-    with pytest.raises(TaskError) as error:p.contact_random_xy(req(rng=rng),params=bind(write_scene(tmp_path)))
+    monkeypatch.setattr(p.np.random,'default_rng',lambda:rng)
+    with pytest.raises(TaskError) as error:p.contact_random_xy(req(),params=bind(write_scene(tmp_path)))
     assert error.value.code=='INVALID_PLACEMENT' and rng.calls==1
     assert error.value.diagnostics['attempts']==1
 
 
-def test_fixed_then_random_obeys_supplied_occupied_order_and_rng(tmp_path):
+def test_fixed_then_random_obeys_supplied_occupied_order_and_rng(monkeypatch,tmp_path):
     params=bind(write_scene(tmp_path))
     class Sequence:
         calls=0
@@ -286,7 +291,8 @@ def test_fixed_then_random_obeys_supplied_occupied_order_and_rng(tmp_path):
             self.calls+=1
             return np.array([0,0] if self.calls==1 else [.5,.5])
     rng=Sequence();other=np.eye(4);other[2,3]=.2
-    r=p.contact_random_xy(req(rng=rng,occupied_poses={'blue':other}),params=params)
+    monkeypatch.setattr(p.np.random,'default_rng',lambda:rng)
+    r=p.contact_random_xy(req(occupied_poses={'blue': other}),params=params)
     assert r.attempts==2 and rng.calls==2
     np.testing.assert_array_equal(r.pose[:2,3],[.5,.5])
     np.testing.assert_array_equal(other[:3,3],[0,0,.2])

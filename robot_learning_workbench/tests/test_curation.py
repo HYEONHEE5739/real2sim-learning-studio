@@ -1,4 +1,4 @@
-"""Read-only Curation outcomes/statistics and explicit selected scope."""
+"""Read-only Curation outcomes and recorded rows and explicit selected scope."""
 import numpy as np
 import pytest
 from test_native_dataset import episode,execution
@@ -31,32 +31,18 @@ def test_review_keeps_completed_failure_and_attempt_scope(source,tmp_path):
     assert c.filter_episodes(source,category='placement_success')==('e1',)
 
 
-def test_distribution_matches_selected_half_open_rows_not_whole_episode(source,tmp_path):
+def test_selected_half_open_rows_and_split_stream_only_selected_frames(source,tmp_path):
     view=c.save_curation(tmp_path/'view.json',source,frame_ranges={'e0':(1,4),'e1':(2,6)},splits={'train':['e0'],'val':['e1']})
-    result=c.distribution(view,fields=('joint_targets','obs/events/grasp'),split='train',chunk_frames=2,bins=4)
+    selected=c.select_split(view,'train')
     actual=n.read_array(view.episodes[0],'joint_targets')
-    stats=result['fields']['joint_targets']
-    assert result['scope']['split']=='train' and result['scope']['frames']==3
-    np.testing.assert_allclose(stats['mean'],actual.mean(0),rtol=0,atol=0)
-    np.testing.assert_allclose(stats['std'],actual.std(0),rtol=1e-14,atol=0)
-    assert stats['source_dtypes']==['float64'] and stats['unit']=='rad'
-    assert np.asarray(stats['histogram_counts']).sum(1).tolist()==[3]*6
-    assert result['fields']['obs/events/grasp']['phase']=='pre_step'
-    assert result['fields']['obs/events/grasp']['mean']==[2/3]
+    np.testing.assert_array_equal(np.concatenate(list(c._chunks(selected,'joint_targets',2,{}))),actual)
+    assert actual.shape==(3,6) and actual.dtype==np.float64
+    assert c._field_semantics(view,'joint_targets')['unit']=='rad'
 
 
-def test_missing_nonfinite_or_wrong_field_is_explicit(source,tmp_path):
-    with pytest.raises(n.DataError):c.distribution(source,fields=('missing',))
-    with pytest.raises(n.DataError):c.distribution(source,fields=('joint_targets',),chunk_frames=0)
-    with pytest.raises(n.DataError):c.distribution(source,fields=('joint_targets',),bins=True)
-
-
-def test_comparison_uses_shared_histogram_edges_and_contract(source,tmp_path):
-    one=c.save_curation(tmp_path/'one.json',source,order=['e0']);two=c.save_curation(tmp_path/'two.json',source,order=['e1'])
-    result=c.compare_distributions([one,two],fields=('joint_targets',),bins=5)
-    a,b=result['datasets']
-    assert a['fields']['joint_targets']['histogram_edges']==b['fields']['joint_targets']['histogram_edges']
-    assert a['fields']['joint_targets']['mean']!=b['fields']['joint_targets']['mean']
+def test_missing_review_field_and_nonfinite_values_are_explicit(source):
+    with pytest.raises(n.DataError):list(c._chunks(source.episodes,'missing',2,{}))
+    with pytest.raises(n.DataError):c._numeric(np.array([[float('nan')]]),'joint_targets')
 
 
 def test_saved_revision_rejects_unknown_split_and_empty_or_malformed_rows(source,tmp_path):
@@ -92,15 +78,6 @@ def test_position_distribution_uses_reference_scene_frame_and_selected_start(sou
     assert result['points'][0]['original_frame']==2
 
 
-def test_unknown_units_do_not_enable_cross_dataset_comparison(source,tmp_path):
-    from dataclasses import replace
-    cfg={**source.execution,'recording':{**source.execution['recording'],'units':'unknown'}}
-    with n.NativeRun(tmp_path/'unknown',cfg) as run:
-        seg=run.segment('one');seg.write_episode(episode(6),episode_id='e0');seg.commit()
-    unknown=n.load_catalog(run.root)
-    with pytest.raises(n.DataError):c.compare_distributions([unknown,unknown],fields=('joint_targets',))
-
-
 def test_split_seed_and_rule_survive_revision_reload(source,tmp_path):
     generated=c.split_dataset(source,seed=17,train_fraction=.5)
     v1=c.save_curation(tmp_path/'v1.json',source,splits=generated['splits'],split_provenance=generated)
@@ -111,24 +88,15 @@ def test_split_seed_and_rule_survive_revision_reload(source,tmp_path):
     assert v2.metadata['split_provenance']==loaded.metadata['split_provenance']
 
 
-def test_unknown_velocity_units_are_not_labelled_rad_s(source,tmp_path):
-    import torch
-    cfg={**source.execution,'recording':{**source.execution['recording'],'units':'degree'}}
-    with n.NativeRun(tmp_path/'unknown',cfg) as run:
-        seg=run.segment('a');ep=episode(3);ep.data['states']={'joint_vel':torch.zeros((3,6))};seg.write_episode(ep,episode_id='a');seg.commit()
-    unknown=n.load_catalog(run.root)
-    assert c.distribution(unknown,fields=('states/joint_vel',))['fields']['states/joint_vel']['unit']=='unknown'
-    with pytest.raises(n.DataError):c.compare_distributions([unknown,unknown],fields=('states/joint_vel',))
+def test_unknown_velocity_units_are_not_labelled_rad_s(source):
+    from dataclasses import replace
+    unknown=replace(source,execution={**source.execution,'recording':{**source.execution['recording'],'units':'degree'}})
+    assert c._field_semantics(unknown,'states/joint_vel')['unit']=='unknown'
 
 
 def test_malformed_json_root_is_structured_error(tmp_path):
     p=tmp_path/'bad.json';p.write_text('[]')
     with pytest.raises(n.DataError):c.load_curation(p)
-
-
-@pytest.mark.parametrize('bad',[{'fields':[[]]},{'fields':'joint_targets'},{'fields':[3]}])
-def test_invalid_field_inputs_return_structured_error(source,bad):
-    with pytest.raises(n.DataError):c.distribution(source,**bad)
 
 
 def test_invalid_assignments_return_structured_error(source):
@@ -140,27 +108,25 @@ def test_identity_checked_relocation_is_usable_and_new_revision_persists_it(sour
     moved=tmp_path/'moved';source.root.rename(moved)
     loaded=c.load_curation(view.root,relocations={str(source.root):str(moved)})
     assert c.inspect_dataset(loaded)['selected_frames']==12
-    assert c.distribution(loaded)['scope']['frames']==12
     next_view=c.save_curation(tmp_path/'v2.json',loaded,order=['e1'])
     assert c.inspect_dataset(n.load_catalog(next_view.root))['selected_frames']==6
     assert c.revision_history(next_view)[-1]['path']==str(moved)
 
 
-def test_curated_merged_official_statistics_keep_known_policy_units(tmp_path):
+def test_curated_merged_official_review_keeps_known_policy_units(tmp_path):
     from test_lerobot_dataset import source as create
     from robot_learning_workbench.data import lerobot
     one=create(tmp_path,'one');two=create(tmp_path,'two')
     merged=lerobot.merge([one,two],tmp_path/'merged',task='Pick red cube')
     view=c.save_curation(tmp_path/'view.json',merged)
-    stats=c.distribution(view)
-    assert stats['fields']['action']['unit']=='rad'
-    assert stats['fields']['action']['joint_order']==one.execution['recording']['joint_order']
+    semantics=c._field_semantics(view,'action')
+    assert semantics['unit']=='rad'
+    assert semantics['joint_order']==one.execution['recording']['joint_order']
 
 
-def test_force_statistics_preserve_matrix_component_shape(source):
-    import h5py
-    for ep in source.episodes:
-        with h5py.File(ep.file,'r+') as file:file['data/'+ep.key].create_dataset('states/contact_force_w',data=np.ones((6,2,3),dtype=np.float32))
-    stats=c.distribution(n.load_catalog(source.root),fields=('states/contact_force_w',))['fields']['states/contact_force_w']
-    assert stats['component_shape']==[2,3] and stats['unit']=='N' and stats['joint_order'] is None
-    assert stats['mean']==[1.]*6
+def test_review_force_rows_preserve_values_and_units():
+    from types import SimpleNamespace
+    rows=np.ones((6,2,3),dtype=np.float32)
+    actual=c._numeric(rows,'states/contact_force_w')
+    assert actual.shape==(6,6) and actual.dtype==np.float32
+    assert c._field_semantics(SimpleNamespace(execution={},metadata={},episodes=[]),'states/contact_force_w')['unit']=='N'

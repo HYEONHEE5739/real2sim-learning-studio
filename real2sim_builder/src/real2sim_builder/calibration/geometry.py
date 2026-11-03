@@ -271,10 +271,11 @@ from scipy.optimize import least_squares
 from real2sim_builder.capture import observation_scene
 from real2sim_builder.scene import value, cameras_audited, camera_calibration_signature
 from .camera import project_point
+from real2sim_builder.observations import annotation_evidence
 
 
 def metrics(project,scene,rows):
-    observations={i.get('id'):i for i in project.evidence['images'] if i.get('id')}
+    observations={i.get('id'):i for i in annotation_evidence(project,scene)['images'] if i.get('id')}
     grouped={};errors=[];behind=0
     for row in rows:
         if row.get('visible',True) is False or row.get('weight',1)<=0:continue
@@ -289,6 +290,9 @@ def metrics(project,scene,rows):
 
 def fit(project,scene,target,options=None):
     options=options or {}
+    if target == 'joint:scene':
+        from .joint import fit_joint_scene
+        return fit_joint_scene(project, scene, options)
     candidate=copy.deepcopy(scene);kind,name=target.split(':',1)
     registration=scene.get('scan_initialization',{}).get('registration')
     if registration and (registration.get('status')=='NEEDS_MORE_DATA' or not registration.get('metric_scale_verified')):
@@ -307,8 +311,8 @@ def fit(project,scene,target,options=None):
                 return scene,{'status':'NEEDS_MORE_DATA','need':'Camera calibration confidence must be established before scan object pixel refinement'}
     else:raise ValueError('Fit one camera/intrinsics/base/object/dimensions group')
     if node[field]['provenance'] in ('measured','calibrated'):raise ValueError('Measured/calibrated parameter locked')
-    observations={i.get('id'):i for i in project.evidence['images'] if i.get('id')}
-    rows=[r for r in project.evidence['landmarks'] if r.get('observation') in observations and observations[r['observation']]['eligible'] and r.get('visible',True) and r.get('weight',1)>0]
+    observations={i.get('id'):i for i in annotation_evidence(project,scene)['images'] if i.get('id')}
+    rows=[r for r in annotation_evidence(project,scene)['landmarks'] if r.get('observation') in observations and observations[r['observation']]['eligible'] and r.get('visible',True) and r.get('weight',1)>0]
     if kind in ('camera','intrinsics','distortion'):rows=[r for r in rows if observations[r['observation']]['camera']==name]
     train=[r for r in rows if observations[r['observation']]['split']=='train'];held=[r for r in rows if observations[r['observation']]['split']=='validation']
     groups={observations[r['observation']]['group_id'] for r in train};hold_groups={observations[r['observation']]['group_id'] for r in held}
@@ -373,8 +377,8 @@ def bootstrap(project,scene,name,options):
     candidate=copy.deepcopy(scene);node=next(c for c in candidate['cameras'] if c['id']==name)
     if node['K']['provenance'] in ('measured','calibrated') or node['pose']['provenance'] in ('measured','calibrated'):
         raise ValueError('Bootstrap requires unknown/estimated K and pose; use scoped fitting for unlocked fields')
-    images={i['id']:i for i in project.evidence['images'] if i.get('id') and i.get('eligible') and i['camera']==name and i.get('role')!='reference_context'}
-    rows=[r for r in project.evidence['landmarks'] if r.get('observation') in images and r.get('visible',True) and r.get('weight',1)>0]
+    images={i['id']:i for i in annotation_evidence(project,scene)['images'] if i.get('id') and i.get('eligible') and i['camera']==name and i.get('role')!='reference_context'}
+    rows=[r for r in annotation_evidence(project,scene)['landmarks'] if r.get('observation') in images and r.get('visible',True) and r.get('weight',1)>0]
     train=[r for r in rows if images[r['observation']]['split']=='train'];held=[r for r in rows if images[r['observation']]['split']=='validation']
     train_groups={images[r['observation']]['group_id'] for r in train};held_groups={images[r['observation']]['group_id'] for r in held}
     if train_groups & held_groups:raise ValueError('Train/holdout group leakage')
@@ -483,8 +487,8 @@ def assess_camera(project,scene,name,options):
     from .camera import point_world
     from real2sim_builder.scene import frame_world
     candidate=copy.deepcopy(scene);node=next(c for c in candidate['cameras'] if c['id']==name)
-    images={i['id']:i for i in project.evidence['images'] if i.get('id') and i.get('eligible') and i['camera']==name and i.get('role')!='reference_context'}
-    rows=[r for r in project.evidence['landmarks'] if r.get('observation') in images and r.get('visible',True) and r.get('weight',1)>0]
+    images={i['id']:i for i in annotation_evidence(project,scene)['images'] if i.get('id') and i.get('eligible') and i['camera']==name and i.get('role')!='reference_context'}
+    rows=[r for r in annotation_evidence(project,scene)['landmarks'] if r.get('observation') in images and r.get('visible',True) and r.get('weight',1)>0]
     train=[r for r in rows if images[r['observation']]['split']=='train'];held=[r for r in rows if images[r['observation']]['split']=='validation']
     def missing(need,**extra):return scene,{**extra,'status':'NEEDS_MORE_DATA','target':'quality:'+name,'need':need}
     if len(train)<12 or len(held)<6:return missing('At least 12 train and 6 independent-session verification landmarks required')

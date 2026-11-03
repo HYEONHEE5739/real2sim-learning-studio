@@ -177,7 +177,6 @@ objects:
         rules: v8_preserved
 execution:
   episodes: 10
-  seed: 42
 output:
   directory: ../runs/source_red_001
 ```
@@ -194,7 +193,7 @@ inputs:
   dataset: ../runs/source_red_001/dataset
 functions:
   acceptance:
-    function: pick_place.v8_annotation
+    function: pick_place.annotation
     params: {object: cube_red, target: cup_a}
 execution:
   mode: manual

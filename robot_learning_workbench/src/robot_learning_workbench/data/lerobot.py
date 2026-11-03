@@ -11,13 +11,13 @@ if TYPE_CHECKING:
     from ..recipe import PreparedRun
     from ..run import StageResult
 from pathlib import Path
-import uuid
+import uuid,json
 from importlib.metadata import version
 import os
 import av
 import numpy as np
 from .native import (Catalog,DatasetIdentity,NativeEpisode,DataError,load_catalog,read_array,
-                     atomic_json,read_json,share_file,digest,_sync)
+                     atomic_json,read_json,share_file,digest,_sync,task_object_ids)
 from .curation import select_split
 
 
@@ -113,7 +113,9 @@ def lerobot_catalog(root,*,expected=None):
             camera=key.removeprefix('observation.images.')
             media[camera]={'path':str(path),'feature_key':key,'frames':row['length'],'fps':str(meta.fps),'shape':meta.features[key]['shape'],
                           'from_timestamp':row[f'videos/{key}/from_timestamp'],'to_timestamp':row[f'videos/{key}/to_timestamp'],'size_bytes':path.stat().st_size}
-        metadata={'official_episode_index':index,'dataset_from_index':row['dataset_from_index'],'official_episode_metadata':row}
+        metadata={'official_episode_index':index,'dataset_from_index':row['dataset_from_index'],'official_episode_metadata':row,
+                  'initial_objects':json.loads(row.get('workbench/initial_objects_json','{}')),
+                  'task_objects':json.loads(row.get('workbench/task_objects_json','[]'))}
         episodes.append(NativeEpisode(id_,root/meta.get_data_file_path(index),str(index),row['length'],metadata,media,root,format='lerobot'))
     return Catalog(root,identity,tuple(episodes),provenance.get('execution',{}),'lerobot',splits=splits or None,metadata=provenance)
 
@@ -197,14 +199,26 @@ def _split_name(catalog: Catalog,ep: NativeEpisode) -> str|None:
     return ep.metadata.get('official_episode_metadata',{}).get('workbench/source_split') or None
 
 
+def recorded_task(catalog: Catalog,ep: NativeEpisode) -> str|None:
+    """Official Episode labels or the Source-owned single-task collection label."""
+    if ep.format=='lerobot':
+        tasks=ep.metadata.get('official_episode_metadata',{}).get('tasks',[])
+        return tasks[0]if len(tasks)==1 else None
+    value=catalog.execution.get('single_task')
+    if value is None:
+        definition=ep.metadata.get('legacy_attributes',{}).get('task_definition')
+        value=definition.get('language_instruction')if isinstance(definition,dict)else definition
+    return value if isinstance(value,str)and value.strip()else None
+
+
 def _task_text(catalog: Catalog,ep: NativeEpisode,explicit: str|None,requires_language: bool) -> str:
-    definition=ep.metadata.get('legacy_attributes',{}).get('task_definition')
-    recorded=ep.metadata.get('official_episode_metadata',{}).get('tasks',[])
-    value=explicit or (definition.get('language_instruction') if isinstance(definition,dict) else definition)
-    if value is None and len(recorded)==1:value=recorded[0]
+    value=recorded_task(catalog,ep)
+    if value is not None and explicit is not None and explicit!=value:
+        raise DataError('DATA_INVALID','task','Export task differs from the recorded Source/Episode instruction')
+    value=value or explicit
     if value is None and not requires_language:value=catalog.execution.get('task_code')
     if value is None or (requires_language and (not isinstance(value,str) or not value.strip())):
-        raise DataError('DATA_INVALID','task','Explicit language instruction required; code hashes are not task text')
+        raise DataError('DATA_INVALID','task','Source에 기록된 execution.single_task가 없습니다. 기존 자료는 명시 task_instruction을 지정한 변환 Recipe를 사용하세요.')
     return value if isinstance(value,str) else str(value)
 
 
@@ -367,10 +381,14 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
                 if index==0:ds.meta.update_video_info(key)
             output_id=origin['uid']+':'+origin['episode_id'] if merged else ep.episode_id
             ep_meta.update({'workbench/source_episode_id':output_id,'workbench/source_original_episode_id':str(source_ids[0]),'workbench/source_dataset_id':str(dataset_ids[0]),'workbench/source_episode_uid':str(episode_uids[0]),'workbench/source_engine':origin.get('engine') or '', 'workbench/source_parent_dataset_id':origin.get('parent') or '', 'workbench/source_native_alias':origin.get('native_alias'),'workbench/source_split':_split_name(source_catalog,ep) or '', 'workbench/source_start':ep.start,'workbench/source_stop':stop})
+            from .quality import initial_positions
+            ep_meta['workbench/initial_objects_json']=json.dumps(initial_positions(source_catalog,ep),allow_nan=False)
+            ep_meta['workbench/task_objects_json']=json.dumps(ep.metadata.get('task_objects',task_object_ids(source_catalog.execution)))
             ds.meta.save_episode(index,nframes,[task_text],stats,ep_meta)
         write_info(ds.meta.info,ds.root)
         atomic_json(ds.root/'workbench.json',{'schema_version':1,'dataset_id':uuid.uuid4().hex,'source_identity':asdict(catalog.identity),'split':split,
-            'execution':catalog.execution if not merged else {'stage':'learning_dataset','domains':[cat.execution.get('engine','unknown') for cat in catalogs]},'feature_map':mapping,'control_contract':contract,
+            'execution':catalog.execution if not merged else {'stage':'learning_dataset','domains':[cat.execution.get('engine','unknown') for cat in catalogs],
+                'task_objects':list(dict.fromkeys(name for cat in catalogs for name in task_object_ids(cat.execution)))},'feature_map':mapping,'control_contract':contract,
             'source_identities':[asdict(cat.identity) for cat in catalogs],'merged':merged,
             'source_locations':[{'identity':asdict(cat.identity),'path':os.path.relpath(cat.root,ds.root)} for cat in catalogs],
             'semantics':{'observation':'recorded measured model rad' if contract else 'unverified explicit projection','action':'recorded joint target, not separately measured applied telemetry' if contract else 'unverified explicit projection','timestamp':'official relative clock; original in source.timestamp'},'independent':independent})

@@ -3,12 +3,12 @@ import json
 from pathlib import Path
 import uuid
 import time
-from PyQt6.QtCore import Qt,QTimer,QUrl
+from PyQt6.QtCore import Qt,QTimer,QUrl,QProcess
 from PyQt6.QtGui import QImage,QPixmap,QDesktopServices
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit,QPlainTextEdit,QCheckBox,QTableWidget,QTableWidgetItem,QGridLayout,QSplitter,QScrollArea,QDialog,QListWidget,QProgressBar
-from .recipe_editor import RecipeEditor
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QFileDialog,QComboBox,QSpinBox,QPlainTextEdit,QGridLayout,QSplitter,QScrollArea,QDialog,QProgressBar
+from .pipeline_settings import PipelineSettings
 from .jobs import BackendJob
-from .operations import stage_support,run_outcome
+from .operations import run_outcome
 
 
 class WorkflowPage(QWidget):
@@ -19,90 +19,33 @@ class WorkflowPage(QWidget):
         from .view import CameraView
         self.setStyleSheet(STYLE)
         self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules)
-        self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.edit_error=False;self.dataset_state='미확인';self.owned_runs=set();self._syncing=False
+        self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.stop_requested=False;self.cancel_command_id=None;self.cancel_queued=False;self.start_after_prepare=False;self.execution={};self.dataset_state='미확인';self.owned_runs=set()
         titles={'annotation':'Annotation','datagen':'Mimic / Datagen','train':'모델 학습','hub_download':'Hub 다운로드','hub_upload':'Hub 업로드','simulation_evaluation':'Sim 평가','offline_validation':'Offline Validation','real_evaluation':'Real Evaluation'}
         self.heading=QLabel(titles[stage]);self.heading.setObjectName('dashboardTitle');self.heading.hide()
         outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0);outer.setSpacing(12)
         self.splitter=QSplitter(Qt.Orientation.Horizontal);outer.addWidget(self.splitter,1)
         self.viewer=QWidget();self.viewer.setObjectName('workspaceCanvas');box=QVBoxLayout(self.viewer);box.setContentsMargins(0,0,0,0);box.setSpacing(12);self.splitter.addWidget(self.viewer)
         self.settings_scroll=QScrollArea();self.settings_scroll.setObjectName('settingsPanel');self.settings_scroll.setWidgetResizable(True);self.settings_scroll.setMinimumWidth(320)
-        self.settings_content=QWidget();self.settings_content.setObjectName('settingsContent');settings=QVBoxLayout(self.settings_content);settings.setSpacing(10);self.settings_scroll.setWidget(self.settings_content);self.splitter.addWidget(self.settings_scroll)
-        self.splitter.setChildrenCollapsible(False);self.splitter.setStretchFactor(0,1);self.splitter.setStretchFactor(1,0);self.splitter.setSizes([850,390])
-        title=QLabel('실행 설정');title.setObjectName('sectionTitle');settings.addWidget(title)
-        recipe_row=QGridLayout();settings.addLayout(recipe_row)
-        self.load_button=QPushButton('Recipe 불러오기');self.save_button=QPushButton('다른 이름으로 저장');self.check_button=QPushButton('저장 입력 검사');self.new_output_button=QPushButton('새 Run 출력')
-        for i,button in enumerate((self.load_button,self.save_button,self.check_button,self.new_output_button)):recipe_row.addWidget(button,i//2,i%2)
-        self.recipe_status=QLabel('저장 Recipe를 선택하세요');self.recipe_status.setWordWrap(True);settings.addWidget(self.recipe_status)
-        self.load_button.clicked.connect(self.choose_recipe);self.save_button.clicked.connect(self.save_recipe);self.check_button.clicked.connect(self.check_recipe);self.new_output_button.clicked.connect(self.suggest_output)
-        self.form=QVBoxLayout();settings.addLayout(self.form)
-        self.details=QCheckBox('고급 설정 · 입력 계약 / Recipe YAML');self.advanced=QWidget();self.advanced_form=QVBoxLayout(self.advanced);self.advanced_form.setContentsMargins(0,0,0,0)
-        self.details.toggled.connect(self.advanced.setVisible);self.advanced.hide()
-        self.editor=RecipeEditor();self.editor.changed.connect(self.invalidate)
-        self.input_rows={};self.inputs={}
-        def field(layout,label,widget):
-            panel=QWidget();panel.setObjectName('settingsContent');row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(label));row.addWidget(widget);layout.addWidget(panel);return panel
-        self.engine=QComboBox();self.engine.addItems(['mujoco','isaaclab']);self.engine.currentTextChanged.connect(lambda x:self.edit_field('engine',x))
-        if stage in ('annotation','datagen','simulation_evaluation','real_sim'):field(self.form,'Simulation backend',self.engine)
-        labels={'scene':'Scene Package','dataset':'사용할 데이터','device_profile':'장치 연결 Profile','engine_config':'엔진 실행 설정','resume_dataset':'기존 결과 · 다른 출력 Resume','training_config':'공식 Training Config','policy':'Policy / Checkpoint','checkpoint':'Resume Checkpoint','repo_id':'Repository ID','revision':'Revision / Commit','artifact':'업로드할 Dataset / Policy','policy_contract':'외부 Policy 의미 계약','camera_config':'Side / Wrist Camera 설정','capture_session':'보존 Capture','calibration_profile':'관절 관측 Profile'}
-        keys={'annotation':['dataset','scene','engine_config'],'datagen':['scene','dataset','engine_config','resume_dataset'],'train':['dataset','training_config','policy','checkpoint'],'hub_download':['repo_id','revision'],'hub_upload':['artifact','repo_id','revision'],'simulation_evaluation':['scene','policy','engine_config','resume_dataset','policy_contract'],'offline_validation':['dataset','policy','policy_contract'],'real_evaluation':['scene','policy','policy_contract','device_profile','camera_config','capture_session','calibration_profile']}[stage]
-        primary={'scene','dataset','device_profile','engine_config','training_config','policy','checkpoint','repo_id','revision','artifact','calibration_profile','camera_config'}
-        for key in keys:
-            line=QLineEdit();line.setPlaceholderText(labels[key]);line.editingFinished.connect(lambda k=key,w=line:self.edit_input(k,w.text()));self.inputs[key]=line
-            panel=QWidget();panel.setObjectName('settingsContent');row=QVBoxLayout(panel);row.setContentsMargins(0,0,0,0);row.setSpacing(4);row.addWidget(QLabel(labels[key]));row.addWidget(line)
-            buttons=QHBoxLayout();row.addLayout(buttons)
-            browse=QPushButton('선택');browse.clicked.connect(lambda _,k=key:self.choose_input(k));buttons.addWidget(browse)
-            (self.form if key in primary else self.advanced_form).addWidget(panel);self.input_rows[key]=panel
-        self.output=QLineEdit();self.output.setPlaceholderText('새 결과 폴더');self.output.editingFinished.connect(self.edit_output);field(self.form,'저장 위치',self.output)
-        self.mode=None
-        if stage in ('annotation','train'):
-            self.mode=QComboBox();self.mode.addItems(['auto','manual']if stage=='annotation'else['scratch','finetune','resume'])
-            field(self.form,'실행 방식',self.mode);self.mode.currentTextChanged.connect(lambda x:self.edit_execution('mode',x))
-        self.counts={};self.count_labels={}
-        for key in {'annotation':['env_num'],'datagen':['env_num','num_episodes','max_attempts'],'simulation_evaluation':['env_num','episodes','timeout_s']}.get(stage,[]):
-            spin=QDoubleSpinBox()if key.endswith('_s')else QSpinBox();spin.setRange(0 if key=='reset_time_s'else .001 if key.endswith('_s')else 1,100000);spin.valueChanged.connect(lambda value,k=key:self.edit_execution(k,value));self.counts[key]=spin
-            if key.endswith('_s'):spin.setDecimals(3);spin.setSingleStep(.1)
-            panel=field(self.form,{'env_num':'환경 수','num_episodes':'추가 Episode 수','max_attempts':'시도 예산','episodes':'평가 Attempt 목표','timeout_s':'평가 최대 시간 (제어 시각 s)'}[key],spin);self.count_labels[key]=panel.findChild(QLabel)
-        self.placement=QComboBox();self.placement.addItems(['Fixed','Random'])
-        self.object_table=None
-        if stage in ('datagen','simulation_evaluation'):
-            field(self.form,'Object Placement',self.placement);self.placement.currentTextChanged.connect(self.change_placement)
-            self.object_table=QTableWidget(0,7);self.object_table.setHorizontalHeaderLabels(['Object','Frame','Support','Fixed X (m)','Fixed Y (m)','Workspace','Function']);self.object_table.setMaximumHeight(190);self.object_table.setMinimumWidth(0);self.object_table.itemChanged.connect(self.edit_objects);self.form.addWidget(self.object_table)
-        self.dataset_resume=None
-        if stage=='datagen':
-            self.dataset_resume=QCheckBox('기존 Dataset에 추가 저장 (Resume)');self.dataset_resume.toggled.connect(self.edit_dataset_resume);self.form.addWidget(self.dataset_resume)
-            choose=QPushButton('이어 수집할 Dataset 선택');choose.clicked.connect(self.choose_dataset_output);self.form.addWidget(choose)
-        self.task_instruction=QLineEdit();self.task_instruction.setPlaceholderText('실제 작업 문장')
-        if stage in ('simulation_evaluation','real_evaluation'):field(self.form,'Task Instruction',self.task_instruction);self.task_instruction.editingFinished.connect(lambda:self.edit_execution('task_instruction',self.task_instruction.text()))
-        self.policy_model=QLabel('Policy 모델: Checkpoint 선택 필요');self.policy_model.setWordWrap(True)
-        if stage in ('simulation_evaluation','offline_validation','real_evaluation'):self.form.addWidget(self.policy_model)
+        self.engine=QComboBox(self);self.engine.addItems(['mujoco','isaaclab'])
+        self.settings=PipelineSettings(stage,python,self.workspace,self.engine,self);self.editor=self.settings.editor
+        self.settings_scroll.setWidget(self.settings);self.splitter.addWidget(self.settings_scroll)
+        self.splitter.setChildrenCollapsible(False);self.splitter.setStretchFactor(0,1);self.splitter.setStretchFactor(1,0);self.splitter.setSizes([850,430])
         if stage=='real_evaluation':
-            status=QLabel('실제 관측으로 Policy를 추론합니다. 자율 모터 Rollout은 아직 연결되지 않았습니다.');status.setWordWrap(True);box.addWidget(status)
-            self.live_frames=QSpinBox();self.live_frames.setRange(1,1000000);self.live_frames.valueChanged.connect(lambda value:self.edit_execution('max_frames',value));field(self.form,'Policy 관측 frame 수',self.live_frames)
-        self.task_info=QLabel();self.task_info.setWordWrap(True);self.advanced_form.addWidget(self.task_info)
-        self.advanced_form.addWidget(self.editor)
-        if stage=='train':
-            from .learning import TrainingSettings
-            self.training_settings=TrainingSettings(self);self.form.addWidget(self.training_settings)
-            self.form.removeWidget(self.input_rows['training_config']);self.advanced_form.insertWidget(0,self.input_rows['training_config'])
-            mode_row=self.mode.parentWidget();self.form.removeWidget(mode_row);self.form.insertWidget(0,mode_row);self.form.removeWidget(self.training_settings);self.form.insertWidget(1,self.training_settings)
-        if stage in ('hub_download','hub_upload'):
-            from .hub import HubSettings
-            self.hub_settings=HubSettings(self);self.form.addWidget(self.hub_settings)
-        settings.addWidget(self.details);settings.addWidget(self.advanced);settings.addStretch()
-        self.state=QLabel('저장 Recipe를 선택하세요');self.state.setWordWrap(True);self.state.setStyleSheet('background: transparent; padding: 6px;')
+            status=QLabel('현재 구현: 실제 관측 → Policy 추론. 자율 모터 Rollout은 연결되지 않았습니다.');status.setWordWrap(True);box.addWidget(status)
+        self.state=QLabel('입력을 선택하거나 Script를 불러오세요.');self.state.setWordWrap(True);self.state.setStyleSheet('background: transparent; padding: 6px;')
         self.action_card=QWidget();self.action_card.setObjectName('actionCard');actions=QHBoxLayout(self.action_card);actions.addWidget(self.state,1);box.addWidget(self.action_card)
-        self.start_button=QPushButton({'annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','real_evaluation':'Real 평가 시작'}.get(stage,'선택 단계 실행'));self.start_button.setObjectName('primaryAction')
+        self.start_button=QPushButton({'annotation':'Annotation 시작','datagen':'데이터 생성 시작','train':'학습 시작','simulation_evaluation':'Sim 평가 시작','real_evaluation':'Policy 관측 시작','offline_validation':'Validation 시작','hub_download':'다운로드 시작','hub_upload':'업로드 시작'}[stage]);self.start_button.setObjectName('primaryAction')
         self.cancel_button=QPushButton('현재 workflow 중지');self.cancel_button.setObjectName('stopAction');actions.addWidget(self.start_button);actions.addWidget(self.cancel_button)
         self.start_button.setEnabled(False);self.cancel_button.setEnabled(False);self.start_button.clicked.connect(self.start_run);self.cancel_button.clicked.connect(self.cancel_run)
         self.mark_event=QComboBox();self.mark_event.setEditable(True);self.mark_event.addItem('grasp')
-        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);controls=QGridLayout();box.addLayout(controls)
+        self.commands={};self.mark_frame=QSpinBox();self.mark_frame.setRange(1,1000000);self.manual_controls=QWidget();controls=QGridLayout(self.manual_controls);box.addWidget(self.manual_controls);self.manual_controls.hide()
         if stage=='annotation':
             controls.addWidget(self.mark_event,1,0);self.mark_frame.setMaximumWidth(110);controls.addWidget(self.mark_frame,1,1)
             for i,(kind,text) in enumerate([('pause','일시정지'),('resume','재생'),('step','한 스텝'),('mark','Event 표시'),('skip','Episode 건너뛰기')]):
                 button=QPushButton(text);button.setEnabled(False);button.clicked.connect(lambda _,k=kind:self.command(k));controls.addWidget(button,0,i);self.commands[kind]=button
         self.preview_env=QSpinBox();self.preview_env.setMaximumWidth(80);self.preview_env.setRange(0,0);self.preview_env.valueChanged.connect(self.select_preview)
         if stage in ('annotation','datagen','simulation_evaluation'):
-            self.preview_env_label=QLabel('Env');controls.addWidget(self.preview_env_label,1,3);controls.addWidget(self.preview_env,1,4)
+            env_row=QHBoxLayout();box.addLayout(env_row);env_row.addWidget(QLabel('Preview Env'));env_row.addWidget(self.preview_env);env_row.addStretch()
         self.progress_bar=QProgressBar();self.progress_bar.setRange(0,1);self.progress_bar.setValue(0);self.progress_bar.setFormat('Worker 대기');self.progress_text=QLabel('');self.progress_text.setWordWrap(True)
         if stage in ('annotation','datagen','train','simulation_evaluation'):box.addWidget(self.progress_bar);box.addWidget(self.progress_text)
         self.media_splitter=QSplitter(Qt.Orientation.Vertical);box.addWidget(self.media_splitter,1)
@@ -117,7 +60,6 @@ class WorkflowPage(QWidget):
         tools=QGridLayout();log_box.addLayout(tools);tools.addWidget(QLabel('진행 / 오류 로그'),0,0)
         self.result_button=QPushButton('결과 상세');self.result_button.clicked.connect(self.open_result);tools.addWidget(self.result_button,0,1)
         self.reopen_button=QPushButton('기존 Run 열기');self.reopen_button.clicked.connect(self.reopen_run);tools.addWidget(self.reopen_button,0,2)
-        self.resume_button=QPushButton('새 worker로 계속 실행');self.resume_button.clicked.connect(self.continue_run);self.resume_button.hide();tools.addWidget(self.resume_button,1,1,1,2)
         self.loss_chart=None
         if stage=='train':
             from .learning import LossChart
@@ -126,14 +68,54 @@ class WorkflowPage(QWidget):
         self.media_splitter.setStretchFactor(0,3);self.media_splitter.setStretchFactor(1,1);self.media_splitter.setSizes([500,180])
         self.job=BackendJob(python,self);self.job.finished.connect(self.job_finished);self.job.log.connect(self.log.appendPlainText);self.operation=None
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(34);self.generations={}
-        support=stage_support(stage)
-        if self.mode is not None:self.mode.currentTextChanged.connect(self.sync_input_visibility)
-        self.sync_input_visibility()
-        if not support['runnable']:self.state.setText(support['reason'])
+        self.settings.changed.connect(self.invalidate);self.settings.error.connect(self.show_error);self.settings.apply_requested.connect(self.apply_script)
+        if stage=='train':
+            button=QPushButton('공식 Training JSON 편집');self.settings.layout().addWidget(button)
+            button.clicked.connect(self.edit_training_json)
+        if stage in ('hub_download','hub_upload'):
+            from .hub import HubActions
+            self.hub_actions=HubActions(self);self.settings.layout().addWidget(self.hub_actions)
+        self.buttons()
 
-    def sync_input_visibility(self,*_):
-        if self.stage=='train':
-            self.input_rows['policy'].setVisible(self.mode.currentText()=='finetune');self.input_rows['checkpoint'].setVisible(self.mode.currentText()=='resume')
+    def edit_training_json(self):
+        from .training_json import TrainingJsonDialog
+        dialog=TrainingJsonDialog(self);dialog.exec()
+
+    def show_error(self,message):
+        self.state.setText(message);self.log.appendPlainText(message)
+
+    def buttons(self):
+        active=self.active();self.settings.set_busy(active)
+        self.start_button.setEnabled(not active and not self.settings.invalid_selection and self.editor.path is not None and self.editor.path.is_file()and not self.editor.dirty)
+        self.cancel_button.setEnabled(active and not(self.stop_requested and(self.busy or self.cancel_queued)))
+        if hasattr(self,'hub_actions'):self.hub_actions.setEnabled(not active)
+
+    def invalidate(self):
+        self.ready=None
+        if self.editor.dirty:self.state.setText('Script 편집 중 · 저장 및 적용하세요.')
+        self.buttons()
+
+    def apply_script(self,path,*,start=False):
+        if self.active():self.show_error('현재 실행이 끝난 뒤 Script를 적용하세요.');return
+        if self.settings.query_operation=='dataset'and self.settings.query_version==self.settings.version and self.settings.query.process.state()!=QProcess.ProcessState.NotRunning:
+            self.show_error('입력 데이터의 Scene 조회가 끝난 뒤 적용하세요.');return
+        try:
+            data=self.editor.data();self.settings.validate_stage(data);self.sync_execution(data)
+            self.ready=None;self.stop_requested=False;self.cancel_command_id=None;self.cancel_queued=False;self.start_after_prepare=start;self.busy=True;self.operation='prepare';self.state.setText('Script와 입력 준비 중…');self.buttons()
+            self.job.start('prepare',path=str(path),modules=self.modules)
+        except Exception as error:self.busy=False;self.start_after_prepare=False;self.show_error(str(error));self.buttons()
+
+    def sync_execution(self,data):
+        self.execution=data.get('execution',{})
+        self.settings.syncing=True
+        try:
+            if 'engine'in data:self.engine.setCurrentText(data['engine'])
+        finally:self.settings.syncing=False
+        self.preview_env.blockSignals(True)
+        try:self.preview_env.setRange(0,max(0,int(self.execution.get('env_num',self.execution.get('num_envs',1)))-1));self.preview_env.setValue(0)
+        finally:self.preview_env.blockSignals(False)
+        self.manual_controls.setVisible(self.stage=='annotation'and self.execution.get('mode')=='manual')
+        if self.stage=='annotation':self.mark_event.clear();self.mark_event.addItems(list(data.get('functions',{}).get('signals',{}))or['grasp'])
 
     def display_hardware_result(self,data):
         self.log.appendPlainText('최근 Run '+str(data.get('status'))+' · 측정 '+str(data.get('frames',0))+' frame · command_sent='+str(data.get('command_sent',False)))
@@ -147,12 +129,6 @@ class WorkflowPage(QWidget):
         if hasattr(self,'loss_dialog'):self.loss_dialog.hide()
         super().hideEvent(event)
 
-    def show_policy_model(self,path):
-        try:
-            from ..recipe import policy_model_path
-            root=policy_model_path(self.editor.path.parent/path);config=json.loads((root/'config.json').read_text());self.policy_model.setText('Policy 모델: '+str(config['type'])+' · 실제 Checkpoint Config')
-        except (OSError,ValueError,KeyError):self.policy_model.setText('Policy 모델: Config 확인 필요')
-
     def select_preview(self,index):
         if self.handle:
             from ..run import select_preview_env
@@ -160,26 +136,8 @@ class WorkflowPage(QWidget):
         self.generations.clear()
         for label in self.previews.values():label.clear()
 
-    def suggest_output(self):
-        if self.active() or self.editor.path is None:self.state.setText('저장 Recipe를 열고 기존 실행이 끝난 뒤 새 출력을 제안하세요');return
-        if self.dataset_resume is not None and self.dataset_resume.isChecked():self.state.setText('Resume는 명시한 기존 Dataset 경로를 유지합니다');return
-        from .paths import output_path
-        if self.stage in ('hub_download','hub_upload'):
-            group='policy' if self.hub_settings.kind.currentText()=='model' else 'dataset'
-            path=self.workspace/group/(self.stage+'-'+uuid.uuid4().hex[:8])
-        else:path=output_path(self.workspace,self.stage)
-        self.output.setText(str(path));self.edit_output();self.state.setText('새 출력 제안 · Recipe와 공식 Training Config를 저장하고 다시 검사하세요')
-    def choose_input(self,key):
-        from .paths import input_directory
-        directory=str(input_directory(self.workspace,self.stage,key))
-        if key=='artifact' and self.hub_settings.kind.currentText()=='model':directory=str(self.workspace/'policy')
-        if key in ('dataset','resume_dataset','policy','checkpoint','artifact','capture_session'):
-            value=QFileDialog.getExistingDirectory(self,key+' 선택',directory)
-        else:value,_=QFileDialog.getOpenFileName(self,key+' 선택',directory)
-        if value:self.inputs[key].setText(value);self.edit_input(key,value)
-
     def command(self,kind):
-        if not self.handle or not self.active():return
+        if not self.handle or not self.active()or self.stop_requested:return
         if kind=='mark' and not 0<self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1):
             self.log.appendPlainText('아직 재생하지 않은 frame은 표시할 수 없습니다');return
         from ..run import RunHandle,send_command
@@ -191,177 +149,66 @@ class WorkflowPage(QWidget):
             self.log.appendPlainText(kind+' 요청: '+receipt.status+' · 실제 적용 ACK는 로그로 확인')
         except Exception as error:self.log.appendPlainText(str(error))
 
-    def invalidate(self):
-        self.ready=None;self.start_button.setEnabled(False)
-        if hasattr(self,'recipe_status')and self.editor.dirty:self.recipe_status.setText('편집 중 · 저장하고 다시 검사하세요')
-    def choose_recipe(self):
-        path,_=QFileDialog.getOpenFileName(self,'저장 Recipe','','YAML (*.yaml *.yml)')
-        if path:
-            try:self.load_recipe(path)
-            except Exception as error:self.invalidate();self.state.setText(str(error))
-    def load_recipe(self,path):
-        if self.active():raise ValueError('실행 중인 Recipe를 바꿀 수 없습니다')
-        import yaml
-        data=yaml.safe_load(Path(path).read_text())
-        if not isinstance(data,dict) or data.get('stage')!=self.stage:raise ValueError('현재 화면과 Recipe stage가 다릅니다')
-        if self.stage=='real_evaluation'and data.get('execution',{}).get('mode')!='observe_only':raise ValueError('Real Evaluation 화면은 실제 관측 Policy 추론을 사용합니다. 이 Recipe의 실행 방식은 이 화면에서 지원하지 않습니다.')
-        self.editor.load(path);self.edit_error=False
-        self.sync_recipe(data)
-        self.invalidate();self.recipe_status.setText('저장됨 · '+Path(path).name);self.state.setText('저장됨 — 입력 검사를 실행하세요')
-        if hasattr(self,'training_settings'):self.training_settings.load()
-
-    def sync_recipe(self,data):
-        self._syncing=True
-        try:
-            self.engine.setCurrentText(data.get('engine','mujoco'));self.output.setText(data['output']['directory'])
-            for key,line in self.inputs.items():line.setText(data['inputs'].get(key,''))
-            for key,spin in self.counts.items():
-                value=data['execution'].get(key,data['execution'].get('episodes',data['execution'].get('target_successes',1))if key=='num_episodes'else 1);spin.setValue(float(value)if key.endswith('_s')else int(value))
-            if 'num_episodes'in self.count_labels:self.count_labels['num_episodes'].setText('추가 Episode 수'if'num_episodes'in data['execution']else'누적 Episode 목표 · 기존 Recipe')
-            self.preview_env.setRange(0,max(0,int(data['execution'].get('env_num',data['execution'].get('num_envs',1)))-1))
-            if self.dataset_resume is not None:self.dataset_resume.setChecked(data['execution'].get('resume',False))
-            self.task_instruction.setText(data['execution'].get('task_instruction',''))
-            if self.mode is not None:self.mode.setCurrentText(data['execution'].get('mode','auto'))
-            if hasattr(self,'live_frames'):self.live_frames.setValue(data['execution'].get('max_frames',1))
-            names=[o['placement']['function'] for o in data.get('objects',{}).values()]
-            self.placement.setCurrentText('Random' if names and all(n=='placement.random_workspace' for n in names) else 'Fixed')
-        finally:self._syncing=False
-        self.sync_input_visibility()
-        if hasattr(self,'hub_settings'):self.hub_settings.sync(data)
-        self.sync_objects(data)
-        if self.stage=='annotation':
-            self.mark_event.clear();self.mark_event.addItems(list(data.get('functions',{}).get('signals',{}))or['grasp'])
-        if 'policy' in data['inputs']:self.show_policy_model(data['inputs']['policy'])
-        fn=data.get('functions',{}).get('acceptance',data.get('functions',{}).get('success',{}));self.task_info.setText('Task · '+str(fn.get('function',''))+' · '+str(fn.get('params',{})))
-    def safe_update(self,fn):
-        try:self.editor.update(fn);return True
-        except Exception as error:self.edit_error=True;self.invalidate();self.state.setText('Recipe 편집 오류: '+str(error))
-    def edit_field(self,key,value):
-        if self._syncing or self.editor.path is None:return
-        self.safe_update(lambda data:data.__setitem__(key,value))
-    def edit_input(self,key,value):
-        if self._syncing or self.editor.path is None:return
-        def update(data):
-            if value:data['inputs'][key]=value
-            else:data['inputs'].pop(key,None)
-        self.safe_update(update)
-        if key=='policy':self.show_policy_model(value)
-    def choose_dataset_output(self):
-        folder=QFileDialog.getExistingDirectory(self,'기존 Dataset 또는 새 Dataset의 상위 폴더',str(self.workspace/self.stage))
-        if not folder:return
-        target=Path(folder) if self.dataset_resume.isChecked() else Path(folder)/(self.stage+'-'+uuid.uuid4().hex[:8])
-        self.output.setText(str(target));self.edit_output()
-    def edit_dataset_resume(self,value):
-        if self._syncing or self.editor.path is None:return
-        def edit(data):
-            data['execution']['resume']=value;data['execution']['num_episodes']=self.counts['num_episodes'].value();data['execution'].pop('episodes',None);data['execution'].pop('target_successes',None);data['inputs'].pop('resume_dataset',None)
-        self.safe_update(edit)
-        self.count_labels['num_episodes'].setText('추가 Episode 수')
-    def edit_execution(self,key,value):
-        if self._syncing or self.editor.path is None:return
-        def edit(data):
-            data['execution'][key]=value
-            if key=='env_num':data['execution'].pop('num_envs',None)
-            if key=='num_episodes':data['execution'].pop('episodes',None);data['execution'].pop('target_successes',None)
-        self.safe_update(edit)
-        if key=='env_num':self.preview_env.setRange(0,value-1);self.sync_input_visibility()
-        if key=='num_episodes':self.count_labels[key].setText('추가 Episode 수')
-    def edit_output(self):
-        if self._syncing or self.editor.path is None:return
-        self.safe_update(lambda data:data['output'].__setitem__('directory',self.output.text()))
-
-    def sync_objects(self,data):
-        if self.object_table is None:return
-        self._syncing=True
-        try:
-            import copy
-            self.object_presets=copy.deepcopy(data.get('objects',{}));self.object_table.setRowCount(len(self.object_presets))
-            for i,(name,obj) in enumerate(data.get('objects',{}).items()):
-                p=obj['placement']['params'];xy=p.get('xy_m',['',''])
-                for j,value in enumerate([name,p.get('frame',''),p.get('support',''),*xy,p.get('workspace',''),obj['placement']['function']]):
-                    item=QTableWidgetItem(str(value))
-                    if j==0:
-                        item.setFlags((item.flags() & ~Qt.ItemFlag.ItemIsEditable)|Qt.ItemFlag.ItemIsUserCheckable);item.setCheckState(Qt.CheckState.Checked)
-                    self.object_table.setItem(i,j,item)
-        finally:self._syncing=False
-    def edit_objects(self,*_):
-        if self._syncing or self.editor.path is None:return
-        def change(data):
-            for i in range(self.object_table.rowCount()):
-                name,frame,support,x,y,workspace,function=[self.object_table.item(i,j).text().strip() for j in range(7)]
-                if self.object_table.item(i,0).checkState()!=Qt.CheckState.Checked:data['objects'].pop(name,None);continue
-                if name not in data['objects']:
-                    import copy
-                    data['objects'][name]=copy.deepcopy(self.object_presets[name])
-                old=data['objects'][name]['placement'];params=dict(old.get('params',{}))
-                if 'frame'in params or frame:params['frame']=frame
-                if 'support'in params or support:params['support']=support
-                if function=='placement.random_workspace':
-                    if not workspace:raise ValueError('Workspace Object를 지정하세요')
-                    params['workspace']=workspace;params.pop('xy_m',None)
-                elif function in('placement.fixed_xy','placement.contact_fixed_xy'):
-                    params['xy_m']=[float(x),float(y)];params.pop('workspace',None)
-                data['objects'][name]['placement']={'function':function,'params':params}
-        if self.safe_update(change):self.edit_error=False
-    def change_placement(self,mode):
-        if self._syncing or self.editor.path is None:return
-        self._syncing=True
-        try:
-            for i in range(self.object_table.rowCount()):
-                self.object_table.item(i,6).setText('placement.random_workspace'if mode=='Random'else'placement.fixed_xy')
-        finally:self._syncing=False
-        self.edit_objects()
     def reopen_run(self):
         if self.active():return
         folder=QFileDialog.getExistingDirectory(self,'기존 Run 폴더 (run.json)')
         if not folder:return
         try:
-            path=Path(folder).resolve();record=json.loads((path/'run.json').read_text())
-            if record['stage']!=self.stage:raise ValueError('현재 화면과 Run stage가 다릅니다')
-            req=json.loads((path/'worker_request.json').read_text())['request']
-            self.context={};self.env_contexts={};self.handle={'run_id':record['run_id'],'request_id':record['request_id'],'run_dir':str(path),'output_path':req['output_path']};self.after_seq=0;self.generations.clear();self.poll()
+            from ..run import load_worker_request,read_status
+            from ..recipe import _parse_recipe
+            path=Path(folder).resolve();record=json.loads((path/'run.json').read_text());wire=load_worker_request(path);req=wire.request
+            if record['stage']!=self.stage or req.expected_stage!=self.stage:raise ValueError('현재 화면과 Run stage가 다릅니다')
+            if wire.run_id!=path.name or record['run_id']!=wire.run_id or record['request_id']!=req.request_id or wire.run_dir.resolve()!=path:raise ValueError('Run identity가 저장된 실행과 다릅니다.')
+            snapshot=path/'recipe.yaml';raw=(snapshot if snapshot.exists()else req.recipe_path).read_bytes()
+            doc=_parse_recipe(req.recipe_path,raw,self.stage)
+            if doc.sha256!=req.expected_recipe_sha256:raise ValueError('저장된 Run Script가 변경되었습니다.')
+            if(doc.base_dir/doc.spec.output['directory']).resolve()!=req.output_path.resolve():raise ValueError('저장된 Run 출력 identity가 다릅니다.')
+            status=read_status(path)
+            self.ready=None;self.stop_requested=status.phase=='stopping';self.cancel_command_id=None;self.cancel_queued=self.stop_requested
+            self.settings.restore_run_script(raw,doc.base_dir,snapshot);self.sync_execution(self.editor.data())
+            self.context={};self.env_contexts={};self.handle={'run_id':wire.run_id,'request_id':req.request_id,'run_dir':str(path),'output_path':str(req.output_path)};self.after_seq=0;self.generations.clear()
+            self.state.setText('기존 Run · '+status.status);self.buttons();self.poll()
         except Exception as error:self.state.setText(str(error))
-    def save_recipe(self):
-        path,_=QFileDialog.getSaveFileName(self,'보존 자료와 별도의 Recipe 저장','','YAML (*.yaml)')
-        if path:
-            try:self.editor.save(path)
-            except Exception as error:self.state.setText(str(error))
-    def check_recipe(self):
-        if self.busy:self.state.setText('현재 입력 작업 종료를 기다리세요');return
-        if self.edit_error:self.state.setText('화면 편집 오류를 수정하거나 저장 Recipe를 다시 여세요');return
-        if self.editor.path is None or self.editor.dirty:self.state.setText('먼저 Recipe를 저장하세요');return
-        try:
-            from ..recipe import read_recipe
-            read_recipe(self.editor.path,expected_stage=self.stage)
-            self.state.setText('문법 유효 · 실제 입력 검사 중…');self.operation='prepare';self.busy=True
-            self.job.start('prepare',path=str(self.editor.path),modules=self.modules)
-        except Exception as error:self.busy=False;self.state.setText(str(error))
     def active(self):
         if self.handle is None:return self.busy
         from ..run import read_status
         return self.busy or read_status(self.handle['run_dir']).status not in ('completed','cancelled','failed','unknown')
     def start_run(self):
-        if not self.ready or self.editor.dirty or self.edit_error or self.active():return
+        if self.editor.path is None or self.editor.dirty or self.settings.invalid_selection or self.active():return
+        if hasattr(self,'hub_actions')and self.hub_actions.job.process.state()!=QProcess.ProcessState.NotRunning:self.show_error('Hub 조회가 끝난 뒤 실행하세요.');return
         if any(page is not self and page.active() for page in [*getattr(self.window(),'workflows',{}).values(),*getattr(self.window(),'sessions',{}).values()]):
             self.state.setText('현재 실행 중인 worker를 종료한 뒤 시작하세요');return
+        if self.ready is None:self.apply_script(self.editor.path,start=True);return
+        if self.stage=='hub_upload':
+            from PyQt6.QtWidgets import QMessageBox
+            data=self.editor.data()
+            if not data.get('execution',{}).get('confirm_upload'):self.show_error('업로드할 Script의 confirm_upload: true를 저장 및 적용하세요.');return
+            if QMessageBox.question(self,'Hub 업로드',str(data['inputs'].get('artifact',''))+' → '+str(data['inputs'].get('repo_id',''))+'\n이 Script로 업로드할까요?',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
         for name,label in self.previews.items():label.clear();label.setText(name+' · 새 Run 대기')
+        self.handle=None;self.context={};self.env_contexts={};self.after_seq=0;self.generations.clear()
+        self.stop_requested=False;self.cancel_command_id=None;self.cancel_queued=False
         self.request_id=uuid.uuid4().hex;self.operation='start';self.busy=True;self.start_button.setEnabled(False);self.state.setText('worker 시작 준비 중…')
-        self.job.start('start',path=str(self.editor.path),modules=self.modules,request_id=self.request_id,expected_recipe_sha256=self.ready['recipe_sha256'],expected_prepared_sha256=self.ready['prepared_sha256'])
+        self.buttons()
+        try:self.job.start('start',path=str(self.editor.path),modules=self.modules,request_id=self.request_id,expected_recipe_sha256=self.ready['recipe_sha256'],expected_prepared_sha256=self.ready['prepared_sha256'])
+        except Exception as error:self.job_finished({'ok':False,'error':{'message':str(error)}})
     def job_finished(self,response):
         self.busy=False
         if self.operation=='terminal_catalog':self.dataset_state='저장 검증 통과' if response.get('ok') else '저장 검증 실패: '+response.get('error',{}).get('message','오류')
         if not response.get('ok'):
-            self.ready=None;self.state.setText(response.get('error',{}).get('message','Backend 오류'));return
+            self.ready=None;self.operation=None;self.start_after_prepare=False;self.state.setText(response.get('error',{}).get('message','Backend 오류'));self.buttons();return
         data=response['result']
         if self.operation=='prepare':
             import hashlib
-            try:current_sha=hashlib.sha256(self.editor.path.read_bytes()).hexdigest()if self.editor.path is not None else None
-            except OSError as error:
-                self.ready=None;self.start_button.setEnabled(False);self.state.setText('Recipe 재확인 실패: '+str(error));return
+            start=self.start_after_prepare;self.start_after_prepare=False;self.operation=None
+            if self.stop_requested:self.ready=None;self.state.setText('Script 적용을 취소했습니다.');self.buttons();return
+            try:current_sha=hashlib.sha256(self.editor.path.read_bytes()).hexdigest()if self.editor.path else None
+            except OSError as error:self.ready=None;self.show_error(str(error));self.buttons();return
             if self.editor.dirty or current_sha!=data['recipe_sha256']:
-                self.ready=None;self.start_button.setEnabled(False);self.recipe_status.setText('검사 중 편집됨 · 저장하고 다시 검사하세요');return
-            self.ready=data if data['runnable'] and data['state']=='runtime_ready' else None
-            self.state.setText(('입력 준비 완료 · ' if self.ready else 'Prepared · 실행 차단 · ')+data['reason']);self.start_button.setEnabled(self.ready is not None);self.recipe_status.setText('저장 입력 검사 통과'if self.ready else'검사 완료 · 실행 차단')
+                self.ready=None;self.state.setText('적용 중 Script가 변경되었습니다. 다시 저장 및 적용하세요.');self.buttons();return
+            self.ready=data if data['runnable']and data['state']=='runtime_ready'else None
+            self.state.setText('실행 준비됨 · '+self.editor.path.name if self.ready else data['reason']);self.buttons()
+            if start and self.ready:self.start_run()
+            return
         elif self.operation=='terminal_hardware':
             self.dataset_state='실물 결과 재개방 확인 · 측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)));self.state.setText('측정 frame '+str(data.get('frames',data.get('verified_capture_frames',0)))+' · '+str(data.get('status'))+' · command_sent='+str(data.get('command_sent',False)))
             self.display_hardware_result(data)
@@ -372,16 +219,28 @@ class WorkflowPage(QWidget):
         elif self.operation=='terminal_catalog':
             self.log.appendPlainText('저장 결과 재개방 확인 · 완료 Episode '+str(len(data['inspection']['episodes']))+' / 미완료 intent '+str(len(data['inspection']['unresolved_source_intents'])))
         elif self.operation=='start':
-            self.handle=data;self.context={};self.env_contexts={};self.owned_runs.add(data['run_dir']);self.dataset_state='미확인';self.after_seq=0;self.generations.clear();self.cancel_button.setEnabled(True);self.state.setText('worker 실행 중')
-        self.operation=None
+            self.handle=data;self.context={};self.env_contexts={};self.owned_runs.add(data['run_dir']);self.dataset_state='미확인';self.after_seq=0;self.generations.clear();self.operation=None
+            if self.stop_requested:self.send_cancel()
+            else:self.state.setText('worker 실행 중')
+        self.operation=None;self.buttons()
     def cancel_run(self):
+        self.stop_requested=True;self.start_after_prepare=False
+        if self.busy and self.operation in('prepare','start'):
+            self.state.setText('취소 요청을 기억했습니다 · '+('시작 응답'if self.operation=='start'else'입력 작업 종료')+'를 기다립니다.');self.buttons();return
         if not self.handle:return
+        self.send_cancel();self.buttons()
+
+    def send_cancel(self):
+        if self.cancel_queued:return
         from ..run import RunHandle,send_command
         h=self.handle
-        receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),{'command_id':uuid.uuid4().hex,'kind':'cancel','payload':{}})
-        self.state.setText('취소 요청 '+receipt.status+' · 실제 종료를 기다립니다')
+        if self.cancel_command_id is None:self.cancel_command_id=uuid.uuid4().hex
+        try:
+            receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),{'command_id':self.cancel_command_id,'kind':'cancel','payload':{}})
+            self.cancel_queued=True;self.state.setText('취소 요청 '+receipt.status+' · 실제 종료를 기다립니다')
+        except Exception as error:self.show_error('취소 전달 실패 · 다시 중단을 눌러 재시도하세요: '+str(error))
     def poll(self):
-        if not self.handle:return
+        if not self.handle or self.operation in('prepare','start'):return
         from ..run import read_status,read_events,read_preview_frame
         try:
             record=json.loads((Path(self.handle['run_dir'])/'run.json').read_text());status=read_status(self.handle['run_dir'])
@@ -401,7 +260,7 @@ class WorkflowPage(QWidget):
             outcome=run_outcome({**record,'status':status.status});self.outcome=outcome
             terminal=outcome['worker_finished']or status.status=='unknown';self.progress_bar.setRange(0,1 if terminal else 0);self.progress_bar.setValue(1 if status.status=='completed'else 0);self.progress_bar.setFormat('Worker '+status.status)
             self.progress_text.setText('Episode '+str(outcome['completed_episodes'])+' · Attempt '+str(outcome['attempts']if outcome['attempts']is not None else'미집계')+' · Env '+str(self.context.get('env_index','—'))+' / tick '+str(self.context.get('tick','—'))+(' · 목표 미달'if outcome['goal_reached']is False else''))
-            for kind,button in self.commands.items():button.setEnabled(not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.engine.currentText()!='isaaclab' or self.counts.get('env_num').value()==1) and (kind!='mark' or (self.mode.currentText()=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
+            for kind,button in self.commands.items():button.setEnabled(not self.stop_requested and not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.engine.currentText()!='isaaclab' or int(self.execution.get('env_num',self.execution.get('num_envs',1)))==1) and (kind!='mark' or (self.execution.get('mode')=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
             if outcome['worker_finished'] or status.status=='unknown':
                 self.cancel_button.setEnabled(False)
                 if status.status=='unknown' and self.handle['run_dir'] in self.owned_runs:
@@ -414,7 +273,6 @@ class WorkflowPage(QWidget):
                 if getattr(self,'_preview_terminal_cleared',None)!=self.handle['run_id']:
                     for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')
                     self._preview_terminal_cleared=self.handle['run_id']
-                self.resume_button.setVisible(bool(outcome['needs_resume']))
                 text='Worker '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])
                 if outcome['goal_reached'] is False:text+=' · 목표 미달'
@@ -423,12 +281,12 @@ class WorkflowPage(QWidget):
                 if outcome['successes'] is not None:text+=' · Task 성공 '+str(outcome['successes'])+' / 실패 '+str(outcome['failures'])
                 if outcome['success_rate'] is not None:text+=' · 성공률 '+str(outcome['success_rate'])
                 if outcome['error']:text+=' · '+outcome['error'].get('message','오류')
-                self.state.setText(text)
+                self.state.setText(text);self.buttons()
                 if self.stage=='train':self.show_training_result()
                 return
             if getattr(self,'_preview_selected',None)!=(self.handle['run_id'],self.preview_env.value()) and (Path(self.handle['run_dir'])/'preview').is_dir():
                 self.select_preview(self.preview_env.value());self._preview_selected=(self.handle['run_id'],self.preview_env.value())
-            self.state.setText('Worker '+status.status+' · '+str(record.get('progress',{}))+(' · Vector pause/resume는 전체 Scene에 적용' if self.engine.currentText()=='isaaclab' and self.counts.get('env_num') and self.counts['env_num'].value()>1 else ''))
+            self.state.setText('중단 요청됨 · 실제 Worker 종료를 기다립니다.'if self.stop_requested else 'Worker '+status.status+' · '+str(record.get('progress',{}))+(' · Vector pause/resume는 전체 Scene에 적용' if self.engine.currentText()=='isaaclab' and int(self.execution.get('env_num',self.execution.get('num_envs',1)))>1 else ''))
             for camera,label in self.previews.items():
                 frame=read_preview_frame(self.handle['run_dir'],camera)
                 if frame is None:continue
@@ -445,21 +303,6 @@ class WorkflowPage(QWidget):
         except Exception as error:self.state.setText('상태/Preview 조회 실패: '+str(error))
     def open_result(self):
         if self.handle:QDesktopServices.openUrl(QUrl.fromLocalFile(self.handle['output_path']))
-    def continue_run(self):
-        if not self.handle or self.stage!='datagen' or self.active():return
-        # Reopened legacy runs still use the current explicit append contract.
-        # Preparation may reject a changed historical identity; never copy/repair it.
-        def append(data):
-            data['inputs'].pop('resume_dataset',None)
-            data['execution'].update(resume=True,num_episodes=self.counts['num_episodes'].value())
-            data['execution'].pop('target_successes',None)
-            data['output']['directory']=self.handle['output_path']
-        if self.safe_update(append):
-            self.count_labels['num_episodes'].setText('추가 Episode 수')
-            self.output.setText(self.handle['output_path']);self._syncing=True
-            try:self.dataset_resume.setChecked(True)
-            finally:self._syncing=False
-            self.state.setText('기존 Dataset 추가 저장 Recipe 편집 중 · 추가 Episode/Attempt 예산을 확인하고 저장·검사하세요')
     def show_training_result(self):
         path=Path(self.handle['output_path'])/'training-result.json'
         if path.is_file() and getattr(self,'_shown_training',None)!=str(path):

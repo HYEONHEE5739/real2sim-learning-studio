@@ -27,7 +27,9 @@ class SourcePage(QWidget):
             button=QPushButton(text);button.clicked.connect(lambda _,name=kind:self.command(name));controls.addWidget(button,1);self.commands[kind]=button
         self.progress_text=QLabel('Leader로 Simulation 로봇을 조작합니다. 실제 Follower에는 명령을 보내지 않습니다.');self.progress_text.setWordWrap(True);viewer.addWidget(self.progress_text)
         preview=QWidget();preview.setObjectName('previewCard');grid=QGridLayout(preview);viewer.addWidget(preview,3);self.previews={}
+        grid.setRowStretch(1,1)
         for column,name in enumerate(('side','wrist')):
+            grid.setColumnStretch(column,1)
             grid.addWidget(QLabel('SIM '+name.upper()),0,column);view=CameraView(name.upper()+' · 실행 대기',minimum=(120,90));grid.addWidget(view,1,column);self.previews[name]=view
         tools=QHBoxLayout();viewer.addLayout(tools);tools.addWidget(QLabel('진행 / 오류 로그'));tools.addStretch();self.result_button=QPushButton('결과 폴더');tools.addWidget(self.result_button)
         self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumBlockCount(600);viewer.addWidget(self.log,1)

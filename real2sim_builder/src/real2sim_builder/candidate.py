@@ -45,7 +45,7 @@ class Candidate:
                 if target_object not in {o['id'] for o in scene['objects']}:
                     raise ValueError('Unknown target object')
                 fields = allow or ['pose']
-                if not set(fields) <= {'pose', 'dimensions', 'visual', 'collision', 'color', 'material', 'physics'}:
+                if not set(fields) <= {'pose', 'dimensions', 'visual', 'collision', 'color', 'material', 'physics', 'spawn'}:
                     raise ValueError('Invalid allowed object fields')
                 scope = {'target_object': target_object, 'allow': fields}
             root.mkdir(parents=True, exist_ok=False)
@@ -171,6 +171,19 @@ class Candidate:
                     stream.write(json.dumps({'candidate': self.name, 'target': 'render_evaluation', 'holdout_observations': [r['observation'] for r in report.get('images', []) if r.get('observation') and r['split'] == 'validation']}) + '\n')
         return report
 
+    def propose_observations(self, *, scene_state=None, options=None):
+        from .observations import propose_observations
+        return propose_observations(self.project, candidate=self.name, scene_state=scene_state, options=options)
+
+    def commit_observations(self, proposal_file, *, selections):
+        from .observations import commit_observation_proposals
+        path = Path(proposal_file)
+        if not path.is_absolute():
+            path = local_path(self.project.root, str(path))
+        if read(path).get('candidate') != self.name:
+            raise ValueError('Proposal belongs to another Candidate')
+        return commit_observation_proposals(self.project, path, selections=selections)
+
     def fit(self, target, options=None):
         from real2sim_builder.calibration.geometry import fit
         with exclusive(self.project):
@@ -179,10 +192,12 @@ class Candidate:
             if report['status'] == 'IMPROVED':
                 self.save(scene)
             write(self.root / 'fit.json', report)
-            if report.get('holdout_after'):
+            if target == 'joint:scene':
+                write(self.root / 'joint-fit.json', report)
+            if report.get('holdout_after') and report['holdout_after'].get('count', 1) > 0:
                 import json
                 images = {i.get('id'): i for i in self.project.evidence['images'] if i.get('id')}
-                ids = report.get('holdout_observations') or sorted({r['observation'] for r in self.project.evidence['landmarks'] if r.get('observation') in images and images[r['observation']]['split'] == 'validation'})
+                ids = report.get('holdout_observations', report.get('held_out_observations')) or sorted({r['observation'] for r in self.project.evidence['landmarks'] if r.get('observation') in images and images[r['observation']]['split'] == 'validation'})
                 with (self.project.root / 'working/calibration_holdout_usage.jsonl').open('a') as stream:
                     stream.write(json.dumps({'candidate': self.name, 'target': target, 'holdout_observations': ids, 'status': report['status']}) + '\n')
         return report

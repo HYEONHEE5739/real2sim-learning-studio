@@ -97,6 +97,7 @@ def validate(scene, root=None, complete=False):
         if obj['id'] in ids or obj['role'] not in ROLES or obj['frame'] not in frames:
             raise ValueError('Invalid object identity/frame/role')
         ids.add(obj['id'])
+        if obj.get('spawn','always')not in('always','recipe'):raise ValueError('Object spawn must be always or recipe')
         pose = checked_value(obj['pose'])
         dims = checked_value(obj['dimensions'])
         if complete and (pose is None or dims is None):

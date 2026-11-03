@@ -6,6 +6,7 @@ import numpy as np
 from .model import build_model
 from .state import restore_episode,read_sample,snapshot
 from .control import step,command_target
+from .rendering import camera_rgb
 from robot_learning_workbench.engines.mujoco.source import resolved_model_config, initial_arrays
 from robot_learning_workbench.data.recording import add_initial, record_frame
 from robot_learning_workbench.commands import control_commands, step_completed
@@ -61,7 +62,7 @@ def replay_episode(plan,model,data,b,source,segment,*,events,commands,env_index=
                 target=applied_targets[tick]
                 record_frame(episode,before,goals[tick],target,time_s=tick/30,signals={**recorded_signals(signals),'grasp':pregrasp,'place':placed},base=b.world_from_robot_base,previous_pose=previous,command_requested=targets[tick],command_limits=b.limits)
                 previous=goals[tick]
-                for camera,writer in videos.items():renderer.update_scene(data,camera=camera);writer.write(renderer.render())
+                for camera,writer in videos.items():writer.write(camera_rgb(renderer,data,camera))
                 step(model,data,b,target);post=sample('post_step',tick)
                 update_signals(plan,post,trackers,signals)
                 post_metrics=metrics(plan,post);record_metrics(episode,post_metrics,'post_step')
@@ -75,14 +76,14 @@ def replay_episode(plan,model,data,b,source,segment,*,events,commands,env_index=
         record_metrics(episode,metrics(plan,final),'episode_end');passed=predicate(plan,'acceptance',final)
         if type(passed) is not bool:raise ValueError('Acceptance must return bool')
         accepted,mark=accept_annotation(passed,len(targets),plan.effective_settings['execution']['mode'],controls['marks'])
-        if plan.effective_settings['execution']['mode']=='manual'and acceptance.name!='pick_place.v8_annotation':
+        if plan.effective_settings['execution']['mode']=='manual'and acceptance.name!='pick_place.annotation':
             accepted=passed and bool(controls.get('event_marks'))and all(0<v<len(targets)-1 for v in controls['event_marks'].values());mark=None
         report=dict(status='success' if accepted else 'failure',physical_replay_passed=passed,first_grasp_post_tick=first_grasp,frames=len(targets),trace=trace)
         from robot_learning_workbench.data.recording import command_summary
         report['saturation']=command_summary(episode)
         if not accepted:return None,{},report
         episode.pre_export();episode.success=True
-        episode.data['obs']['events']['place'][-1]=1 if acceptance.name=='pick_place.v8_annotation'else episode.data['obs']['events']['place'][-1]
+        episode.data['obs']['events']['place'][-1]=1 if acceptance.name=='pick_place.annotation'else episode.data['obs']['events']['place'][-1]
         if mark is not None:
             import torch
             signal=torch.from_numpy((np.arange(len(targets))>=mark).astype(np.uint8)[:,None])

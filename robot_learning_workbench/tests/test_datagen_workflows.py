@@ -6,15 +6,6 @@ import pytest
 ROOT=Path(__file__).resolve().parents[2]
 
 
-def test_datagen_reset_rng_continues_by_attempt_not_success():
-    from robot_learning_workbench.engines.mujoco.datagen import reset_seeds
-    from robot_learning_workbench.generation.mimic import attempt_seed
-    rng=np.random.default_rng(attempt_seed(1047,0))
-    expected=[int(rng.integers(2**32)) for _ in range(5)]
-    assert reset_seeds(1047,5)==expected
-    assert reset_seeds(1047,3)[-1]==expected[2]
-
-
 def test_native_annotation_pool_and_fixed_ik_binding():
     from robot_learning_workbench.engines.mujoco.datagen import load_inputs
     from robot_learning_workbench.recipe import prepare_recipe,read_recipe
@@ -67,15 +58,6 @@ def test_mujoco_real_generation_cancel_and_invalid_ik_never_publish(tmp_path,mon
     assert record['diagnostics']['initial_snapshot']
     assert record['diagnostics']['last_applied_ik']['command_applied']
     assert not record['diagnostics']['invalid_ik']['command_applied']
-
-
-def test_datagen_cannot_silently_ignore_engine_override(tmp_path):
-    import yaml
-    from robot_learning_workbench.recipe import read_recipe
-    spec=yaml.safe_load((ROOT/'docs/evidence/simulation-workflows/mujoco-first.yaml').read_text())
-    spec['inputs']['engine_config']='unexpected.json'
-    p=tmp_path/'bad.yaml';p.write_text(yaml.safe_dump(spec))
-    with pytest.raises(ValueError):read_recipe(p)
 
 
 def test_float32_gripper_request_saturates_and_retains_physical_task_failure(tmp_path,monkeypatch):

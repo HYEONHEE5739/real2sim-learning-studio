@@ -150,7 +150,7 @@ def task_scene(scene):
     return load_scene(root/'scene.json')
 
 
-def prepared(registry,scene,name='pick_place.v8_annotation',stage='annotation'):
+def prepared(registry,scene,name='pick_place.annotation',stage='annotation'):
     spec=resolve(registry,name,kind='acceptance' if stage!='simulation_evaluation' else 'predicate',stage=stage,engine='mujoco')
     p=validate_params(registry,name,{'object':'red','target':'cup'},kind=spec.kind,stage=stage,engine='mujoco',scene=scene,selected_objects=('red',))
     return spec,p
@@ -163,10 +163,11 @@ def final_sample(grasp=True,placed=True):
         linear_velocities={'red':np.zeros(3)},signals={'grasp':SignalValue(grasp,9,'post_step',{'object_id':'red'})})
 
 
-def test_default_list_registers_v8_plain_functions_without_engine_import(task_scene):
+def test_default_list_registers_plain_functions_without_engine_import(task_scene):
     r=load_registry(read_module_names(ROOT/'robot_learning_workbench/task_modules.yaml'))
     spec,p=prepared(r,task_scene)
     assert spec.callable is grasp_and_placement
+    assert "pick_place.v8_annotation" not in r.functions
     assert p._geometry==GEOMETRY
     assert spec.callable(final_sample(),params=p) is True
     assert not spec.callable(final_sample(grasp=False),params=p)
@@ -174,11 +175,11 @@ def test_default_list_registers_v8_plain_functions_without_engine_import(task_sc
     evaluation,e=prepared(r,task_scene,'pick_place.v8_evaluation','simulation_evaluation')
     s=final_sample(grasp=False);s['phase']='post_step'
     assert evaluation.callable(s,params=e) is True  # Placement-only, regardless of grasp.
-    with pytest.raises(TaskError):resolve(r,'pick_place.v8_annotation',kind='acceptance',stage='source',engine='mujoco')
+    with pytest.raises(TaskError):resolve(r,'pick_place.annotation',kind='acceptance',stage='source',engine='mujoco')
     assert not any('source' in spec.stages for name,spec in r.functions.items() if name.startswith('pick_place.'))
 
 
-@pytest.mark.parametrize('stage,name',[('annotation','pick_place.v8_annotation'),('datagen','pick_place.v8_datagen')])
+@pytest.mark.parametrize('stage,name',[('annotation','pick_place.annotation'),('datagen','pick_place.v8_datagen')])
 @pytest.mark.parametrize('grasp,placed',[(False,False),(False,True),(True,False),(True,True)])
 def test_physical_acceptance_truth_table(task_scene,stage,name,grasp,placed):
     r=load_registry(('robot_learning_workbench.tasks.pick_place',));spec,p=prepared(r,task_scene,name,stage)
@@ -209,7 +210,7 @@ def test_invalid_signal_is_not_coerced_to_boolean(task_scene):
 
 def test_geometry_is_not_recipe_input_and_conventions_do_not_change_mid_episode(task_scene):
     r=load_registry(('robot_learning_workbench.tasks.pick_place',))
-    with pytest.raises(TaskError):validate_params(r,'pick_place.v8_annotation',{'object':'red','target':'cup','_geometry':{}},kind='acceptance',stage='annotation',scene=task_scene)
+    with pytest.raises(TaskError):validate_params(r,'pick_place.annotation',{'object':'red','target':'cup','_geometry':{}},kind='acceptance',stage='annotation',scene=task_scene)
     tracker=create_stable_grasp(params=GraspParams('red'),episode=dict(episode_id='episode',env_index=0,control_dt_s=.05))
     tracker.update(sample(0));s=sample(1);s['grasp_inputs']['quaternion_order']='xyzw'
     with pytest.raises(TaskError):tracker.update(s)

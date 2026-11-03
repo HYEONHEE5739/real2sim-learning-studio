@@ -266,8 +266,8 @@ FUNCTIONS={
         params_type=PickPlaceParams,callable=v8_metrics,requires=('placement_points','linear_velocities'),
         bindings={stage:{'phase':'post_step' if stage=='simulation_evaluation' else 'pre_step'} for stage in _TASK_STAGES}),
 }
-for _stage in ('annotation','datagen'):
-    FUNCTIONS['pick_place.v8_'+_stage]=FunctionSpec(kind='acceptance',stages={_stage},engines={'independent'},
+for _stage,_name in (('annotation','pick_place.annotation'),('datagen','pick_place.v8_datagen')):
+    FUNCTIONS[_name]=FunctionSpec(kind='acceptance',stages={_stage},engines={'independent'},
         params_type=PickPlaceParams,callable=grasp_and_placement,
         requires=('placement_points','linear_velocities','signals.grasp'),
         bindings={_stage:{'phase':'episode_end','signals':{'grasp':{'function':'pick_place.stable_grasp','params':{}}}}})

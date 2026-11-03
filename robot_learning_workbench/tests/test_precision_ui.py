@@ -45,3 +45,21 @@ p.client.running=True;n=len(calls);p.refresh_scenes(force=True);assert len(calls
 p.client.running=False;p.template={'ready':True};p.project={'project':'old'};p.loaded({'ok':True,'result':{'scenes':[]}});p.buttons();assert p.template is None and p.project is None and not p.connect_button.isEnabled()
 p.stop_timers();p.close()
 ''',tmp_path)
+
+
+def test_real_sim_displays_simulated_state_separately_from_follower_measurement(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.real_sim_page import RealSimPage
+app=QApplication([]);p=RealSimPage('/no/worker','modules',Path(sys.argv[1]));p.job.process.kill();p.job.process.waitForFinished(1000)
+p.client.running=True
+p.update_progress({'session_state':'OBSERVING','q_measured':[1.,0.,0.,0.,0.,0.],
+ 'simulation':{'applied_sim_joint_rad':[.9,.2,0.,0.,0.,0.],'sim_target_joint_rad':[1.,0.,0.,0.,0.,0.],
+ 'sim_joint_delta_rad':[-.1,.2,0.,0.,0.,0.],'physics_steps':10,'simulation_time_s':1.}})
+assert '1.0000' in p.measured.text() and '0.9000, 0.2000' in p.simulated.text()
+assert '최대 추종 차이 0.2000rad' in p.simulated.text()
+p.client.running=False;p.ended('completed');assert p.simulated.text().endswith('—')
+p.stop_timers();p.close();app.processEvents()
+''',tmp_path)

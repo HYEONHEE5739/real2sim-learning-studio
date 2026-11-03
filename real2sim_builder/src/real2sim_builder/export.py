@@ -236,9 +236,11 @@ def _scene_spec(scene,scene_id,revision,mapping,model_path,required):
         if collision['type']=='container':
             task_geometry['wall_m']=collision['wall']['value']
             if 'bottom_diameter_m' in collision:task_geometry['bottom_diameter_m']=collision['bottom_diameter_m']
-        objects[obj['id']]={'name':obj['id'],'role':'task_object' if obj['role']=='manipulable_object' else obj['role'],'frame_id':fid,
+        from scene_contract.objects import spawn_mode
+        objects[obj['id']]={'spawn':spawn_mode(obj),'name':obj['id'],'role':'task_object' if obj['role']=='manipulable_object' else obj['role'],'frame_id':fid,
             'visual':geom(obj,'visual'),'collision':geom(obj,'collision'),'physics':copy.deepcopy(obj['physics']),'task_geometry':task_geometry,
             'bindings':{'isaac':{'prim_path':mapping['isaac'][obj['id']]},'mujoco':{'body_name':obj['id']}},'builder_role':obj['role']}
+        if obj.get('parent_object'):objects[obj['id']]['parent_object']=obj['parent_object']
         if obj['role']=='support_surface':supports[obj['id']]={'object_id':obj['id'],'placement_frame_id':aliases[obj['frame']]}
     cameras={}
     for camera in scene['cameras']:
@@ -321,6 +323,12 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
         for asset in working['assets'].values():
             source=local_path(project.root,asset['path']);target=copy_native_asset(source,staging,copied=copied,report=derivations)
             asset['path']=target.relative_to(staging).as_posix();asset['sha256']=sha(target)
+        for mask in working.get('derived_observations', {}).get('masks', []):
+            source = local_path(project.root, mask['path'])
+            if sha(source) != mask['sha256']:
+                raise ExportError('INPUT_CHANGED', mask['path'], 'approved mask changed')
+            target = copy_native_asset(source, staging, copied=copied, report=derivations)
+            mask['path'] = target.relative_to(staging).as_posix()
         model_path=None
         if working.get('robot_model'):
             source=local_path(project.root,working['robot_model']['path'])

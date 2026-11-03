@@ -1,31 +1,41 @@
 """Qt inspection plots ported from workflow/curation_ui.py:Plot.
 
-Recorded EEF/target/XY presentation only. Robot mesh/geometry calculation stays
-outside the GUI; bounded numeric rows come from the existing data reader.
+FK and model loading stay in the Backend. Qt projects bounded display meshes
+with recorded poses and draws trajectory/quality/distribution presentation.
 """
 import json
 import numpy as np
-from PyQt6.QtCore import Qt,QPointF,QRectF
+from PyQt6.QtCore import Qt,QPointF,QRectF,pyqtSignal
 from PyQt6.QtGui import QPainter,QColor,QPen,QPolygonF
 from PyQt6.QtWidgets import QWidget,QToolTip
 SPLIT_COLORS={'train':'#55d6b0','val':'#69b9ff'}
 
 
 class ReviewPlot(QWidget):
+    picked=pyqtSignal(int)
     def __init__(self, mode):
         super().__init__();self.mode=mode;self.rows=[];self.row=None
         self.yaw=.7;self.pitch=.55;self.drag=None;self.screen=[];self.zoom=1.0
-        self.frame=0;self.payload={};self.sample_frame=0
-        self.action_lines=[];self.action_row=None;self.setMouseTracking(mode=='actions')
+        self.frame=0;self.payload={};self.sample_frame=0;self.bounds_key=None;self.cached_bounds=None
+        self.action_lines=[];self.action_row=None;self.scene={};self.parts=[];self.mesh=None;self.selected=-1;self.setMouseTracking(mode in('actions','scatter'))
         self.setMinimumSize(240,200)
     def set_view(self, name):
         self.zoom=1.0
         self.yaw,self.pitch={'3D':(.7,.65),'XY':(0.,0.),'XZ':(0.,np.pi/2),'YZ':(np.pi/2,np.pi/2)}[name]
         self.update()
     def bounds(self):
-        xyz=np.asarray(self.row['ee'],dtype=float);lo,hi=xyz.min(0),xyz.max(0)
+        key=(id(self.row),id(self.scene))
+        if self.bounds_key==key:return self.cached_bounds
+        points=list(self.row.get('ee')or[])
+        if self.scene.get('bounds'):points.extend(self.scene['bounds'])
+        for name,poses in self.row.get('object_paths',{}).items():
+            if name in self.scene.get('objects',{}):points.extend(np.array(poses)[:,:3,3])
+        if self.mesh is not None:
+            vertices=self.mesh[0].reshape(-1,3);points.extend([vertices.min(0),vertices.max(0)])
+        xyz=np.asarray(points or[[0.,0.,0.]],dtype=float);lo,hi=xyz.min(0),xyz.max(0)
         pad=np.maximum((hi-lo)*.04,.005)
-        return lo-pad,hi+pad
+        self.bounds_key=key;self.cached_bounds=(lo-pad,hi+pad)
+        return self.cached_bounds
     def project(self, points):
         p=np.asarray(points,dtype=float)
         if not p.size:return []
@@ -47,16 +57,49 @@ class ReviewPlot(QWidget):
             p=(p-center)*scale
         return [QPointF(x+self.width()/2,self.height()/2-y) for x,y in p]
     def scatter_geometry(self):
-        points=np.asarray([r['xy']for r in self.rows]or[[0,0]]);lo,hi=points.min(0),points.max(0)
+        points=[r['xy']for r in self.rows]
+        for row in self.rows:
+            region=row.get('placement_region')
+            if region:points.extend(region['allowed'])
+        points=np.asarray(points or[[0,0]]);lo,hi=points.min(0),points.max(0)
         return np.eye(2),(lo+hi)/2,np.maximum(hi-lo,.02)*1.08
     def draw_distribution(self,painter):
+        regions={json.dumps(r['placement_region'],sort_keys=True):r['placement_region']for r in self.rows if r.get('placement_region')}
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for region in regions.values():
+            for key,color,style in [('support','#65788b',Qt.PenStyle.DashLine),('allowed','#9cb6d3',Qt.PenStyle.SolidLine)]:
+                painter.setPen(QPen(QColor(color),1.5,style));painter.drawPolygon(QPolygonF(self.project(region[key])))
+            point=self.project([region['robot_xy']])[0]
+            if self.rect().adjusted(10,35,-10,-35).contains(point.toPoint()):
+                painter.setPen(QColor('#b58ce1'));painter.setBrush(QColor('#a16acf'));painter.drawRect(QRectF(point.x()-5,point.y()-5,10,10));painter.drawText(point+QPointF(9,0),'로봇')
         painter.setPen(QColor('#b5c5d3'))
-        painter.drawText(12,self.height()-12,'기록된 선택 시작 위치 · 지정 Frame [m] · 배치 경계 추정 없음')
+        painter.drawText(12,self.height()-12,'Episode 시작 위치 [m] · 주황: 확인 필요 · 회색: 제외 · 클릭: Episode 선택')
     def has_splits(self):
         return any(r.get('split') in SPLIT_COLORS for r in self.rows)
     def point_color(self,row,split_mode):
+        if not row.get('included',True):return '#66717d'
         if split_mode:return SPLIT_COLORS.get(row.get('split'),'#b5c5d3')
         return '#efb467' if row['flags'] else '#55d6b0'
+
+    def set_scene(self,scene):
+        self.scene=scene;self.parts=[];self.mesh=None
+        for part in scene.get('robot',[]):self.parts.append((part['link'],np.array(part['triangles']), '#46434e'if part['dark']else'#a66bd4',True))
+        for name,part in scene.get('objects',{}).items():self.parts.append((name,np.array(part['triangles']),part['color'],False))
+
+    def draw_mesh(self,painter):
+        if self.mesh is None:return
+        triangles,colors=self.mesh;a,b=self.yaw,self.pitch
+        rot=np.array([[np.cos(a),-np.sin(a),0],[np.sin(a),np.cos(a),0],[0,0,1]])@np.array([[1,0,0],[0,np.cos(b),-np.sin(b)],[0,np.sin(b),np.cos(b)]])
+        points=self.project(triangles.reshape(-1,3));depth=(triangles.mean(1)@rot)[:,2]
+        normals=np.cross(triangles[:,1]-triangles[:,0],triangles[:,2]-triangles[:,0]);light=np.abs(normals[:,2])/np.maximum(np.linalg.norm(normals,axis=1),1e-12)
+        palette={};painter.setPen(Qt.PenStyle.NoPen)
+        for index in np.argsort(depth):
+            key=(colors[index],int(light[index]*4))
+            if key not in palette:palette[key]=QColor(str(key[0])).lighter(70+key[1]*12)
+            painter.setBrush(palette[key]);painter.drawPolygon(QPolygonF(points[index*3:index*3+3]))
+        painter.setPen(QColor('#e3e8ef'))
+        for name,pose in self.payload.get('object_poses',{}).items():
+            if name in self.scene.get('objects',{}):painter.drawText(self.project([np.array(pose)[:3,3]])[0],name)
     def draw_axes(self,painter):
         lo,hi=self.bounds()
         painter.setPen(QPen(QColor('#344454'),1))
@@ -72,14 +115,21 @@ class ReviewPlot(QWidget):
     def set_frame(self,frame,payload=None):
         self.frame=frame;self.payload=payload or {}
         if self.row is not None:
-            samples=self.row.get('sample_indices',np.arange(len(self.row.get('ee',self.row.get('actions',[])))))
+            samples=self.row.get('sample_indices',np.arange(len(self.row.get('ee')or self.row.get('actions',[]))))
             self.sample_frame=int(np.clip(np.searchsorted(samples,frame),0,len(samples)-1))
+        if self.mode=='trajectory':
+            triangles=[];colors=[]
+            for name,vertices,color,robot in self.parts:
+                pose=self.payload.get('robot_poses'if robot else'object_poses',{}).get(name)
+                if pose is None or not len(vertices):continue
+                pose=np.asarray(pose);triangles.append(vertices@pose[:3,:3].T+pose[:3,3]);colors.extend([color]*len(vertices))
+            self.mesh=(np.concatenate(triangles),colors)if triangles else None
         self.update()
     def paintEvent(self,event):
         self.action_lines=[];self.action_row=None
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
-        title={'scatter':'선택 시작 Object 위치 · 지정 좌표 XY [m]','trajectory':'기록된 EEF 경로 · '+str((self.row or {}).get('display_frame',''))+' ['+str((self.row or {}).get('eef_unit','unknown'))+']','actions':'기록된 Target ['+str((self.row or {}).get('target_unit','unknown'))+'] · 선택 Frame'}[self.mode]
+        title={'scatter':'물체 시작 위치 분포 · XY [m]','trajectory':'기록된 로봇·물체 동작 · '+str((self.row or {}).get('display_frame',''))+' [m]','actions':'기록된 Target ['+str((self.row or {}).get('target_unit','unknown'))+'] · 선택 Frame'}[self.mode]
         painter.drawText(12,22,title+(' · 실선 Target / 점선 Joint Position'if self.mode=='actions'else''))
         if self.mode=='scatter' and self.rows:
             self.draw_distribution(painter)
@@ -88,15 +138,16 @@ class ReviewPlot(QWidget):
             for i,(row,point) in enumerate(zip(self.rows,self.screen)):
                 color=self.point_color(row,split_mode)
                 edge='#efb467' if row['flags'] else color
-                painter.setPen(QPen(QColor(edge),2));painter.setBrush(QColor(color));painter.drawEllipse(point,5,5)
+                painter.setPen(QPen(QColor(edge),2));painter.setBrush(QColor(color));painter.drawEllipse(point,6,6)
+                if i==self.selected:painter.setPen(QPen(QColor('#ffffff'),2));painter.setBrush(Qt.BrushStyle.NoBrush);painter.drawEllipse(point,9,9)
         elif self.row and self.mode=='trajectory':
-            self.draw_axes(painter)
-            points=self.project(self.row['ee']);painter.setPen(QPen(QColor('#55d6b0'),2))
+            self.draw_axes(painter);self.draw_mesh(painter)
+            points=self.project(self.row.get('ee')or[]);painter.setPen(QPen(QColor('#55d6b0'),2))
             for i,(a,b) in enumerate(zip(points,points[1:])):
                 painter.setPen(QPen(QColor('#55d6b0' if i<self.sample_frame else '#4b6870'),2));painter.drawLine(a,b)
-            current=self.project([self.payload['ee']])[0] if 'ee' in self.payload else points[self.sample_frame]
-            painter.setPen(QColor('#ffffff'));painter.setBrush(QColor('#ffffff'));painter.drawEllipse(current,6,6)
-            for point,label,color in [(points[0],'시작','#55d6b0'),(points[-1],'끝','#efb467')]:
+            current=self.project([self.payload['eef']])[0]if self.payload.get('eef')is not None else points[self.sample_frame]if points else None
+            if current is not None:painter.setPen(QColor('#ffffff'));painter.setBrush(QColor('#ffffff'));painter.drawEllipse(current,5,5)
+            for point,label,color in ([(points[0],'시작','#55d6b0'),(points[-1],'끝','#efb467')]if points else[]):
                 painter.setPen(QColor(color));painter.drawEllipse(point,5,5);painter.drawText(point+QPointF(8,18),label)
         elif self.row and self.mode=='actions':
             q=np.asarray(self.row['actions']);states=np.asarray(self.row['states'])if self.row.get('states')is not None else None
@@ -160,8 +211,17 @@ class ReviewPlot(QWidget):
         self.zoom=float(np.clip(self.zoom*1.15**np.clip(delta,-20,20),.2,8.0))
         self.update();event.accept()
     def mousePressEvent(self,event):
+        if self.mode=='scatter'and self.screen:
+            distances=[np.hypot(p.x()-event.position().x(),p.y()-event.position().y())for p in self.screen];index=int(np.argmin(distances))
+            if distances[index]<=12:self.picked.emit(index)
         self.drag=event.position()
     def mouseMoveEvent(self,event):
+        if self.mode=='scatter'and self.screen:
+            distances=[np.hypot(p.x()-event.position().x(),p.y()-event.position().y())for p in self.screen];index=int(np.argmin(distances))
+            if distances[index]<=12:
+                row=self.rows[index];QToolTip.showText(event.globalPosition().toPoint(),row['name']+' · '+str(row.get('split')or'미분할')+'\n'+', '.join(row['flags']),self)
+            else:QToolTip.hideText()
+            return
         if self.mode=='actions':
             text=self.action_tooltip(event.position())
             if text:QToolTip.showText(event.globalPosition().toPoint(),text,self)
@@ -171,24 +231,3 @@ class ReviewPlot(QWidget):
             delta=event.position()-self.drag;self.yaw+=delta.x()*.01;self.pitch+=delta.y()*.01
             self.drag=event.position();self.update()
     def mouseReleaseEvent(self,event):self.drag=None
-
-
-
-class HistogramPlot(QWidget):
-    """Draw the existing backend histogram bins/counts; no GUI statistics engine."""
-    def __init__(self):
-        super().__init__();self.series=[];self.field=None;self.component=0;self.setMinimumSize(240,180)
-
-    def paintEvent(self,event):
-        painter=QPainter(self);painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
-        if not self.series or self.field is None:painter.drawText(12,24,'Action / Observation 분포 · 명시 범위를 선택하세요');return
-        rows=[d['fields'][self.field]for d in self.series];index=self.component
-        if index>=len(rows[0]['histogram_counts']):return
-        maximum=max(1,max(max(row['histogram_counts'][index])for row in rows));bins=len(rows[0]['histogram_counts'][index]);width=max(1,self.width()-60);height=max(1,self.height()-75)
-        colors=('#55d6b0','#69b9ff','#efb467','#d196fa')
-        for dataset,row in enumerate(rows):
-            color=QColor(colors[dataset%len(colors)]);color.setAlpha(130);painter.setPen(QPen(color,1));painter.setBrush(color)
-            for i,count in enumerate(row['histogram_counts'][index]):
-                bar_height=count/maximum*height;painter.drawRect(QRectF(35+i*width/bins,self.height()-35-bar_height,width/bins,bar_height))
-        painter.setPen(QColor('#b5c5d3'));painter.drawText(12,22,f"{self.field} · component {index+1} [{rows[0]['unit']}] · {rows[0]['phase']}")
-        edges=rows[0]['histogram_edges'][index];painter.drawText(12,self.height()-10,f'{edges[0]:.5g} … {edges[-1]:.5g} · 각 Dataset의 기록 수 / 최대 {maximum}')

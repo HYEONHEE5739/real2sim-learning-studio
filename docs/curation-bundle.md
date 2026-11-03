@@ -1,5 +1,7 @@
 # C01/C02 — Native Data Curation 검토·분포·Revision·Export
 
+현재 사용법은 [Data Curation 안내](data-curation-playback.md)를 따른다. 아래는 2026-10-27 구현 당시의 이력이다. 2026-11-02에 관절 분포·비교 UI와 `distribution`/`compare_distributions` API 및 전용 시험을 제거했다. 아래 통계 API 설명과 당시 검증 수치는 현재 지원 목록이 아니다.
+
 2026-10-27. **C01/C02의 데이터 기능과 UI 호출 경계를 구현·실제 자료로 검증했다.** UI 페이지·U01~U04/X01/P02/P03은 시작하지 않았다. 기존 Native C·L03의 선택/재로드/Materialization/Merge를 그대로 재사용하며 새 Dataset 포맷·Curation Manager·중간 bulk 저장 계층은 없다.
 
 ## 구현 기능과 호출

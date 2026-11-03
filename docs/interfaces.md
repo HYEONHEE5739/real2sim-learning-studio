@@ -467,7 +467,7 @@ Native execution에는 전체 Policy record digest·파일/processor SHA·checkp
 
 새 UI 계층 없이 data/curation.py의 일반 함수를 사용한다. `inspect_dataset(source, *, split=None)`는 현재 선택의 original outcome/seed/lineage/역사적 partition과 별도 원 Native run attempt scope를 반환한다. 취소/pending은 완료 Episode로 추가하지 않는다. `filter_episodes`는 기록된 성공/category/split으로 ID를 고른다. `revision_history`는 현재→parent→원본/공식 materialized identity를 반환한다.
 
-`distribution(source, *, fields=None, split=None, bins=20, chunk_frames=2048)`는 선택 half-open 구간의 성분별 population mean/std·min/max·histogram과 scope/dtype/shape/unit/phase/frame/order를 반환한다. 기본 Native 필드는 pre measured obs/policy/joint_pos와 recorded joint_targets다. applied/post-state/Task 필드는 명시 요청하며 원 Action을 대체하지 않는다. 누산만 float64이고 원 저장 정밀도는 그대로다. `compare_distributions(sources, ...)`는 같은 의미/단위/shape의 공통 bin 비교이며 Merge 승인이나 부족 영역 추천이 아니다.
+2026-11-02: 관절값 분포 히스토그램과 Dataset 관절값 비교 기능은 UI·작업 호출·전용 계산 API에서 제거했다. 영상 재생, 기록된 관절 시간 그래프, 작업 물체 초기 위치 분포, Trim·Revision·Split·Export는 유지한다. Export는 현재 열린 선별본 전체를 변환한다. 내보내기 범위 UI는 제거했다. `data.revisions.save_revision`은 역할→Catalog 매핑을 반환하며, 무분할은 all 한 개, 분할은 train/val별 독립 Revision을 같은 버전 디렉터리에 게시한다. Dataset Merge는 여러 공식 Dataset 폴더를 명시 선택한다. [현재 저장·병합 계약](curation-split-datasets.md)을 따른다.
 
 `review_frame(source, selection_id, frame, *, cameras=None, fields=None)`의 frame은 선택-relative이며 원 ordinal/기록값·RGB numpy copy/정확한 MP4 PTS를 같이 반환한다. 누락/non-CFR 구간은 이전 frame으로 숨기지 않는다. `rgb_statistics(source, camera, *, split=None, stride=1)`는 선택 구간 decode RGB 수와 통계 표본 수를 나누어 반환한다. stride가 decoder workload를 같은 비율로 줄이는 보장은 없다.
 

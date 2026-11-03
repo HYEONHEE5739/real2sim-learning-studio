@@ -34,16 +34,19 @@ def test_policy_paths_preserve_owner_and_official_structure(tmp_path,kind):
     verify_prepared_inputs(plan)
 
 
-def test_qt_label_accepts_root_and_leaf_without_backend_imports(tmp_path):
+def test_qt_script_selector_keeps_root_and_leaf_without_backend_imports(tmp_path):
     from test_workbench_window import UI
     code='''
 import sys
 from pathlib import Path
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication,QFileDialog
 from robot_learning_workbench.ui.workflow import WorkflowPage
 app=QApplication([]);p=WorkflowPage('offline_validation',sys.executable,'modules');p.editor.path=Path(sys.argv[1])/'r.yaml'
 for path in (Path(sys.argv[2]),Path(sys.argv[2])/'pretrained_model'):
- p.show_policy_model(str(path));assert 'act' in p.policy_model.text(),p.policy_model.text()
+ QFileDialog.getExistingDirectory=lambda *a,**kw:str(path)
+ p.settings.choose_input('policy')
+ assert p.editor.data()['inputs']['policy']==str(path)
+ assert p.settings.selectors['policy'].toolTip()==str(path)
 assert not any(n in sys.modules for n in ('torch','lerobot','mujoco','isaaclab'))
 p.timer.stop();p.close()
 '''

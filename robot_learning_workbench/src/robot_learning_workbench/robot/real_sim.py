@@ -95,6 +95,7 @@ class RealSimSession:
                 if packet is not None:video._preview_sink(name,packet['rgb'],packet['sequence'],t/1e9,0)
         reason=capture_reason(self.history,self.stability,self.packets,self.store.last_sequences,busy=self.pending is not None or self.future is not None or self.rendered is not None)
         self.emit(q_measured=self.history[-1]['q_measured'],capture_ready=not reason,capture_reason=reason or'최신 측정 관절값으로 Real/Sim Capture할 수 있습니다',
+            simulation=None if self.renderer.last_live is None else {key:self.renderer.last_live[key] for key in ('applied_sim_joint_rad','sim_target_joint_rad','sim_joint_delta_rad','physics_steps','simulation_time_s')},
             camera_timing={n:None if p is None else {**self.cameras[n].statistics(),'age_ms':(time.monotonic_ns()-p['read_end']['monotonic_ns'])/1e6,'joint_skew_ms':(p['read_end']['monotonic_ns']-t)/1e6}for n,p in self.packets.items()},
             render_timing=None if self.renderer.last_live is None else {'render_ms':self.renderer.last_live['render_ms'],'age_ms':(time.monotonic_ns()-self.renderer.last_live['sim_timestamp']['monotonic_ns'])/1e6})
         if self.acquiring:

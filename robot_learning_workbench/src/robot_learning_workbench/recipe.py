@@ -83,7 +83,7 @@ _EXEC={
  'capture_session':({'device_source'},set()),
  'paired_session':({'device_source'},set()),
  'teleoperation':({'mode'},{'max_frames','gripper_target_rad','max_gripper_delta_raw'}),
- 'source':({'seed'},{'episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
+ 'source':(set(),{'single_task','episodes','num_episodes','resume','env_num','num_envs','headless','episode_time_s','reset_time_s'}),'annotation':({'mode'},{'env_num','num_envs','headless'}),
  'datagen':({'max_attempts','seed'},{'target_successes','num_episodes','resume','env_num','num_envs','headless','max_episode_steps','mimic_object','mimic_target'}),
  'simulation_evaluation':({'episodes','seed'},{'timeout_s','env_num','num_envs','headless','task_instruction'}),
  'real_evaluation':({'episodes'},{'timeout_s','enable_motion','mode','task_instruction','max_frames','max_gripper_delta_raw'}),'train':({'mode'},set()),
@@ -145,7 +145,7 @@ def _validate(data,path):
             if type(value)not in (int,float) or not math.isfinite(value):_fail(where,'explicit finite gripper target rad required',path)
         elif key in('mimic_object','mimic_target'):
             if not isinstance(value,str)or not value.strip():_fail(where,'explicit Scene object ID required',path)
-        elif key=='task_instruction':
+        elif key in ('task_instruction','single_task'):
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
             if value not in (('fake_all','observe_only','gripper_once') if stage=='teleoperation' else ('manual','auto') if stage=='annotation' else {'capture':('offline','observe_only','live_capture'),'precision_calibration':('offline',),'real_evaluation':('offline','observe_only','gripper_once','fake_all'),'real_sim':('offline',)}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
@@ -164,7 +164,8 @@ def _validate(data,path):
         if not isinstance(objects,dict):_fail('objects','explicit creation list required',path)
         for name,value in objects.items():
             if not isinstance(name,str) or not name:_fail('objects','nonempty Object ID required',path)
-            _mapping(value,{'placement'},{'placement'},'objects.'+name,path);_declaration(value['placement'],'objects.'+name+'.placement',path)
+            _mapping(value,{'placement','task_object'},{'placement'},'objects.'+name,path);_declaration(value['placement'],'objects.'+name+'.placement',path)
+            if 'task_object'in value and type(value['task_object'])is not bool:_fail('objects.'+name+'.task_object','true or false required',path)
     elif 'objects' in data:_fail('objects','not used; Annotation restores recorded initial state',path)
     if 'functions' in data and stage not in _ROLES:_fail('functions','not used by this stage',path)
     functions=data.get('functions',{})
@@ -505,6 +506,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         code_names += ['engines/'+engine+'/'+name+'.py' for name in ('source','model','state','control',{'simulation_evaluation':'evaluation'}.get(spec.stage,spec.stage))]
         if spec.stage=='simulation_evaluation':code_names += ['engines/'+engine+'/evaluation.py']
         if engine=='isaac':code_names += ['engines/isaac/env_cfg.py','engines/isaac/mdp.py']
+        if engine=='mujoco':code_names += ['engines/mujoco/rendering.py']
         code_names += ['data/native.py','data/video.py','data/recording.py','data/publication.py','commands.py','tasks/evaluation.py','robot/calibration.py','robot/devices.py','robot/configuration.py','robot/control.py']
         code_names += ['tasks/execution.py','tasks/registry.py','tasks/placement.py']
         if engine=='isaac'and spec.stage in('datagen','simulation_evaluation'):code_names+=['engines/isaac/annotation.py']
@@ -520,15 +522,29 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage=='capture_session':code_names+=['robot/registration.py']
     if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/authored_render.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','robot/supervised.py','robot/control.py','robot/telemetry.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
     if spec.stage=='source':code_names+=['scene_preparation.py','robot/registration.py']
+    if spec.stage=='paired_session':code_names+=['engines/mujoco/rendering.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
+    if spec.stage in _SIM or spec.stage=='paired_session':
+        from scene_contract import objects as object_membership
+        p=Path(object_membership.__file__);code_files[str(p)]=_sha(p.read_bytes())
     if spec.stage in ('capture','real_sim','real_evaluation','scene_capture','capture_session','paired_session'):
         from .robot.offline import capture_reader
         capture=capture_reader()
         for name in ('capture.py','files.py','scene.py','project.py','candidate.py','evidence.py','rendering.py','validation.py','calibration/geometry.py','exporters/usd.py','exporters/mjcf.py'):
             p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)
+    if spec.stage in ('annotation','datagen')and dataset is not None and dataset.execution.get('single_task'):
+        runtime_execution['single_task']=dataset.execution['single_task']
     if 'env_num' in runtime_execution:runtime_execution['num_envs']=runtime_execution['env_num']
     effective={'execution':runtime_execution,'task_modules_sha256':source_files,'code_files':code_files}
+    if spec.stage in('source','annotation','datagen','simulation_evaluation'):
+        from .data.native import task_object_ids
+        explicit_targets=any('task_object'in obj for obj in spec.objects.values())
+        if dataset is not None and not explicit_targets:
+            targets=task_object_ids(dataset.execution)
+            if spec.objects:targets=tuple(name for name in targets if name in spec.objects)
+        else:targets=tuple(name for name,obj in spec.objects.items()if obj.get('task_object',not explicit_targets))
+        effective['task_objects']=list(targets)
     if spec.stage=='datagen':effective['ik_policy_contract']=dict(algorithm='pinocchio_dls',failure_policy='best_effort',parameters=dict(position_weight=1.,orientation_weight=.01,max_iterations=200,tolerance=1e-3,damping=1e-3,step_size=.3),safety=dict(finite=True,joint_limits=True,max_arm_command_jump_rad=.5,jump_reference='previous_applied_command_arm'),runtime_identity_state='requires E06 binding; no solver/model/code identity fabricated')
     pending=[]
     if spec.stage in _SIM:pending.append('engine_binding_and_initial_state_restore')

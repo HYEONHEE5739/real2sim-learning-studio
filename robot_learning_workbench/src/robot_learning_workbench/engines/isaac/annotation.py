@@ -78,13 +78,13 @@ def replay_steps(plan,env,source,segment,*,events,commands,env_index=0):
         final=task_sample(env,plan,'episode_end',tick-1,eid,signals,env_index=env_index);update_signals(plan,final,trackers,signals);record_metrics(ep,metrics(plan,final),'episode_end');passed=predicate(plan,'acceptance',final)
         if type(passed) is not bool:raise ValueError('Task acceptance must return bool')
         accepted,mark=accept_annotation(passed,tick,plan.effective_settings['execution']['mode'],controls['marks'])
-        if plan.effective_settings['execution']['mode']=='manual'and acceptance.name!='pick_place.v8_annotation':
+        if plan.effective_settings['execution']['mode']=='manual'and acceptance.name!='pick_place.annotation':
             accepted=passed and bool(controls.get('event_marks'))and all(0<v<tick-1 for v in controls['event_marks'].values());mark=None
         report=dict(env_index=env_index,initial_frame='scene_world',engine_env_origin=env.scene.env_origins[env_index].cpu().numpy().tolist(),status='success' if accepted else 'failure',physical_replay_passed=passed,frames=tick,first_grasp_post_tick=first,trace=trace,initial_state_owner='annotation_replay_start',source_initial_state=original)
         from robot_learning_workbench.data.recording import command_summary
         report['saturation']=command_summary(ep)
         if not accepted:return None,{},report
-        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1 if acceptance.name=='pick_place.v8_annotation'else ep.data['obs']['events']['place'][-1]
+        ep.pre_export();ep.success=True;ep.data['obs']['events']['place'][-1]=1 if acceptance.name=='pick_place.annotation'else ep.data['obs']['events']['place'][-1]
         if mark is not None:
             signal=torch.from_numpy((np.arange(tick)>=mark).astype(np.uint8)[:,None]);ep.data['obs']['events']['grasp']=signal;ep.data['obs']['datagen_info']['subtask_term_signals']['grasp']=signal
         report['annotation']={**annotation_events(ep,manual_frame=mark,manual_events=controls.get('event_marks')),'method':plan.effective_settings['execution']['mode'],'acceptance_function':acceptance.name}

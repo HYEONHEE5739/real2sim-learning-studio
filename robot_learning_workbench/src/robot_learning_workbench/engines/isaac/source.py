@@ -35,14 +35,14 @@ def pose_delta_action(previous,current,gripper):
     return torch.cat([current[:3]-previous[:3],axis_angle_from_quat(rotation.unsqueeze(0))[0],gripper.reshape(1)])
 
 
-def collect_episode(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False,plan=None):
+def collect_episode(env,segment,kin,*,episode_id,frames,read_target,events,commands,duration_s=None,realtime=False,plan=None):
     from .mdp import complete_episode
-    return complete_episode(env,collection_steps(env,segment,kin,episode_id=episode_id,seed=seed,frames=frames,read_target=read_target,events=events,commands=commands,duration_s=duration_s,realtime=realtime,plan=plan))
+    return complete_episode(env,collection_steps(env, segment, kin, episode_id=episode_id, frames=frames, read_target=read_target, events=events, commands=commands, duration_s=duration_s, realtime=realtime, plan=plan))
 
 
-def collection_steps(env,segment,kin,*,episode_id,seed,frames,read_target,events,commands,duration_s=None,realtime=False,env_index=0,plan=None):
+def collection_steps(env,segment,kin,*,episode_id,frames,read_target,events,commands,duration_s=None,realtime=False,env_index=0,plan=None):
     import torch
-    ep=native_api()[0]();ep.seed=seed;ep.success=True;initial=initial_state(env,env_index,relative=True);add_initial(ep,initial)
+    ep=native_api()[0]();ep.success=True;initial=initial_state(env,env_index,relative=True);add_initial(ep,initial)
     base=np.asarray(env.cfg.workbench_inputs['profile']['robot_base']['T_world'])
     limits=np.array(env.cfg.workbench_joint_limits_rad);limits[5]=[max(limits[5,0],0.),min(limits[5,1],np.deg2rad(100))]
     from ...tasks.evaluation import trackers_for
@@ -104,6 +104,9 @@ def settings_for(plan,recorded=None):
     if raw is None:raise ValueError('Explicit Isaac engine_config required')
     settings=_plain(raw);settings.pop('package_root',None);validate_settings(settings)
     settings.setdefault('active_object_ids',list(plan.object_order));settings.setdefault('isaac',{'physics_timestep_s':1/300,'decimation':10})
+    if plan.stage in('source','datagen','simulation_evaluation')and not(plan.stage=='source'and recorded is not None):
+        from scene_contract.objects import active_objects
+        settings['active_object_ids']=list(active_objects(plan.scene.scene,plan.object_order,settings['active_object_ids']))
     if plan.stage=='datagen' and tuple(settings['active_object_ids'])!=tuple(plan.object_order):raise ValueError('Recipe object order differs from explicit engine configuration')
     if plan.stage=='source' and not set(plan.object_order)<=set(settings['active_object_ids']):raise ValueError('Source placement objects must be active in the Model')
     return settings
@@ -118,16 +121,15 @@ def model_identity(package,settings):
 
 def execution_contract(plan,settings):
     from ...recipe import _plain
-    from ...tasks.placement import uses_workspace_random
     from .env_cfg import execution_inputs
     from ...data.native import file_sha256
-    return dict(stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
-        model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),partition='unpartitioned',seed=plan.effective_settings['execution'].get('seed',0),
+    return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
+        model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),partition='unpartitioned',
         task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={k:v for k,v in plan.effective_settings['code_files'].items()},
-        rng_policy='entropy_workspace_poses_no_rng_resume_v1' if uses_workspace_random(plan) else 'source_base_seed_plus_attempt_minus_one',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
+        rng_policy='entropy_placement_per_call_v1',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
 
 
-def reset_placements(plan,env,seed,*,env_index=0):
+def reset_placements(plan,env,*,env_index=0):
     import torch
     from ...tasks.placement import PlacementRequest,checked_placement,validate_v8_pose
     from scene_contract.transforms import resolve_transform
@@ -169,13 +171,13 @@ def reset_placements(plan,env,seed,*,env_index=0):
             actual=canonical(observed['rigid_object'][name]['root_pose'][0])
             records[name].update(applied=True,applied_world_pose=actual.tolist(),observed_world_pose=actual.tolist(),physical_collision_checked=False)
         return records
-    rng=np.random.default_rng(seed);records={}
+    records={}
     from .state import _matrix,restore_episode
     occupied={n:canonical(initial['rigid_object'][n]['root_pose'][0]) for n in plan.object_order}
     for name in plan.object_order:
         binding=plan.function_bindings['objects.'+name+'.placement'];params=binding.params
         world=resolve_transform(plan.scene.scene['frames'],source=params.frame,target='world');inverse=np.linalg.inv(world)
-        request=PlacementRequest(name,params.frame,params.support,occupied_poses={n:inverse@p for n,p in occupied.items() if n!=name},rng=rng,rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
+        request=PlacementRequest(name,params.frame,params.support,occupied_poses={n:inverse@p for n,p in occupied.items() if n!=name},rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
         result=checked_placement(request,plan.tasks.functions[binding.name].callable(request,params=params))
         if getattr(params,'rules',None)=='v8_preserved':
             context=params._context;validate_v8_pose(result.pose,context['object_dimensions'],context['support_pose'],context['support_dimensions'],object_id=name)
@@ -228,19 +230,19 @@ def run(plan,*,events,commands,leader=None):
                 from ...robot.control import checked_target
                 import copy
                 if retry_state is None:
-                    env.reset();placements=reset_placements(plan,env,claim['seed']);retry_state=initial_state(env)
+                    env.reset();placements=reset_placements(plan, env);retry_state=initial_state(env)
                 current=copy.deepcopy(retry_state);limits=np.asarray(env.cfg.workbench_joint_limits_rad)
                 current['articulation']['robot']['joint_position']=checked_target(read_target(),limits=limits,applied_dtype=np.float32)[None]
                 current['articulation']['robot']['joint_velocity'][:]=0
                 restore_episode(env,[0],current)
                 from ...robot.control import TargetRejected
                 try:
-                    ep,media,initial,status=collect_episode(env,segment,kin,plan=plan,episode_id=eid,seed=claim['seed'],frames=int(np.ceil(opts['episode_time_s']*30)),read_target=read_target,events=events,commands=commands,duration_s=opts['episode_time_s'],realtime=True)
+                    ep,media,initial,status=collect_episode(env, segment, kin, plan=plan, episode_id=eid, frames=int(np.ceil(opts['episode_time_s'] * 30)), read_target=read_target, events=events, commands=commands, duration_s=opts['episode_time_s'], realtime=True)
                 except TargetRejected as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'category':'action_safety_rejection',**error.diagnostics})
                     segment.commit();raise
                 if ep is not None:
-                    segment.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'placements':placements,'initial_state_owner':'this_source_episode','seed':claim['seed']},media=media)
+                    segment.write_episode(ep,episode_id=eid,metadata={'success_source':'recording_only','saturation':command_summary(ep),'placements':placements,'initial_state_owner':'this_source_episode'},media=media)
                     for path in media.values():Path(path).unlink()
                     segment.record_attempt(claim,status='success',episode_id=eid);segment.commit();count+=1;retry_state=None;publish_event(owner.root,eid,events)
                 else:
@@ -296,12 +298,12 @@ def run_recorded(plan,*,events,commands):
                 finally:reader.close()
                 targets=recorded.data['joint_targets'].numpy()[source.start:source.stop if source.stop is not None else source.num_frames].copy();stream=iter(targets)
                 if plan.object_order:
-                    restore_episode(env,[0],baseline);reset_placements(plan,env,opts.get('seed',0)+attempt-1)
+                    restore_episode(env,[0],baseline);reset_placements(plan, env)
                 else:
                     from robot_learning_workbench.data.recording import recorded_initial
                     restore_episode(env,[0],recorded_initial(recorded),is_relative=True)
                 segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment);eid='source-'+str(attempt)
-                try:ep,media,initial,status=collect_episode(env,segment,kin,plan=plan,episode_id=eid,seed=claim['seed'],frames=len(targets),read_target=lambda:next(stream),events=events,commands=commands)
+                try:ep,media,initial,status=collect_episode(env, segment, kin, plan=plan, episode_id=eid, frames=len(targets), read_target=lambda : next(stream), events=events, commands=commands)
                 except Exception as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'code':getattr(error,'code','COLLECTION_ERROR'),'reason':str(error),'effect':getattr(error,'effect','unknown')});segment.commit();raise
                 if ep is not None:
@@ -356,10 +358,10 @@ def collect_vector(plan,owner,env,kin,catalog,opts,*,events,commands):
                 try:recorded=reader.load_episode(source.key,'cpu')
                 finally:reader.close()
                 targets=recorded.data['joint_targets'].numpy()[source.start:source.stop if source.stop is not None else source.num_frames].copy()
-                if plan.object_order:restore_episode(env,[i],baseline[i]);reset_placements(plan,env,opts.get('seed',0)+attempt-1,env_index=i)
+                if plan.object_order:restore_episode(env,[i],baseline[i]);reset_placements(plan, env, env_index=i)
                 else:restore_episode(env,[i],recorded_initial(recorded),is_relative=True)
                 segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment)
-                streams[i]=collection_steps(env,segment,kinematics[i],episode_id='source-'+str(attempt),seed=claim['seed'],frames=len(targets),read_target=lambda stream=iter(targets):next(stream),events=send,commands=polls[i],env_index=i)
+                streams[i]=collection_steps(env, segment, kinematics[i], episode_id='source-' + str(attempt), frames=len(targets), read_target=lambda stream=iter(targets): next(stream), events=send, commands=polls[i], env_index=i)
                 pending[i]=(segment,claim,source)
             if not streams:break
             send.refresh()

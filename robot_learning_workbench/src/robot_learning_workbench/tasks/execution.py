@@ -41,7 +41,7 @@ def recorded_signals(signals):
 def placement_signal(plan,row):
     # Preserve the historical pre-step diagnostic only when the declared Task
     # explicitly consumes Pick & Place geometry. Custom Tasks need no cup/grasp.
-    bindings=[b for b in placement_bindings(plan)if b.name in('pick_place.placement','pick_place.v8_annotation','pick_place.v8_datagen','pick_place.v8_evaluation','pick_place.v8_metrics')]
+    bindings=[b for b in placement_bindings(plan)if b.name in('pick_place.placement','pick_place.annotation','pick_place.v8_datagen','pick_place.v8_evaluation','pick_place.v8_metrics')]
     if not bindings:return False
     from .pick_place import v8_placement
     return v8_placement(row,params=bindings[0].params)

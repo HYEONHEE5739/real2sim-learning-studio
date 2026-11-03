@@ -503,6 +503,14 @@ def validate_scene(scene: Mapping[str, Any], calibration: Mapping[str, Any], *, 
             for index, item in enumerate(value): frame_references(item, f"{field}[{index}]")
     for key in ("robot", "objects", "cameras", "supports", "engines"):
         frame_references(scene[key], "scene." + key)
+    for name,obj in scene['objects'].items():
+        if obj.get('spawn','always')not in('always','recipe'):
+            raise SceneError('SCENE_INVALID','objects.'+name+'.spawn','expected always or recipe')
+        current=name;seen=set()
+        while current is not None:
+            if current in seen or current not in scene['objects']:
+                raise SceneError('SCENE_INVALID','objects.'+name+'.parent_object','unknown or cyclic parent object')
+            seen.add(current);current=scene['objects'][current].get('parent_object')
     _calibration_relations(scene, calibration, files)
     _bound_residuals(calibration)
 

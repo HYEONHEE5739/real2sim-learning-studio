@@ -192,10 +192,11 @@ def fixed_xy(request,*,params):
 
 def random_xy(request,*,params):
     context,pose,placed,sizes=_inputs(request,params)
-    if request.xy_m is not None or not callable(getattr(request.rng,'uniform',None)):
-        _fail('INVALID_PLACEMENT',params.object,'Random XY requires explicit RNG and no fixed xy_m',attempts=0)
+    if request.xy_m is not None or request.rng is not None:
+        _fail('INVALID_PLACEMENT',params.object,'Random XY uses fresh entropy; external RNG/fixed xy_m are not accepted',attempts=0)
+    rng=np.random.default_rng()
     try:
-        xyz,attempts=sample_uniform_xy(context['support_pose'],context['support_dimensions'],context['object_dimensions'],request.rng,
+        xyz,attempts=sample_uniform_xy(context['support_pose'],context['support_dimensions'],context['object_dimensions'],rng,
             placed,sizes,margin_m=params.margin_m,separation_m=params.separation_m,clearance_m=params.clearance_m,object_id=params.object)
     except TaskError as error:
         error.diagnostics=MappingProxyType({**error.diagnostics,'support_id':params.support,'frame_id':params.frame,'rules_id':params.rules,'rules_version':1})
@@ -209,12 +210,7 @@ FUNCTIONS={name:FunctionSpec(kind='placement',stages=_STAGES,engines={'independe
     for name,fn in [('placement.fixed_xy',fixed_xy),('placement.random_xy',random_xy)]}
 
 
-def environment_seed(seed,env_index,*,num_envs):
-    """Original reset_workspace seed derivation; caller owns RNG lifetime."""
-    if (type(seed) is not int or seed<0 or type(num_envs) is not int or num_envs<1
-            or type(env_index) is not int or not 0<=env_index<num_envs):
-        _fail('INVALID_PLACEMENT','seed','invalid base seed/environment index/count',attempts=0)
-    return seed if num_envs==1 else int(np.random.SeedSequence([seed,env_index]).generate_state(1)[0])
+
 
 
 # General planar contact is intentionally separate from every v8 calculation above.
@@ -391,11 +387,11 @@ def contact_fixed_xy(request,*,params):
 
 def contact_random_xy(request,*,params):
     context,rotation,occupied=_contact_inputs(request,params)
-    if request.xy_m is not None or not callable(getattr(request.rng,'uniform',None)):
-        _fail('INVALID_PLACEMENT',params.object,'Random contact needs explicit RNG and no fixed XY',attempts=0)
-    low,high=_contact_bounds(context,rotation,params)
+    if request.xy_m is not None or request.rng is not None:
+        _fail('INVALID_PLACEMENT',params.object,'Random contact uses fresh entropy; external RNG/fixed XY are not accepted',attempts=0)
+    low,high=_contact_bounds(context,rotation,params);rng=np.random.default_rng()
     for attempt in range(1,MAX_ATTEMPTS+1):
-        xy=_contact_xy(request.rng.uniform(low,high),params,attempts=attempt)
+        xy=_contact_xy(rng.uniform(low,high),params,attempts=attempt)
         if np.any(xy<low) or np.any(xy>high):
             _fail('INVALID_PLACEMENT',params.object,'RNG response outside requested bounds',attempts=attempt)
         pose,parts=contact_pose(context['parts'],rotation,xy,context['support_pose'])
@@ -552,6 +548,12 @@ def _validate_workspace_params(params,scene):
     if not np.array_equal(_se3(area.get('local_transform',np.eye(4)),params.workspace),np.eye(4)):
         raise ValueError('Workspace box must be centered on its declared Frame')
     support_pose[:3,3]+=support_pose[:3,2]*(top['dimensions_m'][2]*top.get('scale',[1,1,1])[2]/2)
+    # The footprint is entirely inside the workspace box. Its physical sheet
+    # can protrude above the table; contact must clear both collision surfaces.
+    # Keep the table's separate footprint checks and its declared support ID.
+    contact_surface_id=support_id
+    if dims[2]/2>support_pose[2,3]:
+        support_pose[2,3]=dims[2]/2;contact_surface_id=params.workspace
     c,s=np.cos(params.yaw_rad),np.sin(params.yaw_rad);rotation=np.array([[c,-s,0],[s,c,0],[0,0,1.]])
     parts=_workspace_parts(scene,params.object);rotated=np.concatenate(parts)@rotation.T
     low=-dims[:2]/2-rotated[:,:2].min(axis=0);high=dims[:2]/2-rotated[:,:2].max(axis=0)
@@ -562,6 +564,7 @@ def _validate_workspace_params(params,scene):
         try:others[name]=_workspace_parts(scene,name)
         except (ValueError,KeyError,TypeError) as error:errors[name]=str(error)
     context=dict(parts=parts,rotation=rotation,bounds=(low,high),support_pose=support_pose,other_parts=others,other_errors=errors,
+                 contact_surface_id=contact_surface_id,
                  support_id=support_id,support_parts=_workspace_parts(scene,support_id),
                  support_body_pose=_reference_pose(scene,objects[support_id]['frame_id'],params.frame),
                  workspace_dimensions_m=dims[:2],roles={n:o['role'] for n,o in objects.items()})
@@ -608,7 +611,7 @@ def random_workspace(request: PlacementRequest,*,params: WorkspaceParams) -> Pla
             return PlacementResult(params.object,params.frame,pose,attempt,WORKSPACE_RULE,_freeze(dict(
                 valid=True,workspace_id=params.workspace,workspace_dimensions_m=context['workspace_dimensions_m'].tolist(),
                 bounds_m=[low.tolist(),high.tolist()],surface_gap_m=params.separation_m,surface_distances_m=distances,
-                support_id=params.support,physical_collision_checked=False,geometry_rule='convex_footprints_conservative_obstacles',
+                support_id=params.support,contact_surface_id=context['contact_surface_id'],physical_collision_checked=False,geometry_rule='convex_footprints_conservative_obstacles',
                 attempts=attempt,pose=pose.tolist())))
     _fail('INVALID_PLACEMENT',params.object,'Finite workspace candidate budget exhausted',attempts=MAX_ATTEMPTS,
           max_attempts=MAX_ATTEMPTS,frame_id=params.frame,workspace_id=params.workspace,support_id=params.support,
@@ -641,7 +644,7 @@ def workspace_reset_poses(plan: "PreparedRun",occupied_world: Mapping[str,np.nda
         world=_reference_pose(plan.scene,params.frame,'world');inverse=np.linalg.inv(world)
         support_id=getattr(params,'_context',{}).get('support_id')
         local_occupied={n:inverse@pose for n,pose in occupied.items() if n!=support_id and (workspace or plan.scene.scene['objects'][n]['role']=='task_object')}
-        request=PlacementRequest(name,params.frame,params.support,occupied_poses=local_occupied,rng=None if workspace else np.random.default_rng(),rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
+        request=PlacementRequest(name,params.frame,params.support,occupied_poses=local_occupied,rules_id=getattr(params,'rules',None),**dict(binding.request_fields))
         try:
             result=checked_placement(request,plan.tasks.functions[binding.name].callable(request,params=params))
             if isinstance(params,PlacementParams):

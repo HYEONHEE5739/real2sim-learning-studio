@@ -116,7 +116,7 @@ def run(plan,*,events,commands):
                 number=max((a['attempt'] for a in history(owner.root)),default=0)+1;segment=owner.segment('evaluation-'+str(number));claim=owner.claim_attempt(segment)
                 started=time.perf_counter()
                 try:
-                    restore_episode(env,[0],reference);reset_placements(plan,env,claim['seed'])
+                    restore_episode(env,[0],reference);reset_placements(plan, env)
                 except Exception as error:ep,media,report=None,{},execution_failure(error,phase='reset',steps=0)
                 else:ep,media,report=rollout(plan,env,kin,bundle,segment,claim,events=events,commands=commands)
                 fatal=report.pop('_exception',None)
@@ -148,7 +148,7 @@ def rollout_vector(plan,owner,env,kin,bundle,execution,*,events,commands):
         while streams or (available and number<execution['episodes'] and not cancelled):
             while available and number<execution['episodes'] and not cancelled:
                 i=available.pop(0);number+=1;segment=owner.segment('evaluation-'+str(number));claim=owner.claim_attempt(segment);started=time.perf_counter()
-                try:restore_episode(env,[i],references[i]);placements=reset_placements(plan,env,claim['seed'],env_index=i)
+                try:restore_episode(env,[i],references[i]);placements=reset_placements(plan, env, env_index=i)
                 except Exception as error:
                     report=execution_failure(error,phase='reset',steps=0);report.pop('_exception',None);publish_attempt(owner,segment,claim,None,{},report,send);raise
                 streams[i]=rollout_steps(plan,env,kinematics[i],bundles[i],segment,claim,events=send,commands=polls[i],env_index=i);pending[i]=(segment,claim,started,placements)

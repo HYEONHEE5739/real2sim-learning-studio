@@ -153,6 +153,7 @@ class Project:
                     collect(item)
         collect(evidence)
         collect(scene['assets'])
+        collect(scene.get('derived_observations', {}))
 
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()

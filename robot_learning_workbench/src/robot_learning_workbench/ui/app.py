@@ -16,7 +16,7 @@ class Window(QMainWindow):
         from .paths import GROUPS
         self.setStyleSheet(STYLE);self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
         for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
-        self.closing=False;self.cancelled_on_close=set()
+        self.closing=False
         central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
         self.safety=QLabel('연결은 관측으로 시작 · Teleoperation 시작 버튼으로 실제 Leader → Follower 구동');self.safety.setWordWrap(True);layout.addWidget(self.safety)
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
@@ -46,8 +46,6 @@ class Window(QMainWindow):
         for i,(name,page)in enumerate(self.pages):
             self.navigation.addItem(f'{i+1:02d}  {name}');self.stack.addWidget(QWidget()if page is self.curation else page)
             engine=page.engine if isinstance(page,(WorkflowPage,SourcePage))else QWidget()
-            if isinstance(page,WorkflowPage)and page.stage in ('annotation','datagen','simulation_evaluation'):
-                engine.parentWidget().hide()
             self.engine_stack.addWidget(engine)
         self.curation_dialog=QDialog(self);self.curation_dialog.setWindowTitle('Data Curation · Episode 검토');self.curation_dialog.resize(1400,920);self.curation_dialog.setWindowModality(Qt.WindowModality.WindowModal);QVBoxLayout(self.curation_dialog).addWidget(self.curation)
         self.tabs.addTab(self.sessions['capture'],'1 · Scene Prepare');self.tabs.addTab(self.sessions['real_sim'],'2 · Real / Sim');self.tabs.addTab(self.pipeline,'3 · Workspace Pipeline');self.tabs.addTab(self.sessions['precision'],'4 · Precision Calibration')
@@ -93,10 +91,7 @@ class Window(QMainWindow):
         if active:
             self.closing=True
             for page in active:
-                if page in self.sessions.values()or isinstance(page,SourcePage):
-                    page.cancel_run();continue
-                if page.handle and page.handle['run_id'] not in self.cancelled_on_close:
-                    page.cancel_run();self.cancelled_on_close.add(page.handle['run_id'])
+                page.cancel_run()
             self.statusBar().showMessage('취소와 실제 worker/Preview 정리를 기다립니다…');event.ignore();QTimer.singleShot(500,self.close);return
         from PyQt6.QtCore import QProcess
         jobs=self.findChildren(BackendJob)
@@ -106,7 +101,7 @@ class Window(QMainWindow):
         for page in self.sessions.values():page.stop_timers()
         import shutil
         for page in (self.curation,):
-            page.stop_playback();shutil.rmtree(page.preview_directory,ignore_errors=True)
+            page.close_review();shutil.rmtree(page.preview_directory,ignore_errors=True)
         event.accept()
 
 

@@ -4,6 +4,7 @@ import numpy as np
 from real2sim_builder.files import read,sha
 from real2sim_builder.scene import validate,world_pose
 from .calibration import JOINTS,mapper_from_metadata,joint_specs
+from ..engines.mujoco.rendering import camera_rgb
 
 
 def validate_binding(view):
@@ -53,7 +54,7 @@ class AuthoredRenderer:
             for camera in scene['cameras']:
                 index=mujoco.mj_name2id(self.model,mujoco.mjtObj.mjOBJ_CAMERA,camera['id']);pose=world_pose(scene,camera)@OPTICAL_TO_RENDER;self.model.cam_pos[index]=pose[:3,3];self.model.cam_quat[index]=Rotation.from_matrix(pose[:3,:3]).as_quat()[[3,0,1,2]]
             mujoco.mj_forward(self.model,self.data);images={}
-            for n in('side','wrist'):self.renderer.update_scene(self.data,camera=n);images[n]=self.renderer.render().copy()
+            for n in('side','wrist'):images[n]=camera_rgb(self.renderer,self.data,n).copy()
         cameras={c['id']:{'resolution':c['resolution'],'K':c['K']['value'],'T_world_optical':world_pose(scene,c).tolist()}for c in scene['cameras']if c['id']in('side','wrist')}
         return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'engine':self.view.engine,'physics_steps':0,'state_application':'authored_measured_fk',
                 'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED','physical_verified':False}

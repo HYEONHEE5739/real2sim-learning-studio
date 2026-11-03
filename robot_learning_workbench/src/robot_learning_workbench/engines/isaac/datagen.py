@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 from ...generation import mimic
 from ...data.native import load_catalog,open_native,file_sha256
-from .source import settings_for,model_identity
-from robot_learning_workbench.data.recording import validate_recording
+from .source import model_identity
+from robot_learning_workbench.data.recording import validate_recording,datagen_settings
 from ...robot.calibration import JOINTS
 from ...data.recording import record_metrics
 
@@ -18,7 +18,7 @@ def load_inputs(plan):
     if catalog.execution.get('stage')!='annotation' or catalog.execution.get('engine')!='isaac':raise ValueError('Verified Isaac Annotation input required')
     validate_recording(catalog.execution.get('recording',{}))
     if 'partition' not in catalog.execution or catalog.execution['partition'] is None:raise ValueError('Explicit input partition identity required')
-    settings=settings_for(plan,catalog.execution.get('model_config'))
+    settings=datagen_settings(plan,catalog)
     if catalog.execution.get('model_sha256')!=model_identity(plan.scene,settings):raise ValueError('Annotation model/physics identity differs')
     from ...tasks.execution import mimic_objects
     obj,target=mimic_objects(plan);conf=mimic.configuration(obj,target,plan.effective_settings['execution']['seed']);records=[]
@@ -142,9 +142,9 @@ def run(plan,*,events,commands):
     random_poses=uses_workspace_random(plan)
     verify_prepared_inputs(plan);catalog,pool,settings,kin=load_inputs(plan);opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='datagen')
     execution=execution_contract(plan,settings)
-    execution.update(stage='datagen',task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
+    execution.update(stage='datagen',seed=opts['seed'],task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
         target_successes=opts['target_successes'],max_attempts=opts['max_attempts'],max_episode_steps=opts.get('max_episode_steps',2000),
-        rng_policy=('entropy_workspace_poses_episode_reset_v1' if 'num_episodes' in opts else 'entropy_workspace_poses_one_attempt_per_worker_v1') if random_poses else 'attempt_seed_sequence_fixed_placement_no_reset_draws',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
+        rng_policy='attempt_seed_mimic_entropy_placement_v1',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
     previous=plan.resolved_inputs.get('resume_dataset')
     if previous and len(load_catalog(previous['path']).episodes)>=opts['target_successes']:raise ValueError('Cumulative generation target must exceed previous successes')
     owner=env=None;cancelled=False;plan.output_path.parent.mkdir(parents=True,exist_ok=True)
@@ -158,7 +158,7 @@ def run(plan,*,events,commands):
                 attempt+=1;segment=owner.segment('datagen-'+str(attempt));claim=owner.claim_attempt(segment)
                 env.reset()
                 if random_poses:
-                    try:placements=reset_placements(plan,env,None)
+                    try:placements=reset_placements(plan, env)
                     except TaskError as error:
                         segment.record_attempt(claim,status='failure',diagnostics={'category':'invalid_placement','code':'INVALID_PLACEMENT',
                             'reason':str(error),'placement':_plain(getattr(error,'diagnostics',{})),'planned_placements':_plain(getattr(error,'placement_records',{})),'steps':0})
@@ -167,7 +167,7 @@ def run(plan,*,events,commands):
                         segment.record_attempt(claim,status='failure',diagnostics={'category':'engine_reset_error','reason':str(error),
                             'placements':_plain(getattr(error,'placement_records',{})),'effect':'unknown','steps':0})
                         segment.commit();raise
-                else:reset_placements(plan,env,opts['seed'])
+                else:reset_placements(plan, env)
                 ep,media,report=generate_attempt(plan,env,pool,kin,segment,claim,events=events,commands=commands)
                 if random_poses:report['placements']=placements
                 summary={k:v for k,v in report.items() if k!='ik_diagnostics'};rows=report['ik_diagnostics']
@@ -215,7 +215,7 @@ def run_vector(plan,owner,env,pool,catalog,kin,opts,*,events,commands):
             while available and count+len(streams)<opts['target_successes'] and attempt<opts['max_attempts'] and not cancelled:
                 i=available.pop(0);attempt+=1;segment=owner.segment('datagen-'+str(attempt));claim=owner.claim_attempt(segment)
                 try:
-                    env.reset(env_ids=torch.tensor([i],dtype=torch.long,device=env.device));placements=reset_placements(plan,env,None if random else opts['seed'],env_index=i)
+                    env.reset(env_ids=torch.tensor([i],dtype=torch.long,device=env.device));placements=reset_placements(plan, env, env_index=i)
                 except TaskError as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'env_index':i,'category':'invalid_placement','code':error.code,'reason':str(error),'placements':getattr(error,'placement_records',{}),'steps':0});segment.commit();available.append(i);continue
                 except Exception as error:

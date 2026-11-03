@@ -260,10 +260,11 @@ class NativeRun:
         number=max(numbers,default=0)+1
         limit=self.execution.get('max_attempts')
         if limit is not None and number>limit:raise DataError('BUDGET_EXHAUSTED','attempt','global max attempts reached')
-        base=self.execution.get('seed')
-        if type(base) is not int or base<0:raise DataError('DATA_INVALID','seed','explicit seed required')
-        seed=int(np.random.SeedSequence([base,number]).generate_state(1)[0]) if self.execution['stage']=='datagen' else (base+number-1)%2**32
-        claim={'attempt':number,'seed':seed,'intent_id':segment.claim['intent_id'],'state':'claimed'}
+        claim={'attempt':number,'intent_id':segment.claim['intent_id'],'state':'claimed'}
+        if self.execution['stage']not in('source','annotation'):
+            base=self.execution.get('seed')
+            if type(base)is not int or base<0:raise DataError('DATA_INVALID','seed','explicit seed required')
+            claim['seed']=int(np.random.SeedSequence([base,number]).generate_state(1)[0])if self.execution['stage']=='datagen'else(base+number-1)%2**32
         atomic_json(self.root/'attempts'/f'{number:08d}.json',claim,exclusive=True)
         return claim
 
@@ -422,7 +423,8 @@ def recover(root,*,acknowledge_interrupted=False):
 
 def _validate_continuation(catalog,execution,*,allow_producer_update=False):
     old=catalog.execution
-    required={'scene_identity','calibration','task_code','seed','engine','recording','model_sha256','active_objects','partition','rng_policy'}
+    required={'scene_identity','calibration','task_code','engine','recording','model_sha256','active_objects','partition','rng_policy'}
+    if old.get('stage')in('datagen','simulation_evaluation'):required.add('seed')
     if old.get('stage')=='simulation_evaluation':required.update(('policy_identity','evaluation_contract'))
     if old.get('stage')=='datagen':required.update(('annotated_input','source_pool_order'))
     if not required<=old.keys() or any(old[k] is None for k in required) or old.get('archive_only') or (old['stage']=='datagen' and not old.get('ik')):raise DataError('RESUME_INCOMPATIBLE','execution','essential historical identity missing')
@@ -600,3 +602,15 @@ def collection_settings(options,output,*,stage):
     if stage=='datagen':settings['max_attempts']=attempt+settings['max_attempts']
     settings['previous_episodes']=count;settings['requested_additions']=settings['num_episodes']
     return settings
+
+
+def task_object_ids(execution):
+    """Recorded task targets; old recordings use their explicit placement list."""
+    if 'task_objects'in execution:
+        names=execution['task_objects']
+        if not isinstance(names,(list,tuple))or any(not isinstance(name,str)or not name for name in names):
+            raise DataError('DATA_INVALID','task_objects','Expected recorded object IDs')
+        return tuple(dict.fromkeys(names))
+    placements=execution.get('placements',{})
+    names=[name[len('objects.'):-len('.placement')]for name in placements if name.startswith('objects.')and name.endswith('.placement')]
+    return tuple(names or execution.get('active_objects',()))

@@ -17,6 +17,7 @@ def run(root):
         if view.identity!=config['identity']:raise ValueError('Scene changed before render child startup')
         with create_renderer(view,root/'runtime')as renderer:
             atomic_json(root/'ready.json',{'ready':True,'identity':view.identity})
+            last_target=None;next_step=time.monotonic()
             while not(root/'stop').exists():
                 request=None;capture=False
                 for name in('capture.json','latest.json'):
@@ -26,8 +27,14 @@ def run(root):
                     if not {'id','q','requested_ns'}<=set(candidate)or set(candidate)-{'id','q','requested_ns'}:raise ValueError('Invalid render request')
                     identifier(candidate['id'])
                     if candidate['id']!=seen.get(name):request=candidate;capture=name=='capture.json';break
-                if request is None:time.sleep(.01);continue
-                seen['capture.json'if capture else'latest.json']=request['id'];result=renderer.render(request['q']);generation+=1
+                now=time.monotonic()
+                if now<next_step:time.sleep(min(.01,next_step-now));continue
+                if request is None:
+                    if last_target is not None:
+                        renderer.advance(last_target);next_step=now+renderer.control_dt_s
+                    else:time.sleep(.01)
+                    continue
+                seen['capture.json'if capture else'latest.json']=request['id'];last_target=request['q'];result=renderer.render(last_target);generation+=1;next_step=now+renderer.control_dt_s
                 folder=root/'captures'/request['id']if capture else root/'live'/str(generation%2);folder.mkdir(parents=True,exist_ok=True)
                 files={}
                 for name,rgb in result.pop('images').items():

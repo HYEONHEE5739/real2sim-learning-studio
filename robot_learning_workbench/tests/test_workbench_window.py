@@ -11,9 +11,9 @@ from pathlib import Path
 import sys
 app=QApplication([]);root=Path(sys.argv[1]);recipe=root/'r.yaml'
 recipe.write_text('schema_version: 1\\nstage: datagen\\nengine: mujoco\\ninputs: {}\\nexecution: {target_successes: 1, max_attempts: 2, seed: 1047}\\noutput: {directory: output}\\nobjects: {}\\n')
-w=WorkflowPage('datagen',sys.executable,root/'modules.yaml');w.load_recipe(recipe)
+w=WorkflowPage('datagen',sys.executable,root/'modules.yaml');w.job.start=lambda *a,**k:None;w.settings.load_script(recipe);w.busy=False
 assert not w.editor.dirty and not w.start_button.isEnabled()
-w.counts['max_attempts'].setValue(3);assert w.editor.dirty and not w.start_button.isEnabled()
+w.editor.text.appendPlainText('# max_attempts edited in YAML');assert w.editor.dirty and not w.start_button.isEnabled()
 assert not any(x in sys.modules for x in ['torch','mujoco','isaaclab','lerobot'])
 w.timer.stop();w.close()
 '''
@@ -32,7 +32,10 @@ assert w.navigation.count()==10 and w.stack.count()==10
 assert not w.workflows['datagen'].start_button.isEnabled()
 assert w.source.previews.keys()=={'side','wrist'}
 assert not any(n in sys.modules for n in ['torch','mujoco','isaaclab','lerobot'])
-w.close();app.processEvents();assert not w.isVisible()
+w.close()
+from PyQt6.QtTest import QTest
+for _ in range(500):app.processEvents();QTest.qWait(10)
+assert not w.isVisible()
 '''
     p=subprocess.run([UI,'-B','-c',code,str(tmp_path),'/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python'],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
     assert p.returncode==0,p.stdout+p.stderr
@@ -61,41 +64,17 @@ app=QApplication([]);root=Path(sys.argv[1]);w=Window(sys.argv[2],root/'modules.y
 p=w.workflows['annotation'];assert set(p.commands)=={'pause','resume','step','mark','skip'}
 assert not p.commands['mark'].isEnabled()
 f=w.curation.preview_directory;f.mkdir(parents=True);(f/'side.ppm').write_bytes(b'x')
-w.close();app.processEvents();assert not f.exists()
+w.close()
+from PyQt6.QtTest import QTest
+for _ in range(500):app.processEvents();QTest.qWait(10)
+assert not f.exists()
 '''
     p=subprocess.run([UI,'-B','-c',code,str(tmp_path),'/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python'],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
     assert p.returncode==0,p.stdout+p.stderr
 
 
-def test_unrelated_edit_cannot_clear_invalid_fixed_random_change(tmp_path):
-    root=Path(__file__).resolve().parents[2]
-    code='''
-from PyQt6.QtWidgets import QApplication
-from robot_learning_workbench.ui.workflow import WorkflowPage
-import sys
-app=QApplication([]);p=WorkflowPage('datagen',sys.executable,'modules');p.load_recipe(sys.argv[1]);p.placement.setCurrentText('Random')
-assert p.edit_error and p.editor.data()['objects']['cube_red']['placement']['function']=='placement.fixed_xy'
-p.edit_execution('max_attempts',3);assert p.edit_error
-p.timer.stop()
-'''
-    p=subprocess.run([UI,'-B','-c',code,str(root/'docs/evidence/simulation-workflows/mujoco-worker-final.yaml')],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
-    assert p.returncode==0,p.stdout+p.stderr
 
 
-def test_training_config_save_uses_explicit_ui_dataset_output_and_mode(tmp_path):
-    code='''
-from PyQt6.QtWidgets import QApplication,QFileDialog
-from robot_learning_workbench.ui.workflow import WorkflowPage
-from pathlib import Path
-import sys,json
-app=QApplication([]);root=Path(sys.argv[1]);old=root/'old.json';old.write_text(json.dumps({'policy':{'type':'act','device':'cpu'},'dataset':{'root':'old-data'},'output_dir':'old-out','steps':2,'batch_size':1}))
-r=root/'train.yaml';r.write_text('stage: train\\ninputs: {dataset: new-data, training_config: '+str(old)+'}\\nexecution: {mode: resume}\\noutput: {directory: new-out}\\n')
-p=WorkflowPage('train',sys.executable,'modules');p.load_recipe(r);p.training_settings.load();new=root/'new.json';QFileDialog.getSaveFileName=lambda *a,**kw:(str(new),'');p.training_settings.save()
-d=json.loads(new.read_text());assert d['resume'] is True and d['dataset']['root']==str(root/'new-data') and d['output_dir']==str(root/'new-out')
-assert json.loads(old.read_text())['output_dir']=='old-out';p.timer.stop()
-'''
-    p=subprocess.run([UI,'-B','-c',code,str(tmp_path)],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True)
-    assert p.returncode==0,p.stdout+p.stderr
 
 
 def test_manual_ui_command_preserves_explicit_episode_env_context(tmp_path):

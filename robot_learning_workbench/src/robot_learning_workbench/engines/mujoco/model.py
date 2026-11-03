@@ -68,7 +68,7 @@ def robot_xml(urdf, base_pose, finger_convex, contact_pads):
             motion[:3, :3] = Rotation.from_rotvec(axis / np.linalg.norm(axis) * offsets[joint.get('name')]).as_matrix()
             frame = frame @ motion
         if name == 'tool0':
-            ET.SubElement(parent, 'site', name='tool0', size='.002', rgba='0 1 0 1', **pose_attrs(frame))
+            ET.SubElement(parent, 'site', name='tool0', size='.002', rgba='0 1 0 0', **pose_attrs(frame))
             return
         body = ET.SubElement(parent, 'body', name='robot_' + name, **pose_attrs(frame))
         if joint is not None and joint.get('type') != 'fixed':
@@ -290,7 +290,8 @@ def build_model(scene, prepared):
             if frame.startswith('robot_link_'):return frame.removeprefix('robot_link_')
             frame=canonical['frames'][frame]['parent']
         return None
-    excluded={name for name,obj in objects.items() if obj['role']=='manipulable_object' and name not in dynamic}
+    from scene_contract.objects import present_objects
+    excluded=set(objects)-set(present_objects(scene.scene,dynamic))
     if cfg.object_ids is not None:excluded.update(name for name,obj in objects.items() if obj['role'] in ('manipulable_object','receptacle') and name not in cfg.object_ids)
     while True:
         dependent={name for name,obj in objects.items() if obj.get('parent_object') in excluded}
@@ -361,7 +362,17 @@ def build_native_model(package,cfg):
     """Bind a declared articulated MJCF directly; no v8 geometry reconstruction."""
     import mujoco
     binding=package.scene['robot']['bindings']['mujoco'];path=_local(package,binding['asset_path'])
-    model=mujoco.MjModel.from_xml_path(str(path));model.opt.timestep=cfg.physics_timestep_s
+    from scene_contract.objects import present_objects
+    present=set(present_objects(package.scene,cfg.active_object_ids))
+    excluded=set(package.scene['objects'])-present
+    if excluded:
+        spec=mujoco.MjSpec.from_file(str(path))
+        for name in excluded:
+            body=spec.body(package.scene['objects'][name].get('bindings',{}).get('mujoco',{}).get('body_name',name))
+            if body is not None:spec.delete(body)
+        model=spec.compile()
+    else:model=mujoco.MjModel.from_xml_path(str(path))
+    model.opt.timestep=cfg.physics_timestep_s
     def required(kind,name):
         index=mujoco.mj_name2id(model,kind,name)
         if index<0:raise ValueError('Declared MJCF is missing '+name)
@@ -379,7 +390,7 @@ def build_native_model(package,cfg):
         # cannot consume an absolute-radian Target merely because dimensions fit.
         if model.actuator_biastype[index]!=mujoco.mjtBias.mjBIAS_AFFINE or model.actuator_gainprm[index,0]<=0 or not np.isclose(model.actuator_biasprm[index,1],-model.actuator_gainprm[index,0])or not np.array_equal(model.actuator_gear[index],np.array([1.,0,0,0,0,0])):raise ValueError('Declared MJCF actuator must consume absolute model radians with unit joint gear')
         actuators.append(index)
-    objects={n:required(mujoco.mjtObj.mjOBJ_BODY,o.get('bindings',{}).get('mujoco',{}).get('body_name',n))for n,o in package.scene['objects'].items()if o['role']!='reference_robot'}
+    objects={n:required(mujoco.mjtObj.mjOBJ_BODY,o.get('bindings',{}).get('mujoco',{}).get('body_name',n))for n,o in package.scene['objects'].items()if n in present and o['role']!='reference_robot'}
     indices={}
     for name in cfg.active_object_ids:
         body=objects[name];joint=model.body_jntadr[body]
@@ -395,4 +406,6 @@ def build_native_model(package,cfg):
     base_id=required(mujoco.mjtObj.mjOBJ_BODY,binding.get('base_body',cfg.robot_base_body));actual=np.eye(4);actual[:3,3]=reference.xpos[base_id];actual[:3,:3]=reference.xmat[base_id].reshape(3,3)
     if not np.allclose(actual,base,rtol=0,atol=1e-6):raise ValueError('Native MJCF robot base differs from declared Scene robot_base frame')
     identity=hashlib.sha256((package.identity.manifest_sha256+json.dumps({'settings':dict(cfg.__dict__)},sort_keys=True)).encode()).hexdigest()
-    return model,ModelBindings(package.identity,identity,hashlib.sha256(urdf.read_bytes()).hexdigest(),joints,tuple(int(model.jnt_qposadr[i])for i in joints),tuple(int(model.jnt_dofadr[i])for i in joints),tuple(actuators),limits,initial,tuple(cfg.active_object_ids),indices,objects,required(mujoco.mjtObj.mjOBJ_SITE,binding.get('eef_site',cfg.eef_site)),fingers,tuple(i for i in range(model.ngeom)if model.geom_bodyid[i]in fingers and model.geom_contype[i]),cameras,base,cfg.decimation,cfg.width,cfg.height,{})
+    eef_id=required(mujoco.mjtObj.mjOBJ_SITE,binding.get('eef_site',cfg.eef_site))
+    model.site_rgba[eef_id,3]=0  # Coordinate/FK binding stays; no visual tool marker.
+    return model,ModelBindings(package.identity,identity,hashlib.sha256(urdf.read_bytes()).hexdigest(),joints,tuple(int(model.jnt_qposadr[i])for i in joints),tuple(int(model.jnt_dofadr[i])for i in joints),tuple(actuators),limits,initial,tuple(cfg.active_object_ids),indices,objects,eef_id,fingers,tuple(i for i in range(model.ngeom)if model.geom_bodyid[i]in fingers and model.geom_contype[i]),cameras,base,cfg.decimation,cfg.width,cfg.height,{})

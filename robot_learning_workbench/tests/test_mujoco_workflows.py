@@ -27,7 +27,7 @@ def test_control_cancel_and_stale_mark():
 def test_source_recipe_accepts_explicit_engine_input_and_duration(tmp_path):
     import yaml
     from robot_learning_workbench.recipe import read_recipe
-    recipe={'schema_version':1,'stage':'source','engine':'mujoco','inputs':{'scene':'scene.json','device_profile':'leader.json','engine_config':'engine.json'},'execution':{'episodes':1,'seed':1047,'episode_time_s':1.,'reset_time_s':0.},'output':{'directory':'out'},'objects':{'cube_red':{'placement':{'function':'placement.fixed_xy','params':{'frame':'workspace','support':'table','xy_m':[0,0]}}}}}
+    recipe={'schema_version':1,'stage':'source','engine':'mujoco','inputs':{'scene':'scene.json','device_profile':'leader.json','engine_config':'engine.json'},'execution':{'episodes':1,'episode_time_s':1.,'reset_time_s':0.},'output':{'directory':'out'},'objects':{'cube_red':{'placement':{'function':'placement.fixed_xy','params':{'frame':'workspace','support':'table','xy_m':[0,0]}}}}}
     p=tmp_path/'r.yaml';p.write_text(yaml.safe_dump(recipe));doc=read_recipe(p)
     assert doc.spec.execution['episode_time_s']==1.
     recipe['execution']['episode_time_s']=0;p.write_text(yaml.safe_dump(recipe))
@@ -164,7 +164,7 @@ def test_actual_annotation_cancel_never_publishes_partial_episode(tmp_path):
     from robot_learning_workbench.data.native import history
     settings=json.loads((ROOT/'docs/evidence/e01-v8-collision/runtime-inputs.json').read_text())
     original=ROOT/'docs/evidence/mujoco-workflows/runs-final/source'
-    spec=dict(schema_version=1,stage='annotation',engine='mujoco',inputs={'scene':str(Path(settings['package_root'])/'scene.json'),'dataset':str(original)},execution={'mode':'auto'},functions={'acceptance':{'function':'pick_place.v8_annotation','params':{'object':'cube_red','target':'cup_a'}}},output={'directory':str(tmp_path/'cancelled')})
+    spec=dict(schema_version=1,stage='annotation',engine='mujoco',inputs={'scene':str(Path(settings['package_root'])/'scene.json'),'dataset':str(original)},execution={'mode':'auto'},functions={'acceptance':{'function':'pick_place.annotation','params':{'object':'cube_red','target':'cup_a'}}},output={'directory':str(tmp_path/'cancelled')})
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec));registry=load_registry(('robot_learning_workbench.tasks.pick_place',));plan=prepare_recipe(read_recipe(path),tasks=registry)
     events=[]
     def commands():

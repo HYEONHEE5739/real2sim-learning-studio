@@ -11,7 +11,7 @@ inputs: {scene: scene/scene.json, device_profile: leader.json}
 objects:
   red:
     placement: {function: placement.random_xy, params: {frame: workspace, support: top, rules: v8_preserved}}
-execution: {episodes: 2, seed: 42}
+execution: {episodes: 2}
 output: {directory: outputs/source}
 '''
 
@@ -29,10 +29,10 @@ def test_recipe_exact_bytes_order_and_no_task_import(tmp_path):
 
 
 @pytest.mark.parametrize('change',[
- lambda s:s+'surprise: true\n',lambda s:s.replace('seed: 42','seed: true'),lambda s:s.replace('episodes: 2','episodes: 0'),
- lambda s:s.replace('engine: mujoco','engine: bullet'),lambda s:s.replace('seed: 42','seed: .nan'),
- lambda s:s.replace('schema_version: 1','schema_version: 2'),lambda s:s.replace('seed: 42','seed: 1, seed: 2'),
- lambda s:s.replace('inputs: {scene:', 'inputs: &a {scene:'),lambda s:s.replace('seed: 42','seed: !!python/object:os.system {}'),
+ lambda s:s+'surprise: true\n',lambda s:s.replace('episodes: 2','seed: true'),lambda s:s.replace('episodes: 2','episodes: 0'),
+ lambda s:s.replace('engine: mujoco','engine: bullet'),lambda s:s.replace('episodes: 2','seed: .nan'),
+ lambda s:s.replace('schema_version: 1','schema_version: 2'),lambda s:s.replace('episodes: 2','seed: 1, seed: 2'),
+ lambda s:s.replace('inputs: {scene:', 'inputs: &a {scene:'),lambda s:s.replace('episodes: 2','seed: !!python/object:os.system {}'),
  lambda s:s.replace('stage: source','stage: unknown'),lambda s:s.replace('episodes: 2','episodes: "2"'),
  lambda s:s.replace('objects:','functions: {success: {function: x, params: {}}}\nobjects:'),
 ])

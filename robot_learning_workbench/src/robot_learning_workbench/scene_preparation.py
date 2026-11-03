@@ -35,7 +35,7 @@ def scene_details(path):
         from real2sim_builder.scene import validate
         try:validate(read(current),project.root,complete=True);ready=True;needs=[]
         except(ValueError,FileNotFoundError)as error:needs=[str(error)]
-    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':notes,'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
+    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':notes,'notes_saved':bool(evidence.get('briefs')),'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
 
 
 def save_inputs(path,files,notes):
@@ -64,7 +64,7 @@ def save_inputs(path,files,notes):
                 write(project.root/'input/evidence.yaml',evidence);project.invalidate()
     with exclusive(project):
         previous=scene_details(project.root)['notes']
-        if previous!=notes:
+        if previous!=notes or not project.evidence.get('briefs'):
             with tempfile.TemporaryDirectory(dir=project.root/'scratch')as temporary:
                 file=Path(temporary)/'scene-notes.txt';file.write_text(notes);add_brief(project,file)
     return scene_details(project.root)

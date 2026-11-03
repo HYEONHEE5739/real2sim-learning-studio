@@ -1,40 +1,44 @@
-"""Explicit Hub controls on the existing Recipe/Worker page."""
-from PyQt6.QtWidgets import QWidget,QHBoxLayout,QComboBox,QLineEdit,QPushButton,QCheckBox,QLabel,QMessageBox,QVBoxLayout,QFormLayout
+"""Explicit Hub actions read the same YAML buffer as the pipeline worker."""
+from PyQt6.QtWidgets import QWidget,QHBoxLayout,QPushButton,QMessageBox
+from PyQt6.QtCore import QProcess
 from .jobs import BackendJob
 
 
-class HubSettings(QWidget):
+class HubActions(QWidget):
     def __init__(self,page):
-        super().__init__(page);self.page=page;layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0);row=QVBoxLayout();layout.addLayout(row)
-        self.kind=QComboBox();self.kind.addItems(['dataset','model']);self.parent_commit=QLineEdit();self.parent_commit.setPlaceholderText('업로드 대상 parent Commit')
-        self.private=QCheckBox('Private Repo');self.confirm=QCheckBox('선택 artifact 업로드 승인');resolve=QPushButton('Revision 명시 Resolve')
-        for w in (QLabel('Repo 종류'),self.kind,resolve):row.addWidget(w)
-        if page.stage=='hub_upload':
-            for w in (self.parent_commit,self.private,self.confirm):row.addWidget(w)
-        self.kind.currentTextChanged.connect(lambda x:page.edit_execution('repo_type',x))
-        self.parent_commit.editingFinished.connect(lambda:page.edit_execution('parent_commit',self.parent_commit.text()))
-        self.private.toggled.connect(lambda x:page.edit_execution('private',x));self.confirm.toggled.connect(lambda x:page.edit_execution('confirm_upload',x))
-        self.job=BackendJob(page.backend_python,self)
-        self.job.finished.connect(self.resolved);resolve.clicked.connect(self.resolve)
-        if page.stage=='hub_download':row.addWidget(self.private)
-        create=QPushButton('새 Repo 생성 (별도 승인)');row.addWidget(create);create.clicked.connect(self.create_repo)
-    def create_repo(self):
-        repo=self.page.inputs['repo_id'].text();kind=self.kind.currentText();private=self.private.isChecked()
-        choice=QMessageBox.question(self,'Hugging Face 원격 생성 승인',f'{kind} Repo {repo}\nPrivate={private}\n새 저장소를 생성합니다. 기존 Repo 업로드와 별도 작업입니다.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-        if choice!=QMessageBox.StandardButton.Yes:return
-        self.job.start('hub_create',repo_id=repo,repo_type=kind,private=private,confirm=True)
-    def sync(self,data):
-        execution=data['execution'];self.kind.setCurrentText(execution.get('repo_type','dataset'));self.parent_commit.setText(execution.get('parent_commit',''));self.private.setChecked(execution.get('private',False));self.confirm.setChecked(False)
-        if self.page.stage=='hub_upload' and execution.get('confirm_upload'):
-            self.page.editor.update(lambda doc:doc['execution'].__setitem__('confirm_upload',False))
+        super().__init__(page);self.page=page;self.version=None;self.operation=None
+        row=QHBoxLayout(self);row.setContentsMargins(0,0,0,0)
+        self.resolve_button=QPushButton('Revision 조회');self.create_button=QPushButton('새 Repo 생성')
+        row.addWidget(self.resolve_button);row.addWidget(self.create_button)
+        self.resolve_button.clicked.connect(self.resolve);self.create_button.clicked.connect(self.create)
+        self.job=BackendJob(page.backend_python,self);self.job.finished.connect(self.received)
+
+    def arguments(self):
+        data=self.page.editor.data();repo=data.get('inputs',{}).get('repo_id','')
+        if not repo:raise ValueError('YAML의 inputs.repo_id를 입력하세요.')
+        return data,repo,data.get('execution',{}).get('repo_type','dataset')
+
     def resolve(self):
-        try:self.job.start('hub_resolve',repo_id=self.page.inputs['repo_id'].text(),repo_type=self.kind.currentText(),revision=self.page.inputs['revision'].text() or 'main')
-        except Exception as error:self.page.state.setText(str(error))
-    def resolved(self,result):
-        if not result.get('ok'):self.page.state.setText(result['error']['message']);return
-        value=result['result']
-        if value.get('created'):
-            self.page.state.setText('Repo 생성됨 · '+value['url']+' · Upload는 별도 승인/Resolve 필요');return
-        self.page.state.setText('Remote Commit '+value['commit']+' · private='+str(value['private'])+' · 다운로드/업로드는 실행 버튼으로 별도 요청')
-        if self.page.stage=='hub_download':self.page.inputs['revision'].setText(value['commit']);self.page.edit_input('revision',value['commit'])
-        else:self.parent_commit.setText(value['commit']);self.page.edit_execution('parent_commit',value['commit']);self.private.setChecked(value['private'])
+        try:
+            if self.job.process.state()!=QProcess.ProcessState.NotRunning:return
+            data,repo,kind=self.arguments();self.version=self.page.settings.version;self.operation='resolve'
+            self.job.start('hub_resolve',repo_id=repo,repo_type=kind,revision=data['inputs'].get('revision')or'main')
+        except Exception as error:self.page.show_error(str(error))
+
+    def create(self):
+        try:
+            if self.job.process.state()!=QProcess.ProcessState.NotRunning:return
+            data,repo,kind=self.arguments();private=data.get('execution',{}).get('private',True)
+            if QMessageBox.question(self,'Hub 저장소 생성',f'{kind}: {repo}\nPrivate={private}\n새 원격 저장소를 생성할까요?',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            self.operation='create';self.version=self.page.settings.version;self.job.start('hub_create',repo_id=repo,repo_type=kind,private=private,confirm=True)
+        except Exception as error:self.page.show_error(str(error))
+
+    def received(self,response):
+        if not response.get('ok'):self.page.show_error(response.get('error',{}).get('message','Hub 작업 실패'));return
+        result=response['result']
+        if self.operation=='create':self.page.show_error('Repo 생성 완료 · '+result['url']);return
+        if self.version!=self.page.settings.version:self.page.show_error('조회 중 Script가 변경되어 결과를 적용하지 않았습니다.');return
+        def edit(data):
+            data['inputs']['revision']=result['commit']
+            if self.page.stage=='hub_upload':data['execution'].update(parent_commit=result['commit'],private=result['private'],confirm_upload=False)
+        self.page.settings.update(edit);self.page.show_error('Commit '+result['commit']+' · 저장 및 적용 후 실행하세요.')

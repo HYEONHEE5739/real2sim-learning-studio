@@ -10,6 +10,17 @@
 - 원 사진·Snapshot·SDK/Precision·기존 Export는 유지한다. 새 Scene은 새 Project, 기존 정합 개선은 명시 baseline과 별도 Candidate를 사용한다. Current와 best OPEN Candidate가 다를 수 있으므로 실제 signature를 확인한다.
 - RGB만으로 metric scale, 숨은 두께, 마찰, 물리 접촉 정확도를 확정할 수 없다. 자료 부족은 최소 추가 측정과 이유로 보고한다. 가능한 추정 Scene 제작까지 중단해야 한다는 뜻은 아니며 검토 결과를 UNVALIDATED로 구분한다.
 
+## 1-A. 관측 배치와 실행 물체 구성
+
+- 사용자 메모의 기본 구성요소/선택형 작업 물체를 각 Object의 `spawn: always|recipe`로
+  명시한다. 역할·질량·RigidBody 여부로 생성 정책을 대신하지 않는다.
+- Scene에는 선택할 수 있는 모든 자산과 관측 배치를 보존한다. 작업 실행 시 `recipe` 물체는
+  Script에 선언한 것만 생성한다. 화면만 숨기고 충돌체·물리 상태를 남기지 않는다.
+- 선택에서 빠진 부모 물체의 부속물도 빠져야 한다. `parent_object`를 실제 소유 관계에 맞게 선언한다.
+- `task_object`는 Workbench Script의 Curation 분석 대상 flag이며 Builder의 생성 정책과 별개다.
+  여러 작업 대상의 초기 위치를 고를 수 있도록 기록에 Object ID를 보존한다.
+- 기존 닫힌 Scene과 과거 녹화는 보존한다. 새로운 생성 정책을 기존 데이터에 소급 적용하지 않는다.
+
 ## 2. 좌표·단위·모델 규칙
 
 - Canonical authoring Scene에서 USD/MJCF를 각각 만든다. USD→MJCF 변환을 Scene의 기준으로 삼지 않는다.
@@ -53,6 +64,22 @@
 - Bootstrap은 초기 shared focal/extrinsic 추정이다. 중심점·aspect/distortion을 고정한 초기 추정을 실제 lens 보정 완료로 부르지 않는다. 이후 intrinsics/camera 그룹과 별도 k1 distortion, quality audit를 구분한다.
 - Rank/scaled Jacobian/condition/불확실성으로 focal-depth-translation 등의 구분 가능성을 본다. 현재 quality audit는 train 12개와 별도 Session verification 6개 이상의 대응 조건도 갖는다. 정확한 현재 조건은 [geometry.py](src/real2sim_builder/calibration/geometry.py)를 따른다.
 - Manual Precision/FK를 사용한 Wrist를 물리 calibration 인증으로 승격하지 않는다. K/pose/distortion/resolution/registration/FK identity가 바뀌면 이전 audit 결과를 그대로 적용하지 않는다. Inspection camera는 실제 observation camera와 구분한다.
+
+### Codex 자동 관측과 공동 정합
+
+- 종이/Workspace 테두리는 자동 Fitting의 XY 허용 영역이 아니다. 블록이 경계에 걸치거나 밖에 있어도 저장을 거부하지 않는다. `supports`는 명시한 수평면의 높이·upright 결합이며, Workspace 배치 함수나 Task의 배치 제한과는 별개다.
+
+- 본 시스템에서 영상 관측 생성/선택과 Fitting 도구 실행 주체는 **Codex**이며 일반 사용자가 Landmark 편집기를 조작하지 않는다.
+- 자동 Detector의 mask/UV 제안은 `estimated/derived`로 기록한다. CV 검출 confidence는 Camera/3D/실측 확신이 아니다. 가려진 컵 림이나 보이지 않는 Block corner를 2D에서 임의 확정하지 않는다.
+- `same scene_state_id`의 물체는 **여러 camera×pose에서 하나의 world pose**를 공유한다. 새 layout은 다른 Scene State로 분리한다.
+- Side는 고정 extrinsic, Wrist는 `T_world_base × FK(q_measured) × T_link_camera`라는 **하나의 link-local camera mount**를 공유한다. 각 자세별로 별도 Wrist extrinsic을 만들지 않는다.
+- 실측 K/치수/Robot Base/q/URDF는 잠그고 미확정 Camera Pose, Wrist Mount, Object XY/Yaw 등 필요한 변수를 제한적으로 공동 최적화한다. `measured/calibrated` 보호는 유지한다.
+- 한 view나 특정 Gripper만 좋아지고 컵·블록이 나빠지는 후보는 전체 개선으로 자동 승격하지 않는다. camera×pose×object 지표를 같이 본다.
+- 초안 제작을 위해 독립 검증 자료를 강제하지는 않는다. **Draft Fit은 optimized/unverified**, 독립적 수치 검토/물리 검증은 별개의 결정이다. 단 실제 모델·시간·Camera·좌표·자산 불일치는 거부한다.
+- 외형 렌더와 접촉용 collision은 분리해서 다룬다. 픽셀을 맞추기 위해 마찰, 손가락 충돌 형상이나 측정 q를 바꾸지 않는다.
+- 최소 추가 촬영을 요청할 경우 `어느 Camera`, `어느 자세/시점`, `어떤 가림을 풀지`, `왜 해당 관측이 필요한지`를 Codex가 구체적으로 제시한다.
+
+현재 구현은 `auto-observe` → Codex의 명시 `--commit … --selections …` → `candidate … fit … --target joint:scene`이다. 승인 관측은 Candidate의 `derived_observations`에만 보존하며 원본 Evidence의 실측으로 Import하지 않는다. 공동 단계는 K·distortion·치수를 고정하고 Landmark를 최적화한다. Mask-boundary 반복 최적화는 미구현이고 전체 silhouette 비교만 기존 평가에서 제공한다. 가림 미확정 Mask/컵 rim은 전체 silhouette로 취급하지 않는다. 정확한 옵션과 소스 구현의 미검증 범위는 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)를 따른다.
 
 ## 6. 외형·충돌·물성·작업의 분리
 

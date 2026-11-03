@@ -41,7 +41,7 @@ T01의 검증 가능한 입력 필드 두 개를 구체화했다. 이는 새 계
 
 `GraspParams(object)`와 `PickPlaceParams(object,target,relation,max_speed_m_s,bounds_m)`를 선언한다. object/target은 T01 Scene 참조 검사를 사용한다. 기존 모듈 `validate_params(params, scene)` hook은 이미 읽기 전용인 Scene의 object별 **task_geometry**에서 dimensions_m, wall_m, bottom_diameter_m를 확인해 immutable PlacementGeometry를 private `_geometry` cache에 연결한다. `_geometry`는 dataclass 입력 필드가 아니므로 YAML/호출자 입력으로 주입할 수 없다. 기준 Metadata·파일·Calibration을 수정하지 않으며 사용자 Recipe에 Geometry 복사를 요구하지 않는다. 보정/Transform 계산을 재실행하는 hook도 아니다.
 
-FUNCTIONS의 6개 이름은 `pick_place.stable_grasp`, `pick_place.placement`, `pick_place.v8_metrics`, `pick_place.v8_annotation`, `pick_place.v8_datagen`, `pick_place.v8_evaluation`이다. 반환값은 일반 bool/metrics 또는 immutable SignalValue snapshot이다. `create_stable_grasp(*,params,episode)`가 Episode/env마다 새 상태를 만든다. 잘못된 live 입력은 TASK_SAMPLE_INVALID로 구분하며 정상 Task 실패 False와 혼동하지 않는다.
+FUNCTIONS의 6개 이름은 `pick_place.stable_grasp`, `pick_place.placement`, `pick_place.v8_metrics`, `pick_place.annotation`, `pick_place.v8_datagen`, `pick_place.v8_evaluation`이다. 반환값은 일반 bool/metrics 또는 immutable SignalValue snapshot이다. `create_stable_grasp(*,params,episode)`가 Episode/env마다 새 상태를 만든다. 잘못된 live 입력은 TASK_SAMPLE_INVALID로 구분하며 정상 Task 실패 False와 혼동하지 않는다.
 
 - Annotation/DataGen: post-step tracker, pre-step 수치/영상/이전 latch 저장, 최종 물리 통과는 **Placement AND latched StableGrasp**다. acceptance는 episode_end의 실제 최종 상태를 사용한다.
 - 수동 Annotation: 위 함수는 물리 통과 구성요소다. 기존 manual mark 유효성·사용자 채택과 final place의 마지막 action 표시 규칙은 기존 단계 실행/Writer의 책임이며 제거하거나 새로 구현하지 않았다.

@@ -6,7 +6,34 @@ import uuid
 from .native import Catalog,DatasetIdentity,DataError,atomic_json,read_json,digest,load_catalog
 
 
-def save_curation(path,source,*,exclude=(),order=None,frame_ranges=None,splits=None,split_provenance=None):
+def discover_datasets(workspace):
+    """Read published Workspace results through the existing canonical readers.
+
+    Stop at Dataset roots; never descend into payloads, pending segments or
+    linked external directories. External/custom locations can still be opened.
+    """
+    rows=[]
+    for category,directory in (('source','source'),('annotation','annotation'),('datagen','datagen'),('lerobot','dataset')):
+        base=Path(workspace).resolve()/directory
+        if not base.is_dir():continue
+        for current,children,_ in os.walk(base,followlinks=False):
+            root=Path(current);info=root/'meta/info.json';record=root/'run.json'
+            if not info.is_file()and not record.is_file():
+                children[:]=sorted(name for name in children if not name.startswith('.')and name not in('segments','data','videos','meta','preview','media')and not(root/name).is_symlink())
+                continue
+            children[:]=[]
+            row=dict(path=str(root),name=root.name,category=category,episodes=0,frames=0,readable=False,error='',modified_ns=(info if info.is_file()else record).stat().st_mtime_ns)
+            try:
+                catalog=load_catalog(root);stage=catalog.execution.get('stage')
+                row.update(kind=catalog.kind,category='lerobot'if catalog.kind=='lerobot'else stage or category,
+                           episodes=len(catalog.episodes),frames=sum((e.num_frames if e.stop is None else e.stop)-e.start for e in catalog.episodes),readable=True)
+            except Exception as error:row['error']=str(error)
+            rows.append(row)
+    return sorted(rows,key=lambda r:(not(r['readable']and r['episodes']),-r['modified_ns'],r['path']))
+
+
+def save_curation(path,source,*,exclude=(),order=None,frame_ranges=None,splits=None,split_provenance=None,revision=None,flatten=False):
+    # Validate against the active Dataset before optionally flattening its storage reference.
     source=_catalog(source)
     path=Path(path).resolve()
     if path.exists():raise DataError('OUTPUT_EXISTS',str(path),'new Curation revision required')
@@ -37,6 +64,7 @@ def save_curation(path,source,*,exclude=(),order=None,frame_ranges=None,splits=N
     document={'kind':'curated_native','schema_version':1,'view_id':uuid.uuid4().hex,
         'source':{'path':os.path.relpath(source.root,path.parent),'identity':asdict(source.identity)},
         'selections':selections,'splits':resolved_splits}
+    if revision is not None:document['revision']=dict(revision)
     if split_provenance is not None:
         if not isinstance(split_provenance,dict) or split_provenance.get('splits')!=resolved_splits or split_provenance.get('selection_identity')!=asdict(source.identity):raise DataError('CURATION_INVALID','split_provenance','Generated allocation must match exact source and membership')
         _check_split_provenance(split_provenance)
@@ -46,6 +74,10 @@ def save_curation(path,source,*,exclude=(),order=None,frame_ranges=None,splits=N
     else:document['split_provenance']={'rule':'explicit_episode_membership','seed':None}
     if (source.metadata or {}).get('resolved_relocations'):
         document['relocations']={os.path.relpath(old,path.parent):os.path.relpath(new,path.parent) for old,new in source.metadata['resolved_relocations'].items()}
+    if flatten:
+        original=source
+        while original.kind=='curated':original=_parent(original)
+        document['source']={'path':os.path.relpath(original.root,path.parent),'identity':asdict(original.identity)}
     path.parent.mkdir(parents=True,exist_ok=True);atomic_json(path,document,exclusive=True)
     return load_curation(path)
 
@@ -232,55 +264,6 @@ def _numeric(values,name):
     array=np.asarray(values)
     if array.dtype.kind not in 'biuf' or array.ndim not in (1,2,3) or not np.isfinite(array).all():raise DataError('CURATION_INVALID',name,'Finite scalar/vector or contact-matrix rows required')
     return array.reshape(len(array),-1)
-
-
-def _histogram(episodes,name,edges,size,official):
-    import numpy as np
-    counts=np.zeros((len(edges),len(edges[0])-1),dtype=np.int64)
-    for block in _chunks(episodes,name,size,official):
-        values=_numeric(block,name)
-        for index,bins in enumerate(edges):counts[index]+=np.histogram(values[:,index].astype(float),bins=bins)[0]
-    return counts.tolist()
-
-
-def distribution(source,*,fields=None,split=None,bins=20,chunk_frames=2048):
-    """Per-component population moments/histograms for exactly the selected rows."""
-    import numpy as np
-    catalog=_catalog(source);episodes=select_split(catalog,split)
-    if fields is not None and (not isinstance(fields,(list,tuple)) or any(not isinstance(name,str) for name in fields)):raise DataError('CURATION_INVALID','fields','Explicit numeric field name sequence required')
-    fields=tuple(fields) if fields is not None else ('observation.state','action') if episodes and episodes[0].format=='lerobot' else ('obs/policy/joint_pos','joint_targets')
-    if not episodes or not fields or len(set(fields))!=len(fields) or type(bins) is not int or bins<1 or type(chunk_frames) is not int or chunk_frames<1:raise DataError('CURATION_INVALID','distribution','Nonempty explicit selection/fields and positive bin/chunk sizes required')
-    result={};official={}
-    for name in fields:
-        semantics=_field_semantics(catalog,name);count=0;mean=None;m2=None;low=None;high=None;dtypes=set();shape=None
-        for block in _chunks(episodes,name,chunk_frames,official):
-            values=_numeric(block,name);dtypes.add(str(values.dtype));values=values.astype(np.float64);n=len(values)
-            if shape is None:shape=list(block.shape[1:])
-            elif shape!=list(block.shape[1:]):raise DataError('CURATION_INVALID',name,'Mixed component shape')
-            if mean is None:mean=np.zeros(values.shape[1]);m2=mean.copy();low=np.full_like(mean,np.inf);high=-low
-            if values.shape[1]!=len(mean):raise DataError('CURATION_INVALID',name,'Mixed vector shape')
-            delta=values.mean(0)-mean;combined=count+n
-            m2+=np.square(values-values.mean(0)).sum(0)+np.square(delta)*count*n/combined
-            mean+=delta*n/combined;count=combined;low=np.minimum(low,values.min(0));high=np.maximum(high,values.max(0))
-        edges=[np.histogram_bin_edges([],bins=bins,range=(float(a),float(b))).tolist() for a,b in zip(low,high)]
-        result[name]={**semantics,'component_shape':shape,'count':count,'mean':mean.tolist(),'std':np.sqrt(m2/count).tolist(),'min':low.tolist(),'max':high.tolist(),'source_dtypes':sorted(dtypes),
-                      'statistic_dtype':'float64','std_ddof':0,'histogram_edges':edges,'histogram_counts':_histogram(episodes,name,edges,chunk_frames,official)}
-    return dict(scope=_scope(catalog,split,episodes),fields=result)
-
-
-def compare_distributions(sources,*,fields=None,split=None,bins=20,chunk_frames=2048):
-    """Read-only comparison on common bin edges; no automatic Merge or recommendation."""
-    import numpy as np
-    catalogs=[_catalog(source) for source in sources]
-    if len(catalogs)<2:raise DataError('CURATION_INVALID','comparison','At least two sources required')
-    results=[distribution(cat,fields=fields,split=split,bins=bins,chunk_frames=chunk_frames) for cat in catalogs]
-    for name in results[0]['fields']:
-        rows=[r['fields'].get(name) for r in results]
-        if any(row is None or row['unit'] in (None,'unknown') or any(row[key]!=rows[0][key] for key in ('unit','phase','frame','joint_order')) or len(row['mean'])!=len(rows[0]['mean']) for row in rows):raise DataError('CURATION_INCOMPATIBLE',name,'Cannot compare unknown/different units/phase/frame/joint order or shape')
-        edges=[np.histogram_bin_edges([],bins=bins,range=(min(row['min'][i] for row in rows),max(row['max'][i] for row in rows))).tolist() for i in range(len(rows[0]['mean']))]
-        for catalog,result in zip(catalogs,results):
-            row=result['fields'][name];row['histogram_edges']=edges;row['histogram_counts']=_histogram(select_split(catalog,split),name,edges,chunk_frames,{})
-    return dict(datasets=results,comparison='common_component_bins_no_merge_or_distribution_recommendation')
 
 
 def _split_origins(episodes,splits):

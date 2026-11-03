@@ -7,27 +7,20 @@ from pathlib import Path
 import numpy as np
 from ...generation import mimic
 from ...data.native import load_catalog,open_native,file_sha256
-from .source import resolved_model_config
-from robot_learning_workbench.data.recording import validate_recording
+from .rendering import camera_rgb
+from robot_learning_workbench.data.recording import validate_recording,datagen_settings
 from .model import JOINTS,_execution_urdf
 from ...data.recording import record_metrics
 
 
 from ...data.publication import publish_generation
 
-def reset_seeds(seed,count):
-    """Original single-worker reset stream: one draw per global attempt."""
-    if type(count) is not int or count<0:raise ValueError('Nonnegative attempt count required')
-    rng=np.random.default_rng(mimic.attempt_seed(seed,0))
-    return [int(rng.integers(2**32)) for _ in range(count)]
-
-
 def load_inputs(plan):
     catalog=load_catalog(plan.resolved_inputs['dataset']['path'])
     if catalog.execution.get('stage')!='annotation' or catalog.execution.get('engine')!='mujoco':raise ValueError('Verified MuJoCo Annotation input required')
     validate_recording(catalog.execution.get('recording',{}))
     if 'partition' not in catalog.execution or catalog.execution['partition'] is None:raise ValueError('Explicit Annotation partition identity required')
-    cfg=resolved_model_config(plan,catalog.execution.get('model_config'))
+    cfg=datagen_settings(plan,catalog)
     if tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Explicit generation creation order must match annotated model')
     acceptance=plan.function_bindings['acceptance']
     from ...tasks.execution import mimic_objects
@@ -101,7 +94,7 @@ def generate_attempt(plan,model,data,b,pool,kin,segment,claim,*,events,commands,
                     duration_s=time.perf_counter()-ik_started
                     # Pre-step record first; previous_command only advances after real physics.
                     record_frame(ep,before,goal,target,time_s=tick/30,signals={**recorded_signals(signals),'grasp':bool(signals.get('grasp') and signals['grasp'].value),'place':placement_signal(plan,before)},base=b.world_from_robot_base,previous_pose=previous_pose,command_requested=result.command,command_limits=b.limits)
-                    for camera,writer in videos.items():renderer.update_scene(data,camera=camera);writer.write(renderer.render())
+                    for camera,writer in videos.items():writer.write(camera_rgb(renderer,data,camera))
                     step(model,data,b,target);previous_command=target.copy();previous_pose=goal
                     diag={**result.diagnostics,'duration_s':duration_s,'command_applied':True,'applied_joint_rad':target.tolist(),'tick':tick};diagnostics.append(diag)
                     for key,value in mimic.ik_record(result,duration_s,applied=True).items():ep.add('ik/'+key,torch.from_numpy(np.array(value)))
@@ -150,9 +143,9 @@ def run(plan,*,events,commands):
     random_poses=uses_workspace_random(plan)
     opts=collection_settings(plan.effective_settings['execution'],plan.output_path,stage='datagen')
     execution=execution_contract(plan,b,cfg)
-    execution.update(stage='datagen',task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
+    execution.update(stage='datagen',seed=opts['seed'],task_bindings=_plain(plan.function_bindings),partition=_plain(catalog.execution['partition']),ik=kin.identity,annotated_input=_plain(catalog.identity),source_pool_order=list(pool.episode_ids),
         target_successes=opts['target_successes'],max_attempts=opts['max_attempts'],max_episode_steps=opts.get('max_episode_steps',2000),
-        rng_policy='entropy_workspace_poses_no_rng_resume_v1' if random_poses else 'v8_single_worker_attempt_seed_and_worker_reset_stream',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
+        rng_policy='attempt_seed_mimic_entropy_placement_v1',mimic_configuration=_plain(pool.env_cfg.subtask_configs))
     previous=plan.resolved_inputs.get('resume_dataset')
     if previous and len(load_catalog(previous['path']).episodes)>=opts['target_successes']:raise ValueError('Cumulative generation target must exceed previous successes')
     owner=resume_to(previous['path'],plan.output_path,execution) if previous else NativeRun(plan.output_path,execution,append=opts.get('resume',False))
@@ -160,16 +153,13 @@ def run(plan,*,events,commands):
     try:
         if opts.get('num_envs',1)>1:return run_parallel(plan,owner,model,b,pool,catalog,kin,opts,events=events,commands=commands)
         count=len(load_catalog(owner.root).episodes);attempt=max((r['attempt'] for r in history(owner.root)),default=0)
-        if not random_poses:
-            reset_rng=np.random.default_rng(mimic.attempt_seed(opts['seed'],0))
-            for _ in range(attempt):reset_rng.integers(2**32)
         while count<opts['target_successes'] and attempt<opts['max_attempts']:
             attempt+=1;segment=owner.segment('datagen-'+str(attempt));claim=owner.claim_attempt(segment)
             restore_episode(model,data,b,None)
             # Placement exhaustion/physics application errors abort this run; never
             # spend an extra RNG draw to turn an invalid placement into a new trial.
             if random_poses:
-                try:placements=reset_placements(plan,model,data,b,None)
+                try:placements=reset_placements(plan, model, data, b)
                 except TaskError as error:
                     segment.record_attempt(claim,status='failure',diagnostics={'category':'invalid_placement','code':'INVALID_PLACEMENT',
                         'reason':str(error),'placement':_plain(getattr(error,'diagnostics',{})),'planned_placements':_plain(getattr(error,'placement_records',{})),'steps':0})
@@ -179,11 +169,9 @@ def run(plan,*,events,commands):
                         'placements':_plain(getattr(error,'placement_records',{})),'effect':'unknown','steps':0})
                     segment.commit();raise
             else:
-                reset_seed=int(reset_rng.integers(2**32))
-                reset_placements(plan,model,data,b,reset_seed)
+                placements=reset_placements(plan, model, data, b)
             ep,media,report=generate_attempt(plan,model,data,b,pool,kin,segment,claim,events=events,commands=commands)
-            if random_poses:report['placements']=placements
-            else:report['reset_seed']=reset_seed
+            report['placements']=placements
             count+=int(publish_generation(owner,segment,claim,ep,media,report,catalog,kin,events))
             if report['status']=='cancelled':cancelled=True;break
         return StageResult('cancelled' if cancelled else 'completed',(str(owner.root),),count,{'existing_episodes':opts.get('previous_episodes',0),'added_episodes':count-opts.get('previous_episodes',0),'attempts':attempt,'target_reached':count>=opts['target_successes'],'budget_exhausted':attempt>=opts['max_attempts'],'history':history(owner.root)})
@@ -203,21 +191,18 @@ def run_parallel(plan,owner,model,b,pool,catalog,kin,opts,*,events,commands):
     from ...run import StageResult
     n=opts['num_envs'];states=[mujoco.MjData(model) for _ in range(n)]
     kinematics=[mimic.bind_kinematics(_execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS) for _ in range(n)]
-    polls,send=command_channels(commands,events,n);random=uses_workspace_random(plan);reset_values=reset_seeds(opts['seed'],opts['max_attempts']) if not random else None
     def generate(i,segment,claim):
-        started=time.perf_counter();data=states[i];placements=None;reset_seed=None
+        started=time.perf_counter();data=states[i];placements=None
         try:
             restore_episode(model,data,b,None)
-            if not random:reset_seed=reset_values[claim['attempt']-1]
-            placements=reset_placements(plan,model,data,b,reset_seed)
+            placements=reset_placements(plan, model, data, b)
             ep,media,report=generate_attempt(plan,model,data,b,pool,kinematics[i],segment,claim,events=send,commands=polls[i],env_index=i)
         except TaskError as error:
             ep,media,report=None,{},dict(status='failure',category='invalid_placement',steps=0,reason=str(error),ik_diagnostics=[],planned_placements=getattr(error,'placement_records',{}))
         except Exception as error:
             ep,media,report=None,{},dict(status='failure',category='execution_error',steps=0,reason=str(error),effect=getattr(error,'effect','unknown'),ik_diagnostics=[],_exception=error)
         report.update(env_index=i,thread_id=threading.get_ident(),elapsed_s=time.perf_counter()-started)
-        if random:report['placements']=placements
-        else:report['reset_seed']=reset_seed
+        report['placements']=placements
         return ep,media,report
     count=len(load_catalog(owner.root).episodes);attempt=max((r['attempt'] for r in history(owner.root)),default=0);available=list(range(n));pending={};cancelled=False;fatal=None
     with ThreadPoolExecutor(max_workers=n,thread_name_prefix='mujoco-env') as threads:

@@ -76,6 +76,7 @@ def test_changed_registered_manifest_is_not_a_normal_selectable_scene(tmp_path):
 def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_path):
     from real2sim_builder.evidence import import_robot
     from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
+    from robot_learning_workbench.robot.pose_render import create_pose_renderer
     from robot_learning_workbench.robot.calibration import JOINTS,PrecisionMapper
     from test_precision_session import precision_fixture
     _,device,workspace,configuration,profile,_=precision_fixture(tmp_path)
@@ -101,7 +102,9 @@ def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_
     settings=project.root/read(project.root/'project.yaml')['execution_packages'][0]['engine_config']['mujoco']
     profile_data=json.loads(profile.read_text());profile_data['urdf_sha256']=hashlib.sha256(model.read_bytes()).hexdigest()
     mapping=PrecisionMapper(profile_data).metadata();view=SceneView(destination/'scene.json','mujoco',settings,mapping)
-    with create_renderer(view,tmp_path/'render')as renderer:
+    with pytest.raises(ValueError,match='physics requires native'):
+        create_renderer(view,tmp_path/'interactive')
+    with create_pose_renderer(view,tmp_path/'render')as renderer:
         result=renderer.render([0.]*6);moved=renderer.render([.2,0,0,0,0,0])
     assert moved['applied_sim_joint_rad']==[.2,0,0,0,0,0]and np.any(moved['images']['side']!=result['images']['side'])
     assert result['physics_steps']==0 and result['applied_sim_joint_rad']==[0.]*6

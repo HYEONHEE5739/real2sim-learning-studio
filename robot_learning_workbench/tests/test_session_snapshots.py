@@ -89,8 +89,14 @@ def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_p
         project=Project.create(tmp_path/'projects','Paired');store=SnapshotStore(project,session_id='session',model=CURRENT,mapping=f.precision_mapper.metadata());rgb={n:np.full((480,640,3),31,np.uint8)for n in('real_side','real_wrist')}
         pending=store.prepare('pair1',state,rgb,now_ns=t)
         rendered=dict(images={n:rgb['real_'+n].copy()for n in('side','wrist')},measured_q_rad=pending['sample']['q_measured'],applied_sim_joint_rad=pending['sample']['q_measured'],scene_identity={'manifest_sha256':'a'*64},engine='mujoco',sim_timestamp={'monotonic_ns':t+100_000_000},sim_cameras={},joint_mapping=f.precision_mapper.metadata())
+        rendered.update(applied_sim_joint_rad=[q+.05 for q in pending['sample']['q_measured']],sim_target_joint_rad=pending['sample']['q_measured'],
+                        sim_joint_delta_rad=[.05]*6,physics_steps=10,total_physics_steps=50,simulation_time_s=.2,
+                        state_application='native_physics_joint_target',sim_object_poses_world={'cube_red':np.eye(4).tolist()})
         one=store.finish(pending,rendered=rendered);original=Path(one['path']);before={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
         baseline=project.evidence['images'][0]['runtime_baseline'];assert(project.root/baseline['pair_path']).is_file()and(project.root/baseline['path']).is_file()
+        assert baseline['sim_q_measured_rad']!=pending['sample']['q_measured']
+        assert baseline['sim_target_joint_rad']==pending['sample']['q_measured']and baseline['physics_steps']==10
+        assert baseline['sim_object_poses_world']==rendered['sim_object_poses_world']
         packets={n:{**p,'sequence':2}for n,p in packets.items()};state=snapshot_state(f,history,packets,state['real_stability'])
         new=store.prepare('pair2',state,rgb,now_ns=t);rendered['scene_identity']['manifest_sha256']='b'*64;two=store.finish(new,rendered=rendered)
         assert before=={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}

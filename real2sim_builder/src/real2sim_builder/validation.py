@@ -45,15 +45,19 @@ def paired_diagnostics(project, observation, real, candidate, folder, scene=None
         'diagnosis':'Agent must distinguish scene mismatch from adapter/render mismatch; image metrics alone do not establish cause'}
 
 
-def object_metrics(project, scene, observation, masks):
+def object_metrics(project, scene, observation, masks, evidence=None):
     """Object/observation keyed geometry. Missing real evidence remains null."""
     from .project import local_path, world_pose
     from .project import sha
     from .calibration.camera import project_point
     from scipy.ndimage import binary_erosion, distance_transform_edt
-    rows=[];evidence=project.evidence
+    if evidence is None:
+        from .observations import annotation_evidence
+        evidence = annotation_evidence(project, scene)
+    rows=[]
     camera=next(c for c in scene['cameras'] if c['id']==observation['camera'])
-    annotations=[m for m in evidence.get('masks',[]) if m['image']==observation['path']]
+    annotations=[m for m in evidence.get('masks',[]) if m['image']==observation['path']
+                 and m.get('mask_kind', 'silhouette') == 'silhouette']
     landmarks=[r for r in evidence.get('landmarks',[]) if
                (r.get('observation')==observation.get('id') if r.get('observation') else
                 r.get('camera')==observation['camera'] and r.get('split','train')==observation['split'])

@@ -1,5 +1,7 @@
 # 기존 UI 원형 복원 · Recipe/R03 연결 결과
 
+현재 Pipeline 설정은 [Script UI](pipeline-script-ui.md)로 교체했다. 아래는 최초 복원 이력이며 당시 `TrainingSettings`/`HubSettings` 폼은 현재 제품에서 제거했다.
+
 2026-10-29. **원본 Qt 스타일·4탭·Navigation·Viewer/설정 분할·Curation 조작을 이관하고 실제 새 Worker 연결을 검증했다.** 사람의 장기 Desktop UX나 모든 화면의 pixel 일치를 입증한 결과는 아니다. 브랜치 `ui-original-restoration`, 기준 `f5cb9b251dfb5080d09b699ba8ff03cba486a139`. main/기존 hardware branch는 병합하지 않는다. 이번 범위는 표현·조작 흐름과 기존 Recipe/R03 연결이다. 원본 UI·Scene·Dataset·Checkpoint·Calibration·SDK는 불변이며 실물 Goal/Torque를 실행하지 않는다.
 
 ## 소스와 기준 화면

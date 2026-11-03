@@ -23,7 +23,7 @@ class SourceSettings(QWidget):
         self.editor=RecipeEditor(self);self.editor.label.hide();self.editor.text.setMinimumHeight(380)
         self.editor.text.setStyleSheet('QPlainTextEdit { background: #f4f5f8; color: #172030; selection-background-color: #a9cced; font-family: monospace; padding: 8px; }')
         box.addWidget(self.editor,1);self.save_button=QPushButton('저장 및 적용');self.save_button.setObjectName('primaryAction');box.addWidget(self.save_button)
-        hint=QLabel('Episode 수·환경 수·시간·Resume·데이터 저장 위치는 YAML에서 수정하세요. Script 저장 위치: scripts/source');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('single_task에 작업 문장을 입력하세요. Episode 수·환경 수·시간·Resume·저장 위치도 YAML에서 수정합니다. Script 저장 위치: scripts/source');hint.setWordWrap(True);box.addWidget(hint)
         self.scene.addItem('Scene 선택',None);self.scene.currentIndexChanged.connect(self.select_scene)
         self.open_scene.clicked.connect(self.choose_scene);self.load_button.clicked.connect(self.choose_script);self.save_button.clicked.connect(self.save_and_apply)
         self.editor.changed.connect(self.changed);self.engine.currentTextChanged.connect(self.select_engine)
@@ -38,7 +38,7 @@ class SourceSettings(QWidget):
 
     def default_script(self):
         text=yaml.safe_dump({'schema_version':1,'stage':'source','engine':self.engine.currentText(),'inputs':{'scene':''},
-            'execution':{'seed':1047,'env_num':1,'num_episodes':10,'episode_time_s':60.0,'reset_time_s':0.0,'resume':False},
+            'execution':{'single_task':'','env_num':1,'num_episodes':10,'episode_time_s':60.0,'reset_time_s':0.0,'resume':False},
             'output':{'directory':str(self.workspace/'source'/('demo-'+uuid.uuid4().hex[:8]))},'objects':{},'functions':{}},sort_keys=False,allow_unicode=True)
         return text.replace('env_num: 1','env_num: 1  # Live Leader Source는 현재 1-env').replace('num_episodes: 10','num_episodes: 10  # 이번에 추가로 저장할 Episode 수').replace('episode_time_s: 60.0','episode_time_s: 60.0  # Episode 최대 시간 (초)').replace('reset_time_s: 0.0','reset_time_s: 0.0  # 저장·폐기 후 대기 (초)').replace('resume: false','resume: false  # 같은 output.directory에 이어 수집하려면 true')
 

@@ -79,7 +79,6 @@ engine: mujoco
 inputs:
   scene: /path/to/workbench_runs/scenes/my-first-scene
 execution:
-  seed: 1047
   env_num: 1
   num_episodes: 10
   episode_time_s: 60.0
@@ -113,6 +112,25 @@ objects:
 **Task 함수:** 신뢰하는 Python 모듈을 `task_modules.yaml`에 추가하고 기존 `FunctionSpec`으로 Params dataclass·단계·필요 Sample 필드를 선언한다. YAML의 `functions.signals`, `acceptance`, `success`, `metrics`에서 함수를 선택한다. Predicate/Acceptance는 `bool`, Tracker는 기존 Signal 계약, Metric은 유한 수치를 반환한다. 새로운 Placement도 기존 `PlacementRequest`/`PlacementResult`와 Frame/Support 계약을 사용한다. 서로 다른 물체에 Fixed/Random/사용자 함수를 섞어 선언할 수 있다.
 
 **후속 단계:** Source → Annotation(원 초기 상태·적용 Target Replay) → DataGen → Curation → 공식 LeRobot Dataset → 공식 Policy 학습 → Simulation Evaluation. 다른 엔진에서 Annotation하려면 해당 엔진 config를 명시한다. 이 경로는 Replay 시도를 허용할 뿐 물리 결과 동등성을 뜻하지 않는다.
+
+Annotation·Mimic/DataGen·학습·Sim 평가·Offline Validation·Hub 다운로드/업로드·Real Evaluation도 Source와 같은 **입력 선택 → 흰색 YAML → Recipe 불러오기 / 저장 및 적용**으로 연결한다. 숫자·배치·실행 방식·Resume·출력 폼과 전용 동기화 코드는 제거했다. Script는 `workbench_runs/scripts/<stage>/`에서 선택·저장하고 로드 시 재저장 없이 입력을 준비한다. 저장 경로를 옮기면 상대 입력/출력 경로의 의미를 절대 경로로 보존한다. 학습의 공식 JSON 편집, Hub의 명시 Revision 조회/Repo 생성, 현재 Real 관측 전용 범위는 [Pipeline Script UI](pipeline-script-ui.md)에 설명한다. Source Demo는 변경하지 않았다.
+
+**자동 Annotation:** Source Dataset만 지정해서 대상 작업을 추측하지 않는다. 같은 recorded Scene Package와 필요한 엔진 설정을 선택하고, 아래처럼 집을 물체와 목표 컵을 선언한다. 전체 예시는 `examples/annotation-isaac.yaml`이다.
+
+함수 이름은 `pick_place.annotation`이다. 이전 이름의 `v8`은 이관 당시의 이름이며 Scene 버전 제한이 아니었다. 구형 Annotation 함수 이름은 등록에서 제거했으므로 편집용 Script도 아래 이름을 사용한다. 새 Scene도 선택 물체·목표의 `task_geometry`가 조건에 맞으면 같은 함수를 사용한다. 과거 Dataset·실행 기록의 함수 이름은 보존한다.
+
+```yaml
+execution:
+  mode: auto
+functions:
+  acceptance:
+    function: pick_place.annotation
+    params:
+      object: cube_red
+      target: cup_a
+```
+
+이 함수는 해당 물체의 StableGrasp 감지기를 자동으로 결합한다. 저장된 초기 상태에서 적용 관절 Target을 Replay하여 양쪽 손가락 접촉·물체와 그리퍼의 안정적인 동반 이동으로 집기 시점을 구하고, 마지막에 물체가 목표 컵 안에 정착했는지 판정한다. 두 조건을 통과한 Episode를 새 Annotation Dataset에 저장하며 Source는 수정하지 않는다. Manual 방식의 Event 표시는 물리 판정을 대체하지 않는다. 현재 Replay는 프레임 구간을 잘라낸 Source를 지원하지 않으며, 전체 구간을 보존한 Source 또는 Episode만 선별한 Source Revision을 사용한다. 기존 Revision과 다른 최신 Scene을 임의로 대신 사용하지 않는다.
 
 Mimic은 기존 물체 기준 Pick & Place 생성기다. 다른 Acceptance 함수는 연결할 수 있지만 궤적은 기존 알고리즘이다. Acceptance Params에 object/target이 없으면 `execution.mimic_object`/`mimic_target`으로 명시하고, Annotation에 필요한 grasp 경계가 실제 기록돼 있어야 한다. 일반 Task 성공 함수만 바꾸어 임의 동작의 Mimic 지원을 주장하지 않는다.
 

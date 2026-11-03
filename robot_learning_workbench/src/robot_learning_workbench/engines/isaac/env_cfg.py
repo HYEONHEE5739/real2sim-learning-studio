@@ -36,7 +36,7 @@ def execution_inputs(package, settings):
     q=settings['initial_joint_rad']
     if set(q)!=set(joints) or not all(math.isfinite(q[n]) for n in joints):raise ValueError('Invalid full initial model-radian joint state')
     objects=tuple(settings['active_object_ids'])
-    if len(set(objects))!=len(objects) or not objects or any(n not in package.scene['objects'] or package.scene['objects'][n]['role']!='task_object' for n in objects):
+    if len(set(objects))!=len(objects) or any(n not in package.scene['objects'] or package.scene['objects'][n]['role']!='task_object' for n in objects):
         raise ValueError('Active objects must be distinct declared task objects')
     physics=settings['isaac'];dt=physics['physics_timestep_s'];decimation=physics['decimation']
     if not isinstance(dt,(int,float)) or not math.isfinite(dt) or dt<=0 or type(decimation) is not int or decimation<=0:
@@ -80,14 +80,16 @@ def write_scene_assets(package, inputs, directory):
             if frame.startswith('robot_link_'):return frame.removeprefix('robot_link_')
             frame=provenance['frames'][frame]['parent']
         return None
-    attached=[n for n in originals if mounted(n)]
-    targets=[n for n,o in package.scene['objects'].items() if o['role']=='receptacle']
+    from scene_contract.objects import present_objects
+    present=set(present_objects(package.scene,inputs['active_object_ids']))
+    attached=[n for n in originals if n in present and mounted(n)]
+    targets=[n for n,o in package.scene['objects'].items() if n in present and o['role']=='receptacle']
     bodies=list(inputs['active_object_ids'])+targets
     stage=Usd.Stage.CreateNew(str(directory/'static.usda'));prim=UsdGeom.Xform.Define(stage,'/Static').GetPrim()
     stage.SetDefaultPrim(prim);prim.GetReferences().AddReference(str(source),'/Scene')
     for name,obj in package.scene['objects'].items():
         path='/Static/'+name
-        if obj['role']=='reference_robot' or name in inputs['task']['dynamic'] or name in targets or name in attached:
+        if name not in present or obj['role']=='reference_robot' or name in inputs['task']['dynamic'] or name in targets or name in attached:
             stage.OverridePrim(path).SetActive(False);continue
         collision=inputs['compiled_physics']['objects'].get(name,{}).get('collision',False)
         for child in Usd.PrimRange(stage.GetPrimAtPath(path)):

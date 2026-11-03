@@ -33,20 +33,72 @@ def test_candidate_rerender_recipe_is_retired(tmp_path):
     with pytest.raises(ValueError,match='stage'):read_recipe(p)
 
 
-def test_native_mujoco_renderer_tracks_measured_follower_state_without_physics_step(tmp_path):
+def test_offline_pose_renderer_projects_measured_follower_state_without_physics_step(tmp_path):
     import numpy as np
-    from robot_learning_workbench.robot.scene_render import SceneView,NativeRenderer
+    from robot_learning_workbench.robot.scene_render import SceneView
+    from robot_learning_workbench.robot.pose_render import PoseRenderer
     from robot_learning_workbench.robot.session_devices import construct
     path,project,_=observation_recipe(tmp_path);plan=prepare_recipe(read_recipe(path));devices,_,_=construct(plan)
     view=SceneView(plan.scene.root/'scene.json',plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
     q=[0.,-1.5,1.4,1.1,0.,0.]
-    with NativeRenderer(view,tmp_path/'render')as renderer:
+    with PoseRenderer(view,tmp_path/'render')as renderer:
         first=renderer.render(q);q[0]=.2;second=renderer.render(q)
     assert first['physics_steps']==second['physics_steps']==0
     np.testing.assert_array_equal(second['applied_sim_joint_rad'],q)
     assert second['scene_identity']['manifest_sha256']==plan.scene_identity['manifest_sha256']
     assert all(rgb.shape==(480,640,3)for rgb in second['images'].values())
     assert not np.array_equal(first['images']['side'],second['images']['side'])
+
+
+def test_interactive_renderer_advances_physics_and_does_not_teleport_joints(tmp_path):
+    import numpy as np
+    from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
+    from robot_learning_workbench.robot.session_devices import construct
+    path,project,_=observation_recipe(tmp_path);plan=prepare_recipe(read_recipe(path));devices,_,_=construct(plan)
+    view=SceneView(plan.scene.root/'scene.json',plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
+    with create_renderer(view,tmp_path/'physics') as renderer:
+        q=np.array(renderer.binding.initial_joint_rad)
+        qi,_=renderer.binding.object_indices['cube_red']
+        renderer.data.qpos[qi+2]+=.03
+        raised=float(renderer.data.qpos[qi+2]);initial_time=float(renderer.data.time)
+        first=renderer.render(q)
+        assert first['physics_steps']>0,'Real/Sim still mirrors q without advancing collision physics'
+        for _ in range(11):last=renderer.render(q)
+        assert float(renderer.data.time)>initial_time+.3
+        assert float(renderer.data.qpos[qi+2])<raised-.02,'The block fell through neither time nor gravity: dynamics were skipped'
+        target=q.copy();target[0]+=.2;response=renderer.render(target)
+        assert not np.allclose(response['applied_sim_joint_rad'],target,rtol=0,atol=1e-6),'Measured q was teleported into the robot'
+        assert response['sim_target_joint_rad']==pytest.approx(target)
+        assert response['state_application']=='native_physics_joint_target'
+        assert response['total_physics_steps']>first['total_physics_steps']
+        assert response['sim_object_poses_world']['cube_red']
+        assert np.isfinite(response['sim_joint_delta_rad']).all()
+
+
+def test_real_sim_worker_keeps_physics_running_between_previews(tmp_path):
+    import time
+    from robot_learning_workbench.robot.render_transport import RenderProcess
+    from robot_learning_workbench.robot.session_devices import construct
+    path,project,_=observation_recipe(tmp_path);plan=prepare_recipe(read_recipe(path));devices,_,_=construct(plan)
+    plan.output_path.mkdir();mapping=devices['follower'].precision_mapper.metadata()
+    q=[0.,-1.5,1.4,1.1,0.,0.]
+    renderer=RenderProcess(plan,mapping)
+    def wait_for(predicate):
+        deadline=time.monotonic()+20
+        while not predicate():
+            renderer.poll();time.sleep(.01)
+            assert time.monotonic()<deadline
+    try:
+        renderer.observe(q);wait_for(lambda:renderer.last_live is not None)
+        first=renderer.last_live.copy()
+        time.sleep(.2)
+        renderer.capture({'id':'pair_tick','sample':{'q_measured':q}})
+        result=None;deadline=time.monotonic()+20
+        while result is None:
+            result=renderer.poll();time.sleep(.01);assert time.monotonic()<deadline
+        assert result['total_physics_steps']>=first['total_physics_steps']+3*first['physics_steps']
+        assert result['simulation_time_s']>first['simulation_time_s']+.05
+    finally:renderer.close()
 
 
 def test_scene_observation_rejects_changed_mapping_and_manifest(tmp_path):
@@ -93,8 +145,11 @@ def test_follower_motion_updates_native_scene_and_pair_uses_four_images_without_
         saved=s.snapshots[0];assert set(saved['images'])=={'side','wrist','sim_side','sim_wrist'}
         manifest,rows,_=load_session(saved['path']);assert manifest['command_source']=='measured_observation_no_training_action'
         shot=next((Path(saved['path'])/'shots').iterdir());pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
-        assert state['q_command']is None and pair['physics_steps']==0
-        np.testing.assert_array_equal(pair['measured_q_rad'],saved['q_measured']);np.testing.assert_array_equal(pair['applied_sim_joint_rad'],saved['q_measured'])
+        assert state['q_command']is None and pair['physics_steps']>0
+        np.testing.assert_array_equal(pair['measured_q_rad'],saved['q_measured'])
+        np.testing.assert_allclose(pair['sim_target_joint_rad'],saved['q_measured'],rtol=0,atol=1e-6)
+        np.testing.assert_allclose(np.array(pair['applied_sim_joint_rad'])-pair['measured_q_rad'],pair['sim_joint_delta_rad'])
+        assert pair['sim_object_poses_world'] and pair['simulation_time_s']>0
         assert 'scene_identity'in pair and 'candidate_identity'not in pair
         assert s.teleoperation is None
         s.dispatch([{'kind':'session_snapshot','command_id':'late','payload':{}},{'kind':'cancel','command_id':'stop','payload':{}}])

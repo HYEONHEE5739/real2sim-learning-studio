@@ -133,11 +133,18 @@ def coverage(report):
     return {'status': 'PREDICTED_COVERAGE', 'objects': objects, 'recommendations': recommendations, 'source_signature': report.get('input_signature'), 'automatic_hardware_motion': False}
 
 
+def fit_snapshot_scene(candidate, options=None):
+    """Explicit draft fitting entry; the general run() pipeline keeps its meaning."""
+    return candidate.fit('joint:scene', options)
+
+
 def validate_scene(project, scene, renderer, folder, thresholds):
     from real2sim_builder.calibration.camera import fit_cameras, fit_geometry, landmark_metrics
     from real2sim_builder.validation import compare, mask_metrics
-    images = project.evidence['images']
-    masks = project.evidence.get('masks', [])
+    from .observations import annotation_evidence
+    evidence = annotation_evidence(project, scene)
+    images = evidence['images']
+    masks = [m for m in evidence.get('masks', []) if m.get('mask_kind', 'silhouette') == 'silhouette']
     rows = []
     rendered = {}
     excluded = []
@@ -156,7 +163,7 @@ def validate_scene(project, scene, renderer, folder, thresholds):
             ids = {o['id'] for o in scene['objects'] if o['role'] in ('support_surface', 'manipulable_object', 'receptacle', 'workspace')} | {m['object'] for m in masks if m['image'] == image['path']}
             rendered_masks = {n: posed_renderer.mask(image['camera'], n) for n in ids}
             from real2sim_builder.validation import object_metrics
-            objects = object_metrics(project, posed_renderer.scene, image, rendered_masks)
+            objects = object_metrics(project, posed_renderer.scene, image, rendered_masks, evidence=evidence)
             posed_scene = posed_renderer.scene
         rendered[image['path']] = sim
         metrics = compare(real, sim, folder / 'previews' / f"{index:03d}_{image['camera']}")
@@ -173,8 +180,8 @@ def validate_scene(project, scene, renderer, folder, thresholds):
             observed = np.asarray(Image.open(local_path(project.root, mask['path'])).convert('L')) > 0
             metrics['silhouettes'].append({'object': mask['object'], **mask_metrics(observed, rendered_masks[mask['object']])})
         rows.append({'image': image['path'], 'observation': image.get('id'), 'camera': image['camera'], 'split': image['split'], 'objects': objects, **metrics})
-    train = [r for r in project.evidence['landmarks'] if r.get('split', 'train') == 'train' and (not r.get('observation'))]
-    held = [r for r in project.evidence['landmarks'] if r.get('split', 'train') == 'validation' and (not r.get('observation'))]
+    train = [r for r in evidence['landmarks'] if r.get('split', 'train') == 'train' and (not r.get('observation'))]
+    held = [r for r in evidence['landmarks'] if r.get('split', 'train') == 'validation' and (not r.get('observation'))]
     calibration = {'train': landmark_metrics(scene, train), 'validation': landmark_metrics(scene, held)}
     held_images = [r for r in rows if r['split'] == 'validation']
     needs = []
@@ -186,7 +193,7 @@ def validate_scene(project, scene, renderer, folder, thresholds):
         if len(points) >= 4 and np.linalg.matrix_rank(points - points.mean(0)) >= 2:
             constrained.add(object_id)
     observation_ids = {i.get('id'): i for i in images if i.get('id') and i.get('eligible') is not False}
-    held_pose = [r for r in project.evidence['landmarks'] if r.get('observation') in observation_ids and observation_ids[r['observation']]['split'] == 'validation' and r.get('visible', True) and (r.get('weight', 1) > 0)]
+    held_pose = [r for r in evidence['landmarks'] if r.get('observation') in observation_ids and observation_ids[r['observation']]['split'] == 'validation' and r.get('visible', True) and (r.get('weight', 1) > 0)]
     for object_id in {r['object'] for r in held_pose if r.get('object')}:
         points = np.array([r.get('point_fraction', r.get('point_m')) for r in held_pose if r.get('object') == object_id])
         if len(points) >= 4 and np.linalg.matrix_rank(points - points.mean(0)) >= 2:
@@ -197,9 +204,9 @@ def validate_scene(project, scene, renderer, folder, thresholds):
         needs.append({'need': 'held-out object masks or measured corner landmarks for ' + ', '.join(sorted(unconstrained)), 'reason': 'Global image similarity does not independently verify interaction-critical geometry'})
     from real2sim_builder.calibration.geometry import metrics as pose_metrics
     ids = {i.get('id'): i for i in images if i.get('id')}
-    pose_rows = [r for r in project.evidence['landmarks'] if r.get('observation') in ids]
+    pose_rows = [r for r in evidence['landmarks'] if r.get('observation') in ids]
     multipose = {split: pose_metrics(project, scene, [r for r in pose_rows if ids[r['observation']]['split'] == split]) for split in ('train', 'validation')}
-    if project.evidence.get('capture_sessions'):
+    if evidence.get('capture_sessions'):
         train_groups = {i['group_id'] for i in ids.values() if i.get('eligible') and i['split'] == 'train' and i.get('group_id')}
         held_groups = {i['group_id'] for i in ids.values() if i.get('eligible') and i['split'] == 'validation' and i.get('group_id')}
         poses = {tuple(i['q_measured']) for i in ids.values() if i.get('eligible') and i['split'] == 'train' and i.get('q_measured')}

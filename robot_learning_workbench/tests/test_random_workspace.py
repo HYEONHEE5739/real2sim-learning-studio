@@ -29,7 +29,8 @@ def test_geometry_limits_are_derived_from_150mm_and_24mm(scene):
     factory.assert_called_once_with()
     assert result.diagnostics['valid'] and not result.diagnostics['physical_collision_checked']
     assert 'seed' not in result.diagnostics
-    assert result.pose[2,3]==pytest.approx(.01175,abs=1e-15)
+    # The physical marker's top is +0.25mm in its frame, above the table.
+    assert result.pose[2,3]==pytest.approx(.01225,abs=1e-15)
     np.testing.assert_array_equal(result.pose[:3,:3],np.eye(3))
 
 def test_yaw_uses_rotated_footprint(scene):

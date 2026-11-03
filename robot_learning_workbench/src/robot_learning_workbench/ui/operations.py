@@ -126,50 +126,8 @@ def prepared(path: str,modules: str) -> dict:
 
 
 def episode_plot(source: str, selection_id: str) -> dict:
-    """Bounded read-only plot projection of existing selected numeric rows."""
-    import numpy as np
-    from ..data import curation
-    catalog=curation._catalog(source);ep=curation._episode(catalog,selection_id)
-    total=(ep.stop if ep.stop is not None else ep.num_frames)-ep.start
-    indices=np.unique(np.r_[np.arange(0,total,max(1,int(np.ceil(total/511)))),total-1]).astype(int)
-    def samples(name):
-        selected=[];offset=0
-        for block in curation._chunks((ep,),name,2048,{}):
-            take=indices[(indices>=offset)&(indices<offset+len(block))]-offset
-            if len(take):selected.append(block[take])
-            offset+=len(block)
-        return np.concatenate(selected)
-    target='action'if ep.format=='lerobot'else'joint_targets'
-    values=curation._numeric(samples(target),target)
-    semantics=curation._field_semantics(catalog,target)
-    clock='timestamp'if ep.format=='lerobot'else'obs/timestamp'
-    times=samples(clock).reshape(-1)
-    eef=None;events={};event_times={};states=None
-    state_field='observation.state'if ep.format=='lerobot'else'obs/policy/joint_pos'
-    if ep.format=='isaac_hdf5':
-        import h5py
-        with h5py.File(ep.file,'r')as file:
-            group=file['data/'+ep.key]
-            name='obs/datagen_info/eef_pose/tool0'
-            if name in group:eef=samples(name)[:,:3,3].tolist()
-            if state_field in group:states=samples(state_field).tolist()
-            for prefix in('obs/events','obs/datagen_info/subtask_term_signals'):
-                if prefix not in group:continue
-                for event in group[prefix]:
-                    name=prefix+'/'+event
-                    if event in events:continue
-                    offset=0
-                    for block in curation._chunks((ep,),name,2048,{}):
-                        array=curation._numeric(block,name);first=np.flatnonzero(array.reshape(len(array),-1).any(1))
-                        if len(first):
-                            events[event]=int(offset+first[0]);event_times[event]=float(np.asarray(group['obs/timestamp'][ep.start+events[event]]).reshape(-1)[0]-np.asarray(group['obs/timestamp'][ep.start]).reshape(-1)[0]);break
-                        offset+=len(block)
-    elif ep.format=='lerobot':states=samples(state_field).tolist()
-    state_semantics=curation._field_semantics(catalog,state_field)
-    comparable=semantics['unit']=='rad'and state_semantics['unit']=='rad'and bool(semantics['joint_order'])and semantics['joint_order']==state_semantics['joint_order']
-    return dict(selection_id=selection_id,frames=total,original_range=[ep.start,ep.start+total],indices=indices.tolist(),
-                targets=values.tolist(),states=states,state_unit=state_semantics['unit'],state_joint_order=state_semantics['joint_order'],state_action_comparable=comparable,timestamps=times.tolist(),target_unit=semantics['unit'],joint_order=semantics['joint_order'],
-                eef=eef,eef_frame=catalog.execution.get('recording',{}).get('pose_frame','unknown'),eef_unit='m'if catalog.execution.get('recording',{}).get('units')=='m_rad_s'else'unknown',events=events,event_times_s=event_times,event_phase='recorded pre-step latch; not new Task evaluation',sampled=len(indices)<total)
+    from ..data.review import episode_plot as project
+    return project(source,selection_id)
 
 
 def execute(request: dict) -> dict:
@@ -227,6 +185,9 @@ def execute(request: dict) -> dict:
     if op=='source_scenes':
         from ..scene_preparation import list_scenes
         return {'scenes':list_scenes(args['workspace'])}
+    if op in ('pipeline_scenes','pipeline_dataset'):
+        from .pipeline_inputs import scenes,dataset_inputs
+        return scenes(**args)if op=='pipeline_scenes'else dataset_inputs(**args)
     if op=='prepare':return prepared(**args)
     if op=='start':
         from ..run import start,StartRequest
@@ -241,12 +202,30 @@ def execute(request: dict) -> dict:
         needs_tasks=bool(doc.spec.objects or doc.spec.functions)
         handle=start(StartRequest(args['request_id'],doc.path,doc.sha256,doc.spec.stage,output,modules if needs_tasks else None,file_sha256(modules) if needs_tasks else None,ready['prepared_sha256']))
         return {'run_id':handle.run_id,'request_id':handle.request_id,'run_dir':str(handle.run_dir),'output_path':str(output)}
+    if op=='curation_datasets':
+        from ..data.curation import discover_datasets
+        return {'datasets':discover_datasets(args['workspace'])}
+    if op=='curation_editor':
+        from ..data.revisions import editor_catalog
+        return editor_catalog(**args)
+    if op=='curation_revisions':
+        from ..data.revisions import revision_choices
+        return revision_choices(**args)
+    if op=='save_revision':
+        from ..data.revisions import save_revision
+        saved=save_revision(**args)
+        return {'datasets':[{'role':role,'path':str(catalog.root),'episodes':len(catalog.episodes)}for role,catalog in saved.items()]}
     if op=='catalog':
         from ..data.curation import inspect_dataset
-        from ..data.native import load_catalog
+        from ..data.native import load_catalog,task_object_ids
         catalog=load_catalog(args['path'])
-        return {'path':str(catalog.root),'kind':catalog.kind,'inspection':inspect_dataset(catalog),
-                'active_objects':catalog.execution.get('active_objects',[]),'engine':catalog.execution.get('engine')}
+        from ..data.quality import motion_quality
+        from ..data.lerobot import recorded_task
+        descriptions=list(dict.fromkeys(recorded_task(catalog,ep)for ep in catalog.episodes))
+        inspection=inspect_dataset(catalog);quality=motion_quality(catalog)
+        for row in inspection['episodes']:row['quality']=quality[row['selection_id']]
+        return {'path':str(catalog.root),'kind':catalog.kind,'inspection':inspection,'task_descriptions':descriptions,
+                'active_objects':catalog.execution.get('active_objects',[]),'task_objects':list(task_object_ids(catalog.execution)),'engine':catalog.execution.get('engine')}
     if op=='frame':
         from ..data.curation import review_frame
         from ..data.native import load_catalog
@@ -256,18 +235,21 @@ def execute(request: dict) -> dict:
         folder.mkdir(parents=True,exist_ok=True);images={}
         for camera,rgb in result.pop('rgb').items():
             # Only this single reviewed frame; no MP4 decode in the Qt thread.
-            small=rgb[::2,::2].copy();h,w=small.shape[:2];target=folder/(camera+'.ppm')
-            target.write_bytes(f'P6\n{w} {h}\n255\n'.encode()+small.tobytes());images[camera]=str(target)
+            h,w=rgb.shape[:2];target=folder/(camera+'.ppm')
+            target.write_bytes(f'P6\n{w} {h}\n255\n'.encode()+rgb.tobytes());images[camera]=str(target)
         return {**result,'images':images}
-    if op in ('distribution','compare','split','save_curation','materialize','merge'):
+    if op in ('split','save_curation','materialize','merge'):
         from ..data import curation
-        if op=='distribution':return curation.distribution(**args)
-        if op=='compare':return curation.compare_distributions(**args)
         if op=='split':return curation.split_dataset(**args)
         if op=='save_curation':
             curation.save_curation(**args);return {'path':str(Path(args['path']).resolve())}
         from ..data import lerobot
-        output=lerobot.merge(**args) if op=='merge' else lerobot.materialize(**args)
+        if op=='merge':
+            from ..data.native import load_catalog,DataError
+            catalogs=[load_catalog(path)for path in args['sources']]
+            if any(catalog.kind!='lerobot'for catalog in catalogs):raise DataError('MERGE_INCOMPATIBLE','sources','Dataset Merge는 LeRobot Dataset 폴더를 선택하세요.')
+            output=lerobot.merge(**{**args,'sources':catalogs})
+        else:output=lerobot.materialize(**args)
         return {'path':str(output)}
     raise ValueError('지원하지 않는 UI operation: '+op)
 

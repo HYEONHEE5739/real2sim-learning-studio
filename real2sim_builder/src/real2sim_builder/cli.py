@@ -16,6 +16,9 @@ def main(argv=None):
     for name in ('diagnose','coverage','analyze-objects'):
         p=sub.add_parser(name);p.add_argument('project');p.add_argument('--candidate');p.add_argument('--engine',choices=['blender','mujoco'],default='mujoco')
     p=sub.add_parser('inspect');p.add_argument('project')
+    p=sub.add_parser('auto-observe', help='Propose Candidate-local image annotations for Codex review')
+    p.add_argument('project');p.add_argument('--candidate');p.add_argument('--scene-state');p.add_argument('--options')
+    p.add_argument('--commit', metavar='PROPOSAL');p.add_argument('--selections', metavar='JSON')
     p=sub.add_parser('scan');p.add_argument('project');p.add_argument('action',choices=['import','inspect','segment','initialize','register','preview','constrain']);p.add_argument('--path');p.add_argument('--scan-id');p.add_argument('--candidate');p.add_argument('--config');p.add_argument('--engine',choices=['blender','mujoco'],default='blender');p.add_argument('--renderer',choices=['software-egl','egl','osmesa'],default='software-egl')
     p=sub.add_parser('candidate');p.add_argument('project');p.add_argument('action',choices=['create','edit','asset','render','evaluate','promote','reject','blender-build','blender-author','blender-sync','fit']);p.add_argument('name');p.add_argument('--target');p.add_argument('--options');p.add_argument('--edits');p.add_argument('--path');p.add_argument('--kind',choices=['visual','collision','textures'],default='visual');p.add_argument('--engine',choices=['blender','mujoco'],default='blender');p.add_argument('--renderer',choices=['software-egl','egl','osmesa'],default='software-egl');p.add_argument('--validation',action='store_true');p.add_argument('--target-object');p.add_argument('--allow',default='pose')
     p=sub.add_parser('rollback');p.add_argument('project')
@@ -33,7 +36,7 @@ def main(argv=None):
     if args.command=='capabilities':
         from .rendering import capability
         import importlib.util
-        print(json.dumps({'scan_input':'embedded GLB 2 with optional existing trimesh','scan_segmentation':'plane removal + voxel clustering proposals or explicit object ROI','unknown_camera_fit':['bootstrap','intrinsics','camera','distortion (k1)','quality'],'precision_mapping':'portable so101.precision-joint-mapping/1 hash/order/URDF-frame checks; manual status retained','capture_schema':['real2sim.snapshot/1','real2sim.capture/1 (legacy)'],'per_observation_fk':['urdf','scalar_joint_mjcf'],'multipose_fit':'weighted_soft_l1_landmarks','native_scene_contract':'schema_version=1; immutable new destination','articulated_action_replay':False,'workflow_schema':'so101.scene-workflow/1','workflow_authoring':'candidate edit --edits (set_workflow)','workflow_recipe':'SO101 pick/place only; metadata validation is not executed-task validation','blender':capability(), **{n:importlib.util.find_spec(n) is not None for n in ('mujoco','pxr','trimesh')}},indent=2));return 0
+        print(json.dumps({'scan_input':'embedded GLB 2 with optional existing trimesh','scan_segmentation':'plane removal + voxel clustering proposals or explicit object ROI','unknown_camera_fit':['bootstrap','intrinsics','camera','distortion (k1)','quality'],'precision_mapping':'portable so101.precision-joint-mapping/1 hash/order/URDF-frame checks; manual status retained','capture_schema':['real2sim.snapshot/1','real2sim.capture/1 (legacy)'],'per_observation_fk':['urdf','scalar_joint_mjcf'],'multipose_fit':['weighted_soft_l1_landmarks','joint:scene (shared Side/Wrist/object draft)'],'auto_observations':'auto-observe; Candidate-local Codex-reviewed derived proposals','native_scene_contract':'schema_version=1; immutable new destination','articulated_action_replay':False,'workflow_schema':'so101.scene-workflow/1','workflow_authoring':'candidate edit --edits (set_workflow)','workflow_recipe':'SO101 pick/place only; metadata validation is not executed-task validation','blender':capability(), **{n:importlib.util.find_spec(n) is not None for n in ('mujoco','pxr','trimesh')}},indent=2));return 0
     if args.command=='clone':
         from .project import clone_project
         print(clone_project(args.source,args.destination).root);return 0
@@ -47,6 +50,18 @@ def main(argv=None):
         from .ui import launch
         launch(Path(args.projects));return
     project=Project(args.project)
+    if args.command == 'auto-observe':
+        from .observations import propose_observations, commit_observation_proposals
+        if args.commit:
+            if not args.selections:
+                parser.error('--commit requires --selections (Codex-reviewed JSON list)')
+            result = commit_observation_proposals(project, args.commit, selections=read(args.selections))
+        else:
+            if args.selections:
+                parser.error('--selections requires --commit')
+            result = propose_observations(project, candidate=args.candidate, scene_state=args.scene_state,
+                                          options=read(args.options) if args.options else None)
+        print(json.dumps(result, indent=2));return 2 if result['status'] == 'NEEDS_MORE_DATA' else 0
     if args.command=='scan':
         from .reconstruction import import_scan,inspect_file,initialize,registration,preview,segment,constrain
         if args.action=='import':result=import_scan(project,args.path)
@@ -110,7 +125,7 @@ def main(argv=None):
             elif args.action=='promote':result=c.promote()
             elif args.action=='reject':result=c.reject()
             else:result=workspace(c,{'blender-build':'build','blender-author':'author','blender-sync':'sync'}[args.action],args.path)
-            print(json.dumps(result,indent=2));return 2 if result.get('status') in ('NEEDS_MORE_DATA','REJECTED') and args.action=='fit' else 0
+            print(json.dumps(result,indent=2));return 2 if result.get('status') in ('NEEDS_MORE_DATA','NOT_IMPROVED','REJECTED') and args.action=='fit' else 0
         except Unavailable as exc:
             print(json.dumps({'status':'UNAVAILABLE','engine':'blender','reason':str(exc)}));return 3
     if args.command in ('add','import-reference') and (project.root/'working/run.lock').exists():

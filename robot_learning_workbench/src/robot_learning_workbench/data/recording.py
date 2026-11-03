@@ -107,7 +107,56 @@ def replay_settings(plan,catalog):
     if catalog.execution.get('scene_identity')!=expected:raise ValueError('Replay Scene differs from recorded Scene; select the matching package or explicitly transform the dataset')
     same=catalog.execution.get('engine')==plan.engine
     if not same and 'engine_config'not in plan.input_documents:raise ValueError('Cross-engine replay needs inputs.engine_config for the selected engine; recorded engine settings are not portable')
-    return catalog.execution.get('model_config')if same and 'engine_config'not in plan.input_documents else None
+    if same and 'engine_config'not in plan.input_documents:return catalog.execution.get('model_config')
+    settings=_plain(plan.input_documents['engine_config'])
+    settings['active_object_ids']=list(catalog.execution['active_objects'])
+    recorded=catalog.execution.get('model_config',{})
+    if same and 'object_ids'in recorded:settings['object_ids']=_plain(recorded['object_ids'])
+    return settings
+
+
+def datagen_settings(plan,catalog):
+    """Use Annotation settings and reject a conflicting explicit declaration.
+
+    Both the UI's input preparation and the engine runner call this through
+    load_inputs, before selecting demonstrations or creating an environment.
+    """
+    from collections.abc import Mapping
+    from ..recipe import _plain,_fail
+    recorded=catalog.execution.get('model_config')
+    if not isinstance(recorded,Mapping)or not recorded:
+        _fail('inputs.dataset.model_config','Annotation에 기록된 엔진 설정이 없습니다. 새 설정으로 대신 실행할 수 없습니다.',code='INPUT_CONFLICT')
+    if plan.engine=='mujoco':
+        from ..engines.mujoco.source import resolved_model_config as resolve
+    elif plan.engine=='isaac':
+        from ..engines.isaac.source import settings_for as resolve
+    else:raise ValueError('Unsupported DataGen engine')
+    inherited=resolve(plan,recorded)
+    if 'engine_config'not in plan.input_documents:return inherited
+
+    def comparable(settings):
+        values=_plain(settings)
+        if plan.engine=='isaac':
+            values.setdefault('object_physics',{})
+            q=values.get('initial_joint_rad')
+            if isinstance(q,list)and len(q)==len(JOINTS):values['initial_joint_rad']=dict(zip(JOINTS,q))
+        return values
+
+    def differences(left,right,path=''):
+        if isinstance(left,dict)and isinstance(right,dict):
+            for key in sorted(left.keys()|right.keys()):
+                name=path+'.'+key if path else key
+                if key not in left or key not in right:yield name
+                else:yield from differences(left[key],right[key],name)
+        elif left!=right:yield path
+
+    try:declared=resolve(plan)
+    except (ValueError,TypeError,KeyError)as error:
+        _fail('inputs.engine_config','엔진 설정을 해석할 수 없습니다: '+str(error),code='INPUT_CONFLICT')
+    changed=list(differences(comparable(inherited),comparable(declared)))
+    if changed:
+        _fail('inputs.engine_config','Annotation에 기록된 설정과 다릅니다: '+', '.join(changed)+'. DataGen은 Annotation 설정을 계승합니다. 별도 engine_config를 제거하거나 같은 설정을 지정하세요.',code='INPUT_CONFLICT')
+    return inherited
 
 
 def record_metrics(episode,results,phase):

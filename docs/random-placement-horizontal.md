@@ -40,7 +40,7 @@ objects:
 
 - 실제 Collision 꼭짓점을 Yaw 회전한 후 `low=-workspace_size/2-min(vertices_xy)`, `high=workspace_size/2-max(vertices_xy)`를 계산한다. 기본150mm/24mm의 중심은 ±63mm다. 크기 변경과45° Yaw 경계를 시험했다. 63mm를 상수로 저장하지 않는다.
 - 기본 Roll/Pitch는 Workspace 로컬0, Yaw 기본0이다. 선택적 `yaw_rad`를 주면 실제 회전 Footprint를 쓴다. World의 v8 기울기를 없애는 회전이 아니다.
-- Z는 기존 T04 `contact_pose`로 실제 Support 윗면과 Collision 최저 꼭짓점이 접촉하도록 계산한다. 임의 clearance를 더하지 않는다. v8 Marker의 원점이 Table 윗면보다0.25mm 위이므로 기본 Cube 중심의 Marker 로컬 Z는 **11.75mm**다.
+- Z는 기존 T04 `contact_pose`로 Table과 Workspace box 중 더 높은 실제 Collision 윗면에 물체의 Collision 최저 꼭짓점이 접촉하도록 계산한다. 임의 clearance를 더하지 않는다. 종이/Marker의 두께도 반영하며, 두께0.5mm의 Marker 로컬 윗면이 +0.25mm이면 높이24mm Cube 중심의 로컬 Z는 **12.25mm**다. 종이가 Table 안쪽에 있으면 Table 윗면을 사용한다. `support: table`과 Table footprint 검사는 유지한다. 이전 Table만 계산하던11.75mm 배치는 물리 종이 Collision과 겹칠 수 있었다.
 - 블록끼리는 convex Footprint 사이 Euclidean 최단 거리 **>=24mm**다. 축 정렬24mm 블록의 일렬 중심48mm, 대각선·겹침·Yaw·반올림 경계를 시험했다. Task 대상/목표 Cup의 역할을 유지하며 Cup을 grasp 대상 또는24mm 블록으로 재명명하지 않는다.
 - 현재 collision-enabled 고정 물체/다른 작업 물체도 검사한다. Cup/compound의 전체 convex hull과 원통의64각 외접 prism은 **보수적인 오프라인 장애물 검사**다. 실제 PhysX/MuJoCo의 모든 곡면/오목 접촉을 완전히 대체하지 않는다. 로봇 링크/동적 장착물의 현재 Collision 전체는 native 검사 영역이다.
 - 모든 대상의 후보를 먼저 계산한다. 아직 배치하지 않은 대상의 과거 위치를 장애물로 쓰지 않고, 앞서 계산한 새 위치와 고정 장애물을 검사한다. 대상의 순서를 바꾸지 않는다. Fixed/Random 혼합 대상 batch는 현재 명시 오류이며, 고정 장애물은 엔진의 현재 고정 상태로 제공한다.

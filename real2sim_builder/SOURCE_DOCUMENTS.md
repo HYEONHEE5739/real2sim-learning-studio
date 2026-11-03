@@ -24,3 +24,15 @@
 부속 자료 `docs/AGENTIC_REGRESSION.json`, `BLENDER_REGRESSION.json`, `so101_validation.json`, `ui_compare.png`는 과거 렌더/회귀와 UNVALIDATED/NEEDS_MORE_DATA 상태의 기록이다. 현재 작업에서 재실행하지 않았고 수치·이미지를 새 성공 증거로 복사하지 않았다.
 
 현재 명령은 `real2sim_builder.cli`, 현재 자료는 `workbench_runs/scenes/<project>`가 기준이다. API/실행 인자는 현재 소스를 우선한다. 기존 문서 사이에서 날짜에 따라 달라진 내용은 최신 이력과 현재 코드를 함께 보고 판단한다. 기존 문서에 링크된 모든 외부 보고서/웹 문서까지 전수 조사했다는 뜻은 아니다.
+
+## 자동 관측·공동 정합 추가 사양 (2026-11-01)
+
+사용자가 제공한 `auto_scene_fit_bundle.zip`의 `CODEX_IMPLEMENT_AUTO_FITTING.md`를 소스 구현 사양으로 사용했다. `SCENE_AUTHORING_APPEND.md`는 제작 가이드 1-A에, `SCENE_RULES_APPEND.md`는 Camera/FK 규칙의 공동 정합 항목에 통합했다. 구현한 CLI/API 및 MVP의 제외 범위는 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 기록한다. 이는 기존 원본 문서 14개의 내용이나 과거 실행 성적이 아닌 새 구현 사양이며, 이번에는 소스·문서만 수정하고 실행 검증하지 않았다.
+
+## 2026-11-02 현재 사용자 요구 추가
+
+선택형 작업 물체(`spawn: recipe`)와 항상 배치하는 구성(`spawn: always`)은 현재 사용자
+요구로 추가한 구분이며 과거 문서의 실측/검증 결과가 아니다. Codex의 제작 절차와 실제
+`set_spawn` 편집법은 `SCENE_AUTHORING.md` §1-B, 제작 규칙은 `SCENE_RULES.md` §1-A를 따른다.
+Scene Prepare의 편집 가능한 메모 양식에 물체 크기·기본 구성·선택형 물체·물리 조건을 적고,
+Codex가 그 내용을 Builder Object와 새 Export에 반영한다.

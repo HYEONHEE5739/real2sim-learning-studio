@@ -76,6 +76,7 @@ def apply(scene, operations, root):
             obj = {'id': name, 'role': operation.get('role', 'fixture'), 'frame': operation.get('frame', 'world'), 'pose': value(t, 'estimated'), 'dimensions': value(operation.get('dimensions')), 'color': value(operation.get('color', [0.6] * 3), 'estimated'), 'visual': shape, 'collision': operation.get('collision', {'type': 'unknown'}), 'physics': {'mass_kg': value(None), 'friction': value(None)}}
             if operation.get('dimensions') is not None:
                 obj['dimensions'] = value(operation['dimensions'], 'estimated')
+            if 'spawn'in operation:obj['spawn']=operation['spawn']
             result['objects'].append(obj)
         elif op == 'remove_object':
             obj = next((o for o in result['objects'] if o['id'] == name))
@@ -113,6 +114,9 @@ def apply(scene, operations, root):
                 if key in operation:
                     existing[key] = operation[key]
             preserve(old, existing, name)
+        elif op == 'set_spawn':
+            obj = next(o for o in result['objects'] if o['id'] == name)
+            obj['spawn'] = operation['value']
         elif op == 'set_workflow':
             previous = result.get('workflow', {})
             result['workflow'] = copy.deepcopy(operation['value'])

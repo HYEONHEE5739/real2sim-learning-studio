@@ -35,7 +35,12 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Pinocchio DLS + Best Effort; inward position-target Saturation within approved model limits.
 - Fixed placement and entropy-based Workspace Random placement; no Random Pose seed restoration.
 - Source/DataGen append to the same Native dataset path, immutable closed segments and attempt history.
-- Original/curated/materialized separation, selection, trim, split, distributions and compatible Merge.
+- Original/curated/materialized separation, selection, trim, independent train/val Revision saves, task-object position distributions and multi-Dataset LeRobot Merge.
+- Data Curation lists saved Workspace Source, Annotation, DataGen and LeRobot Datasets; open a result to review episodes, original-resolution Side/Wrist frames, playback and recorded trajectories. External Datasets and saved selection revisions can also be opened.
+- Curation playback follows recorded timestamps through a persistent decoder worker. Recorded robot/object motion, Idle/Jitter review hints, clickable initial positions and numeric/position comparisons are described in [the Curation guide](docs/data-curation-playback.md).
+- Source YAML owns `execution.single_task`; Annotation and DataGen inherit it, and LeRobot exports preserve the recorded instruction. Curation shows the instruction, opens the chosen Dataset immediately and displays included/total Episode counts.
+- Curation revisions live under `workbench_runs/curation/<kind>/<dataset>/`, with named `r001/r002` versions. A Revision opens as its selected Dataset: excluding 2 of 10 Episodes shows 8, and further selection stays within those 8. Annotation/DataGen input pickers accept saved whole-Episode revisions; LeRobot conversion also supports trimmed selections.
+- Scene objects declare `spawn: always|recipe`; task scripts select optional instances in both engines. `objects.<id>.task_object` records Curation targets, whose Episode-start distribution fills the analysis panel. Scene notes start with an editable authoring template; see [Codex authoring instructions](real2sim_builder/SCENE_AUTHORING.md#1-b-선택형-작업-물체와-실행-구성).
 - Official LeRobot Dataset materialization with existing encoded video sharing.
 - Official LeRobot Registry/Factory and CLI training, local fine-tuning, checkpoints/Resume and independent validation. ACT, SmolVLA and Diffusion have smoke execution evidence; other registered models require their own inputs/dependencies and validation.
 - Commit-pinned Hugging Face Dataset/Policy downloads and explicit, parent-commit guarded uploads to existing Repos. Smoke validation performs no uploads.
@@ -44,6 +49,7 @@ official LeRobot Dataset → official Policy Training → Simulation Evaluation.
 - Hardware connections remain read-only. Manual Teleoperation budget inputs have been removed; physical six-axis Teleoperation is blocked (`ARM_CONTROL_SPEC_UNVERIFIED`) until verified device control specifications are available. Memory control and existing safety/encoding/watchdog checks remain. Physical motion is unverified.
   Gripper-only one-shot code requires its separate command binding and supervised approval; autonomous real Policy motor control remains disabled.
 - Qt workflow pages and selected-environment Side/Wrist 640×480 latest-frame Preview.
+- tool0 remains a coordinate/FK reference with its visual guide hidden. Source preview and recording share one camera render; newly recorded MuJoCo RGB and Policy inputs exclude debug sites, and Isaac frame debug visualization stays disabled. Existing MP4s remain unchanged.
 
 The SmolVLA path explicitly compiles one SHA-pinned LeRobot 0.4.1 module with a
 documented padding-loss compatibility change. Installed SDK files remain unchanged.

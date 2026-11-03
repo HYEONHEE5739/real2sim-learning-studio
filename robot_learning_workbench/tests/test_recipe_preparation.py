@@ -24,7 +24,7 @@ def source_doc(tmp_path,objects=None,**changes):
     import yaml
     data={'schema_version':1,'stage':'source','engine':'mujoco','inputs':{'scene':'scene/scene.json','device_profile':'leader.json'},
         'objects':objects or {'cube_red':{'placement':{'function':'placement.random_xy','params':{'frame':'workspace','support':'marker_top','rules':'v8_preserved'}}}},
-        'execution':{'episodes':2,'seed':42},'output':{'directory':'new'}}
+        'execution':{'episodes':2},'output':{'directory':'new'}}
     data.update(changes);(tmp_path/'leader.json').write_text('{"role":"leader"}')
     p=tmp_path/'recipe.yaml';p.write_text(yaml.safe_dump(data,sort_keys=False));return r.read_recipe(p)
 
@@ -62,7 +62,7 @@ stage: annotation
 engine: mujoco
 inputs: {dataset: data, scene: scene/scene.json}
 functions:
-  acceptance: {function: pick_place.v8_annotation, params: {object: cube_red, target: cup}}
+  acceptance: {function: pick_place.annotation, params: {object: cube_red, target: cup}}
 execution: {mode: auto}
 output: {directory: annotation}
 ''');return r.read_recipe(p)

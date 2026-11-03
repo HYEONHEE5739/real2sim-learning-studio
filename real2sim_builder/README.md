@@ -6,6 +6,8 @@ Offline project/candidate reconstruction, calibration, review and immutable Scen
 
 상세 제작 기준은 [SCENE_RULES.md](SCENE_RULES.md), 기존 AGENTS/docs 전체의 반영 내역은 [SOURCE_DOCUMENTS.md](SOURCE_DOCUMENTS.md)에 있습니다.
 
+자동 이미지 관측 제안과 공유 Side/Wrist/Object 정합은 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)를 따릅니다. `auto-observe` → Codex 제안 검토/반영 → `candidate fit --target joint:scene`을 기존 Candidate·평가·Export에 연결했습니다. 이번 추가 구현은 소스·문서만 작성했으며 실행 검증하지 않았습니다.
+
 See [BU01–BU04 results](../docs/builder-bundle.md) for commands, fixed installed environments, original-source comparisons, test evidence and limitations.
 
 Use `python -m real2sim_builder.cli --help`. Existing unmarked projects open read-only. `clone SOURCE NEW_DESTINATION` creates a separate editable project. `export PROJECT --destination NEW_PACKAGE` requires a fresh successful review; explicit `--allow-unvalidated` creates an unvalidated review package. `verify NEW_PACKAGE` verifies the Scene and native file closure.

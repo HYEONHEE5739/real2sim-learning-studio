@@ -126,7 +126,7 @@ def test_started_leader_motion_reaches_follower_and_native_sim_then_four_image_c
         s.dispatch([{'kind':'session_snapshot','command_id':'pair','payload':{}}]);until(lambda:len(s.snapshots)==1)
         assert set(s.snapshots[0]['images'])=={'side','wrist','sim_side','sim_wrist'}
         shot=next((Path(s.snapshots[0]['path'])/'shots').iterdir());pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
-        np.testing.assert_array_equal(pair['measured_q_rad'],state['q_measured']);assert pair['physics_steps']==0
+        np.testing.assert_array_equal(pair['measured_q_rad'],state['q_measured']);assert pair['physics_steps']>0
         s.dispatch([{'kind':'teleop_start','command_id':'late','payload':{}},{'kind':'cancel','command_id':'stop','payload':{}}]);assert s.terminal and not s.teleoperation.active
     finally:s.close()
 

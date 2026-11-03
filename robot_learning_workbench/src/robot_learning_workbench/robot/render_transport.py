@@ -14,7 +14,7 @@ def write_preview(path,value):
 
 
 class RenderProcess:
-    """A concrete read-only render child; serial control remains in Session."""
+    """Owned simulation child; real serial control remains in Session."""
     def __init__(self,plan,mapping):
         import subprocess,sys
         self.root=plan.output_path/'renderer';self.root.mkdir();self.engine=plan.engine;self.capture_id=None;self.last_live=None;self.last_request=0;self.number=0

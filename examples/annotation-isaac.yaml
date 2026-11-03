@@ -5,7 +5,7 @@ execution:
   headless: true
 functions:
   acceptance:
-    function: pick_place.v8_annotation
+    function: pick_place.annotation
     params:
       object: cube_red
       target: cup_a

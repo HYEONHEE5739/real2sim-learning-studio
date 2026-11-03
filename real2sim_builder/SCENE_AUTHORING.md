@@ -12,6 +12,106 @@
 
 작업 시작 시 사용자의 실행 범위를 확인한다. 코드/문서 작성만 요청했거나 테스트 금지 지시가 있으면 아래 렌더·평가·엔진 명령을 자동 실행하지 않는다. Builder 제작 자체에 실제 로봇 연결이나 모터 명령은 필요하지 않다.
 
+## 1-A. “Scene 만들어줘” 요청의 기본 처리 — Codex가 직접 Builder 호출
+
+이 Builder의 실질 사용자는 **Codex**다. 사용자는 Scene Prepare UI에 사진/영상, 실측 치수, GLB, 로봇 모델과 작업 메모를 등록하고, 필요하면 Side/Wrist 여러 자세를 Capture할 뿐이다. **사용자에게 Builder의 fit target, Landmark 좌표 입력, CLI 사용을 요구하지 않는다.** Codex는 Project를 확인해 Builder CLI/Python API를 실행하고 후보 Scene을 생성·수정한다. 추가 LLM 런타임이나 UI 자동 클릭을 구현할 필요는 없다.
+
+### Codex가 수행할 기본 순서
+
+1. `project.yaml`, `input/evidence.yaml`, capture manifest, scene-state, 요구 메모, `working/current_scene.yaml`, OPEN Candidate, `exports/` 목록을 먼저 읽는다. 미등록 원본을 임의로 미디어 전체 검색하여 학습 입력으로 섞지 않는다.
+2. 치수·Robot Base·URDF·measured q·실측 K 등 **신뢰할 수 있는 Anchor를 잠근다.** 한 layout에서만 물체 world pose를 공유하고, layout이 바뀌면 분리한다.
+3. 기존 Candidate 생성·편집 API로 Geometry·Frame·Camera·Collision을 갖춘 **초기 Metric Scene Candidate**를 만든다. 알려진 GLB/치수가 있는데 영상을 보고 새 기하를 발명하지 않는다.
+4. `auto-observe`로 Side/Wrist 이미지에서 Marker·Block·Cup·Gripper의 landmark/mask 후보를 추출한다. **자동 제안은 곧 실측이 아니다.** Codex가 물체 ID·3D/2D 대응점·가림을 검토하고 신뢰할 수 있는 관측을 선택한다.
+5. Side/Wrist/공통 Object Pose **공동 Multi-view Fit**을 호출한다. Side는 공유 world camera pose, Wrist는 공유 link-local mount/FK, Object는 공유 world pose다. 하나의 pose를 View마다 다르게 만들지 않는다. K가 미측정이면 기존 bootstrap을 먼저 사용하고 fitting 상태를 estimated/optimized로 표시한다.
+6. 다섯 자세 등 모든 사용 관측을 카메라·자세·물체별로 비교한다. Global RGB MAE만 낮추는 변경은 지양한다. Obj-mask 경계/코너 오차, robot/gripper 윤곽, supporter-plane 등을 구분한다.
+7. Camera 오차를 Object geometry/물리량/Joint Offset으로 숨기지 않는다. 데이터가 모자라면 추정 Candidate를 저장하고, **어떤 시점에서 무엇을 추가 촬영하면 되는지**만 구체적으로 요청한다.
+8. Candidate 검토 후 기존 `export_revision`으로 **새 Revision**을 내보낸다. ACCEPTED를 증빙할 독립 자료가 없으면 검토용 UNVALIDATED Export로 구분한다. 원본/기존 Scene은 덮어쓰지 않는다.
+
+### 구현된 CLI 진입점
+
+기존 Candidate·개별 정합·검토·Export:
+
+```bash
+python -m real2sim_builder.cli inspect PROJECT
+python -m real2sim_builder.cli candidate PROJECT create initial
+python -m real2sim_builder.cli candidate PROJECT fit initial --target bootstrap:side
+python -m real2sim_builder.cli candidate PROJECT fit initial --target camera:wrist
+python -m real2sim_builder.cli candidate PROJECT evaluate initial --engine mujoco
+python -m real2sim_builder.cli export PROJECT --destination PROJECT/exports/revision-002 --candidate initial --allow-unvalidated
+```
+
+이번에 소스로 연결한 자동 제안·명시 반영·공동 정합(실행 검증 미수행):
+
+```bash
+python -m real2sim_builder.cli auto-observe PROJECT --candidate initial --scene-state layout_01
+python -m real2sim_builder.cli auto-observe PROJECT --commit scratch/agent/initial/observations/DIGEST/proposals.json --selections selections.json
+python -m real2sim_builder.cli candidate PROJECT fit initial --target joint:scene --options fit-options.json
+```
+
+이 API의 구현 책임·관측 제안 스키마·최적화 변수·Codex 사용 순서는 [`AUTO_SCENE_FITTING.md`](AUTO_SCENE_FITTING.md)를 따른다. 현재 MVP는 검토된 3D–2D Landmark로 공동 최적화하며, 승인 silhouette는 기존 평가에서 비교한다. 렌더 Mask 반복 최적화와 자동 3D corner 확정은 구현하지 않았다. 실행 허용 범위는 사용자의 요청을 따른다.
+
+### Codex에게 요청할 최소 사용자 문장
+
+> `real2sim_builder/SCENE_AUTHORING.md를 읽고, 내가 Scene Prepare에 등록한 Project의 사진/GLB/실측/Side·Wrist Capture로 새 Scene 만들어줘. 기존 원본은 보존하고 새 Candidate·Export Revision을 만들어.`
+
+## 1-B. 선택형 작업 물체와 실행 구성
+
+Scene Prepare 메모의 `[항상 배치할 구성요소]`와 `[선택형 작업 물체]`를 Codex가 먼저
+읽고 각 Object에 생성 정책을 명시한다. 사용자가 자연어로 분류하면 Codex가 아래
+Builder 편집/API로 구조화한다. 사용자에게 JSON/CLI를 직접 작성하도록 요구하지 않는다.
+메모 양식의 빈 칸과 안내 문장은 사용자 측정값이 아니다. 미제공 치수·물성은 unknown으로 둔다.
+
+- `spawn: always`: 기본 구성요소. 물리적으로 static이라는 뜻은 아니다.
+- `spawn: recipe`: Source/DataGen/Sim 평가 Script의 `objects`에 포함될 때 생성하는 물체.
+- 컵·블록 같은 이름이나 색으로 역할을 추측하지 않는다. 조작할 컵도 선택형일 수 있다.
+- 형상, 충돌, 물성, `role`은 생성 정책과 별개다. 선택에서 빠진 물체의 부속 장식도 함께 빠진다.
+- Scene 제작/Real·Sim 정합은 원 관측 배치를 유지한다. Script 기반 작업 실행이 선택형
+  물체의 구성·배치를 결정하며, Annotation/기록 Source replay는 기록 당시 구성을 복원한다.
+- 기존 Dataset/Export의 물체 구성은 소급 변경하지 않는다. 정책 변경은 새 Candidate/Export로 만든다.
+
+`add_object`에 `spawn`을 지정하거나 기존 Candidate에서 `set_spawn`을 사용한다.
+예를 들어 `object-spawn.json`의 내용은 다음과 같다.
+
+```json
+[
+  {"op":"set_spawn","id":"cube_red","value":"recipe"},
+  {"op":"set_spawn","id":"cube_blue","value":"recipe"},
+  {"op":"set_spawn","id":"cube_green","value":"recipe"}
+]
+```
+
+```bash
+python -m real2sim_builder.cli candidate PROJECT edit CANDIDATE --edits object-spawn.json
+```
+
+Workbench Recipe의 `objects.<id>.task_object: true`는 **Data Curation의 Task objects/초기
+위치 분포 대상**이다. 생성 여부와 혼동하지 않는다. `false`라도 `objects`에 넣으면 생성한다.
+한 항목이라도 flag를 명시하면 `true`인 물체만 대상이 된다(나머지는 false). flag가 전혀 없는
+기존 Source Script는 선언한 물체를 대상으로 기록한다. Annotation은 이를 계승하고,
+DataGen은 별도 flag가 없으면 입력의 작업 대상을 계승한다. 실제 Task 성공 함수/작업 문장을
+이 flag가 대신하지 않는다.
+
+예를 들어 빨강·파랑을 생성하고 파랑만 분석 대상으로 쓰는 Script의 `objects` 일부:
+
+```yaml
+objects:
+  cube_red:
+    task_object: false
+    placement:
+      function: placement.random_workspace
+      params: {frame: object_marker, support: table, workspace: marker}
+  cube_blue:
+    task_object: true
+    placement:
+      function: placement.random_workspace
+      params: {frame: object_marker, support: table, workspace: marker}
+```
+
+이 예시에서 `cube_green`은 생성하지 않는다. 분포는 파랑의 원 Episode 첫 기록 위치를
+보여주며 여러 `true` 대상이면 Curation에서 고른다. 객체 ID/Frame/Support는 해당 Scene의
+실제 선언을 사용한다. 입력 Annotation과 모델 구성이 다른 DataGen은 기존 모델 일치 검사를
+유지하므로, 원하는 물체 구성으로 수집·Annotation한 자료를 사용한다.
+
 ## 2. 어디에 무엇이 있는가
 
 기본 Workspace는 저장소의 `workbench_runs/`다. Scene Prepare에서 생성한 실제 Project 경로를 사용한다. 표시 이름과 폴더 이름은 다를 수 있으므로 폴더 안 `project.yaml`을 확인한다.
@@ -71,7 +171,7 @@ Python에서는 `real2sim_builder.project.Project`와 `Candidate`를 사용한�
 
 1. **입력 감사:** Project·원본 SHA·촬영 Session/scene-state·해상도·q와 Mapping 출처를 확인한다. 물체를 움직인 서로 다른 장면을 하나의 고정 배치로 합치지 않는다.
 2. **초기 Scene:** 물체/Frame/Camera ID, 역할, visual과 collision을 분리해 작성한다. GLB의 모든 점을 충돌 형상으로 쓰지 않는다. 빈 컵에는 바닥과 벽/내부 공간이 있는 collision이 필요하다.
-3. **원인별 정합:** Robot/FK·Base → Side Camera → 물체/테이블 기하 → Wrist mount/Camera → 전체 자세 비교 순으로 원인을 분리한다. Camera 오차를 물체 크기나 관절 q 변경으로 숨기지 않는다.
+3. **원인별 정합:** Robot/FK·Base와 카메라 초기값을 확인하고 자동 제안을 검토한 뒤 `joint:scene`으로 공유 Camera·물체 배치를 공동 정합한다. Side/Wrist·물체별 잔차로 지배적 원인을 좁혀 개별 fitting을 보완한다. Camera 오차를 물체 크기나 관절 q 변경으로 숨기지 않는다.
 4. **후보 비교:** baseline, 가설, 변경/고정 변수, 사용 관측, 수치·overlay, 채택/거절 이유를 남긴다. 실제 측정 제약 위반이나 중요한 자세의 회귀를 숨기지 않는다.
 5. **반복 종료:** 추가 개선이 없거나 원인을 구별할 자료가 부족하면 무엇을 더 촬영/측정해야 하는지 보고한다. 모든 후보를 승인 상태로 바꾸지 않는다.
 

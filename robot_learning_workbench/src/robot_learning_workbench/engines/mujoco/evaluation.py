@@ -4,6 +4,7 @@
 from pathlib import Path
 import time,resource
 import numpy as np
+from .rendering import camera_rgb
 from ...learning.policy import load_policy,infer,observation_batch,preflight_action,ActionRejected
 from ...data.native import NativeRun,load_catalog,history,resume_to,digest,atomic_json,native_api,DataError
 from robot_learning_workbench.data.recording import add_initial, record_frame
@@ -51,7 +52,7 @@ def rollout(plan,model,data,b,kin,policy_bundle,segment,claim,*,events,commands,
                 if placed:report.update(success=True,category='task_success');break
                 rgb={}
                 phase='camera'
-                for name in ('side','wrist'):renderer.update_scene(data,camera=name);rgb[name]=renderer.render().copy()
+                for name in ('side','wrist'):rgb[name]=camera_rgb(renderer,data,name).copy()
                 phase='policy';batch=observation_batch(before['joint_positions'],rgb,joint_order=before['joint_order'],task=plan.effective_settings['execution'].get('task_instruction'));started=time.perf_counter()
                 try:
                     original=infer(policy,pre,post,batch,contract=contract)[0]
@@ -117,7 +118,7 @@ def run(plan,*,events,commands):
             number=max((a['attempt'] for a in history(owner.root)),default=0)+1;segment=owner.segment('evaluation-'+str(number));claim=owner.claim_attempt(segment)
             started=time.perf_counter()
             try:
-                restore_episode(model,data,b,None);reset_placements(plan,model,data,b,claim['seed'])
+                restore_episode(model,data,b,None);reset_placements(plan, model, data, b)
             except Exception as error:ep,media,report=None,{},execution_failure(error,phase='reset',steps=0)
             else:ep,media,report=rollout(plan,model,data,b,kin,bundle,segment,claim,events=events,commands=commands)
             fatal=report.pop('_exception',None)
@@ -144,7 +145,7 @@ def rollout_parallel(plan,owner,model,b,kin,bundle,execution,*,events,commands):
     polls,send=command_channels(commands,events,n);number=max((a['attempt'] for a in history(owner.root)),default=0);available=list(range(n));pending={};cancelled=False;fatal=None;summary={}
     def evaluate(i,segment,claim):
         started=time.perf_counter()
-        try:restore_episode(model,states[i],b,None);placements=reset_placements(plan,model,states[i],b,claim['seed'])
+        try:restore_episode(model,states[i],b,None);placements=reset_placements(plan, model, states[i], b)
         except Exception as error:ep,media,report=None,{},execution_failure(error,phase='reset',steps=0);placements=None
         else:ep,media,report=rollout(plan,model,states[i],b,kinematics[i],bundles[i],segment,claim,events=send,commands=polls[i],env_index=i)
         duration=time.perf_counter()-started;report.update(env_index=i,placements=placements,elapsed_s=duration,actual_fps=report['steps']/duration)
