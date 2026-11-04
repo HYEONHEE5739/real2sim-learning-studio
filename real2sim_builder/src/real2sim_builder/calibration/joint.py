@@ -1,7 +1,4 @@
-"""Bounded multi-view landmark fitting of shared cameras and object poses.
-
-No renderer, hardware, joint-offset, intrinsic or physics optimization is performed.
-"""
+"""Bounded landmark and raw-depth Camera/Object fitting; no control or physics."""
 import copy
 from collections import Counter
 
@@ -50,13 +47,152 @@ def _support(scene, obj, explicit):
 
 def _posed(candidate, cached):
     result = copy.deepcopy(candidate)
-    result['frames'] = cached['frames']
+    result['frames'].update({k:v for k,v in cached['frames'].items()if k.startswith('robot_link_')})
     reference = {o['id']: o for o in cached['objects'] if o.get('link')}
     for obj in result['objects']:
         if obj['id'] in reference:
             obj['frame'] = reference[obj['id']]['frame']
             obj['pose'] = reference[obj['id']]['pose']
     return result
+
+
+def fit_depth_bundle(project,scene,options=None):
+    """Joint camera/mount/base/object/scale fit from raw optical observations.
+
+    Backprojects each view on every evaluation. No stale World cloud can drive
+    camera updates. Known poses/dimensions/URDF/q stay fixed; measured anchors or
+    motion-resolved scale are required before this metric refinement.
+    """
+    from scipy.spatial import cKDTree
+    from .hybrid import surface_points,assign_pose
+    from ..files import write
+    from ..scene import camera_calibration_signature
+    import uuid
+    options=options or{};observations=scene.get('reconstruction_observations',{}).get('clouds',[])
+    images={i.get('id'):i for i in project.evidence['images']};rows=[];needs=[]
+    if {r['group_id']for r in observations if r['split']=='train'}&{r['group_id']for r in observations if r['split']=='validation'}:
+        raise ValueError('Train/holdout observation group leakage')
+    original_nodes={o['id']:o for o in scene['objects']};models={}
+    for row in observations:
+        project.checkpoint();path=local_path(project.root,row['path'])
+        if sha(path)!=row['sha256']:raise ValueError('Raw depth observation changed')
+        with np.load(path,allow_pickle=False)as data:
+            if 'points_camera_relative'not in data:continue
+            raw={k:v.copy()for k,v in data.items()}
+        image=images.get(row['image_id']);camera=row.get('camera')or(image or{}).get('camera')
+        if camera is None:raise ValueError('Depth observation Camera missing')
+        obj=original_nodes[row['object_id']]
+        if obj['visual']['type']=='unknown'or obj['pose']['value']is None:continue
+        if row['object_id']not in models:
+            model=surface_points(obj,scene,project.root,int(options.get('surface_samples',2000)));models[row['object_id']]=cKDTree(model)
+        count=len(raw['points_camera_relative']);take=np.linspace(0,count-1,min(count,700),dtype=int)
+        raw={k:(v[take]if k in('points_camera_relative','uv_original','depth_relative')else v)for k,v in raw.items()}
+        rows.append((row,raw,camera,image))
+    training=[r for r in rows if r[0]['split']=='train']
+    report={'status':'NEEDS_MORE_DATA','needs':needs,'physical_verified':False,'scope':'OPTIMIZED_UNVERIFIED_DRAFT'}
+    if not training:return scene,{**report,'needs':['Raw optical depth observations with registered scale and visible object assets required']}
+    blocks=[];bounds=[]
+    def add(kind,name,seed,size,limits):
+        blocks.append((kind,name,seed,len(bounds),size));bounds.extend(limits)
+    cams={c['id']:c for c in scene['cameras']};observed={r[2]for r in training}
+    translation=float(options.get('translation_bound_m',.08));angle=float(options.get('rotation_bound_rad',.35))
+    if not np.isfinite([translation,angle]).all()or min(translation,angle)<=0:raise ValueError('Positive fitting bounds required')
+    external={r[0]['image_id']for r in training if scene.get('view_registrations',{}).get(r[0]['image_id'],{}).get('T_world_camera')is not None}
+    for name in options.get('cameras',sorted(observed)):
+        cam=cams[name]
+        if name not in observed:continue
+        if cam['pose']['value']is not None and cam['pose']['provenance']not in('measured','calibrated'):
+            add('camera',name,np.asarray(cam['pose']['value']),6,[translation]*3+[angle]*3)
+        if options.get('optimize_intrinsics',False)and cam['K']['provenance']not in('measured','calibrated'):
+            if any(r[2]==name and 'uv_original'not in r[1]for r in training):needs.append(name+': raw pixel rays required to refine K')
+            else:add('intrinsics',name,np.asarray(cam['K']['value']),4,[.15,.15,cam['resolution'][0]*.05,cam['resolution'][1]*.05])
+    for image_id in sorted(external):
+        registration=scene['view_registrations'][image_id]
+        if registration.get('status')=='REGISTERED_CALIBRATED':continue
+        if options.get('external_views',True):add('view',image_id,np.asarray(registration['T_world_camera']),6,[translation]*3+[angle]*3)
+    if options.get('robot_base')and 'robot_base'in scene['frames']and scene['frames']['robot_base']['transform']['provenance']not in('measured','calibrated'):
+        add('base','robot_base',np.asarray(scene['frames']['robot_base']['transform']['value']),6,[translation]*3+[angle]*3)
+    for name in options.get('objects',sorted({r[0]['object_id']for r in training})):
+        obj=original_nodes[name]
+        if name not in models or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['provenance']in('measured','calibrated'):continue
+        support=_support(scene,obj,options.get('supports',{}).get(name))
+        add('object_support'if support else'object',name,(world_pose(scene,obj),support),3 if support else 6,[translation]*2+[angle]if support else[translation]*3+[angle]*3)
+    if options.get('optimize_depth_scale',False):
+        # Scale is shared by inference batch, never independently per object.
+        for group in sorted({r[0].get('depth_batch',r[0]['image_id'])for r in training}):add('scale',group,0.,1,[.25])
+    if not blocks:return scene,{**report,'needs':['All observed variables are protected or no variable was selected']}
+    def assign(x):
+        result=copy.deepcopy(scene);scales={}
+        for kind,name,seed,start,count in blocks:
+            delta=x[start:start+count]
+            if kind=='scale':scales[name]=np.exp(delta[0]);continue
+            if kind=='intrinsics':
+                k=seed.copy();k[0,0]*=np.exp(delta[0]);k[1,1]*=np.exp(delta[1]);k[0,2]+=delta[2];k[1,2]+=delta[3]
+                next(c for c in result['cameras']if c['id']==name)['K']=value(k.tolist(),'optimized',['raw depth bundle']);continue
+            pose=seed[0].copy()if kind.startswith('object')else seed.copy()
+            if kind=='object_support':
+                pose[:2,3]+=delta[:2];pose[2,3]=seed[1][2];pose[:3,:3]=Rotation.from_euler('z',delta[2]).as_matrix()@pose[:3,:3]
+            else:pose[:3,3]+=delta[:3];pose[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@pose[:3,:3]
+            if kind.startswith('object'):result=assign_pose(result,name,pose)
+            elif kind=='camera':next(c for c in result['cameras']if c['id']==name)['pose']=value(pose.tolist(),'optimized',['raw depth bundle'])
+            elif kind=='base':result['frames'][name]['transform']=value(pose.tolist(),'optimized',['raw depth bundle'])
+            elif kind=='view':result['view_registrations'][name]['T_world_camera']=pose.tolist()
+            if kind=='view':result['view_registrations'][name]['state']='OPTIMIZED'
+        if result.get('geometry_constraints'):
+            from ..initialization import apply_geometry_constraints
+            result,_=apply_geometry_constraints(result,result['geometry_constraints'])
+        return result,scales
+    def world_points(trial,scales,row,raw,camera,image):
+        posed=observation_scene(trial,image,project.root,complete=False)if image else trial
+        cam=next(c for c in posed['cameras']if c['id']==camera);optical=raw['points_camera_relative']
+        if 'uv_original'in raw:
+            uv=raw['uv_original'];rays=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[uv,np.ones(len(uv))].T).T
+            optical=rays*raw['depth_relative'][:,None]
+        scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',row['image_id']),1.)
+        pose=world_pose(posed,cam);world=(optical*scale)@pose[:3,:3].T+pose[:3,3]
+        return world,posed
+    def errors(x,selected=training,normalized=True):
+        project.checkpoint();trial,scales=assign(x);errors=[]
+        for row,raw,camera,image in selected:
+            world,posed=world_points(trial,scales,row,raw,camera,image)
+            obj=next(o for o in posed['objects']if o['id']==row['object_id']);pose=world_pose(posed,obj)
+            local=(world-pose[:3,3])@pose[:3,:3];tree=models[row['object_id']];_,indexes=tree.query(local)
+            errors.extend((local-tree.data[indexes]).ravel()/(np.sqrt(len(local))if normalized else 1.))
+        return np.asarray(errors)
+    zero=np.zeros(len(bounds));before=errors(zero);radius=np.asarray(bounds)
+    solution=least_squares(lambda x:errors(x),zero,bounds=(-radius,radius),loss='soft_l1',f_scale=.005,
+        max_nfev=int(options.get('max_nfev',80)),diff_step=1e-4)
+    after=errors(solution.x);trial,scales=assign(solution.x)
+    rank=int(np.linalg.matrix_rank(solution.jac*radius[None,:],tol=1e-7))
+    def rmse(x,selected):return float(np.sqrt(np.mean(np.sum(errors(x,selected,False).reshape(-1,3)**2,axis=1))))
+    report.update(before_rmse_m=rmse(zero,training),after_rmse_m=rmse(solution.x,training),
+        rank=rank,parameter_count=len(radius),variables=[{'kind':b[0],'id':b[1]}for b in blocks],
+        holdout_used_for_optimization=False,held_out_views=sorted({r[0]['image_id']for r in rows if r[0]['split']=='validation'}),
+        world_cloud_reprojection='raw optical rays on each solver evaluation')
+    held=[r for r in rows if r[0]['split']=='validation']
+    if held:
+        report['holdout_before_rmse_m']=rmse(zero,held)
+        report['holdout_after_rmse_m']=rmse(solution.x,held)
+    if rank<len(radius):return scene,{**report,'status':'UNRESOLVED','needs':needs+['Camera/Object/scale gauge or coverage is ambiguous; add a fixed visible reference or distinct wrist poses']}
+    if np.linalg.norm(after)>=np.linalg.norm(before)-1e-9:return scene,{**report,'status':'NOT_IMPROVED'}
+    if held and report['holdout_after_rmse_m']>report['holdout_before_rmse_m']+.001:return scene,{**report,'status':'NOT_IMPROVED','needs':['Independent view residual regressed']}
+    preserve(scene,trial);validate(trial,project.root)
+    # Publish new clouds, not edits of previous inference files.
+    folder=project.root/'scratch/depth_bundle'/uuid.uuid4().hex;folder.mkdir(parents=True)
+    for index,(row,raw,camera,image)in enumerate(rows):
+        current=next(r for r in trial['reconstruction_observations']['clouds']if r['image_id']==row['image_id']and r['object_id']==row['object_id'])
+        with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:full={k:v.copy()for k,v in data.items()}
+        world,_=world_points(trial,scales,row,full,camera,image);target=folder/f'{index}.npz'
+        np.savez_compressed(target,**{**full,'points_world_m':world});current.update(path=target.relative_to(project.root).as_posix(),sha256=sha(target),
+            depth_scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',row['image_id']),1.))
+        if current.get('dependencies'):
+            current['dependencies']['camera_signature']=camera_calibration_signature(trial,next(c for c in trial['cameras']if c['id']==camera))
+            current['dependencies']['camera_pose']=world_pose(observation_scene(trial,image,project.root,complete=False),next(c for c in observation_scene(trial,image,project.root,complete=False)['cameras']if c['id']==camera)).tolist()
+    for image_id,binding in trial.get('view_registrations',{}).items():
+        image=images.get(image_id)
+        if image:binding['camera_signature']=camera_calibration_signature(trial,next(c for c in trial['cameras']if c['id']==image['camera']))
+    report['status']='IMPROVED';write(folder/'report.json',report)
+    return trial,report
 
 
 def fit_joint_scene(project, scene, options=None):

@@ -11,6 +11,14 @@ import shutil
 CAPTURE_SCHEMA = 'real2sim.capture/1'
 
 
+def image_quality_reasons(sample,image):
+    reasons=[]
+    if image.get('stale'):reasons.append('stale_camera_sample')
+    if image.get('blur_variance',0)<10:reasons.append('blur_or_textureless_image')
+    if not sample.get('quality',{}).get('eligible_for_calibration',False):reasons.append('capture_quality_not_static')
+    return reasons
+
+
 def register_unbound(project, destination, manifest, samples):
     """Archive measured input before a base/camera calibration exists.
 
@@ -20,11 +28,15 @@ def register_unbound(project, destination, manifest, samples):
     for sample in samples:
         for image in sample['images']:
             relative=(destination/image['path']).relative_to(project.root).as_posix()
+            quality=image_quality_reasons(sample,image)
             row=dict(id=manifest['session_id']+'_'+sample['id']+'_'+image['camera'],path=relative,camera=image['camera'],
-                     split=manifest['split'],group_id=manifest['group_id'],session_id=manifest['session_id'],
+                     split=sample.get('split',manifest['split']),group_id=sample.get('group_id',manifest['group_id']),session_id=manifest['session_id'],
                      sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
+                     scene_state_id=manifest.get('scene_state_id'),snapshot_id=sample['id'],joint_units=manifest['joint_units'],
+                     robot_model_sha256=sha(destination/manifest['robot']['path']),mapping_sha256=manifest['joint_mapping'].get('sha256'),
                      joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
-                     exclusion_reasons=['unbound_capture_calibration'],capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
+                     exclusion_reasons=['unbound_capture_calibration',*quality],capture_quality_reasons=quality,quality_override=manifest.get('quality_override'),
+                     capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
             if image.get('runtime_baseline'):
                 row['runtime_baseline']=copy.deepcopy(image['runtime_baseline'])
                 for key in ('path','pair_path'):row['runtime_baseline'][key]=(destination/image['runtime_baseline'][key]).relative_to(project.root).as_posix()
@@ -249,17 +261,12 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
             reasons = []
             if m['purpose'] != 'snapshot':
                 reasons.extend(legacy_static_reasons(m, events, t))
-            if image.get('stale'):
-                reasons.append('stale_camera_sample')
-            if image.get('blur_variance', 0) < 10:
-                reasons.append('blur_or_textureless_image')
+            reasons.extend(image_quality_reasons(sample,image))
             try:
                 q = align(sample.get('measured_history', samples), t, m['joint_names'], m.get('discrete_joints', []), max_skew_ns).tolist()
             except ValueError as exc:
                 reasons.append(str(exc))
                 q = None
-            if not sample.get('quality', {}).get('eligible_for_calibration', False):
-                reasons.append('capture_quality_not_static')
             relative = (destination / image['path']).relative_to(project.root).as_posix()
             observation = {'id': m.get('source_dataset_id', m['session_id']) + '_' + sample['id'] + '_' + image['camera'], 'path': relative, 'camera': image['camera'], 'split': sample.get('split', m['split']), 'snapshot_id': sample['id'] if m['purpose'] == 'snapshot' else None, 'scene_state_id': m.get('scene_state_id'), 'resolution': image['resolution'], 'sha256': sha(project.root / relative), 'timestamp_ns': t, 'group_id': sample.get('group_id', m['group_id']), 'session_id': m['session_id'], 'q_measured': q, 'joint_names': m['joint_names'], 'eligible': not reasons or bool(m.get('quality_override')), 'exclusion_reasons': [] if m.get('quality_override') else reasons, 'capture_quality_reasons': reasons, 'quality_override': m.get('quality_override'), 'capture_manifest': (destination / 'capture_manifest.yaml').relative_to(project.root).as_posix()}
             if image.get('runtime_baseline'):
@@ -513,7 +520,7 @@ def load_snapshots(root, validation=(), scene_state=None):
                     if list(rgb.size) != image['resolution']:
                         raise ValueError('Runtime baseline resolution mismatch')
                 image['runtime_baseline'] = {'path': (folder / baseline).relative_to(root).as_posix(), 'sha256': metadata['files'][baseline], 'engine': pair['engine'], 'workspace_context': pair['workspace_context'], 'quality': pair['quality'], 'sim_q_measured_rad': pair['sim_q_measured_rad'], 'sim_timestamp': pair['sim_timestamp'], 'sim_cameras': pair['sim_cameras'], 'joint_mapping': pair.get('joint_mapping'), 'runtime_profile': pair.get('runtime_profile'), 'pair_path': (folder / 'pair.json').relative_to(root).as_posix(), 'pair_sha256': metadata['files']['pair.json']}
-                image['runtime_baseline'].update({key:pair[key] for key in ('physics_steps','total_physics_steps','simulation_time_s','state_application','sim_target_joint_rad','sim_joint_delta_rad','sim_object_poses_world')if key in pair})
+                image['runtime_baseline'].update({key:pair[key] for key in ('scene_identity','source_scene','physics_steps','total_physics_steps','simulation_time_s','state_application','sim_target_joint_rad','sim_joint_delta_rad','sim_object_poses_world')if key in pair})
             images.append(image)
         samples.append({'id': row['id'], 'timestamp_ns': state['timestamp_ns'], 'q_measured': state['q_measured'], 'measured_history': history, 'quality': {'eligible_for_calibration': all((i.get('runtime_baseline', {}).get('quality', {}).get('eligible', True) for i in images))}, 'images': images, 'metadata_path': (folder / 'metadata.json').relative_to(root).as_posix(), 'split': 'validation' if row['id'] in validation else 'train', 'group_id': manifest['dataset_id'] + '_' + row['id']})
     normalized = {**manifest, 'source_dataset_id': manifest['dataset_id'], 'session_id': manifest['dataset_id'] + '_' + sha(root / 'capture_manifest.yaml')[:12], 'group_id': manifest['dataset_id'], 'scene_state_id': scene_state, 'purpose': 'snapshot', 'split': 'train'}

@@ -300,3 +300,19 @@ def test_unknown_absolute_mdl_import_is_not_misclassified_as_sdk_standard_librar
     from real2sim_builder.export import copy_native_asset
     source=tmp_path/'Custom.mdl';source.write_text('mdl 1.7;\nimport ::custom::Private::*;\n')
     with pytest.raises(ValueError):copy_native_asset(source,tmp_path/'package')
+
+
+def test_export_pins_literal_memo_while_current_memo_is_edited(tmp_path):
+    from real2sim_builder.export import export_revision,verify_package
+    from real2sim_builder.evidence import save_scene_memo
+    from real2sim_builder.files import write,read,sha
+    p=project_fixture(tmp_path);text='컵 둘\r\nSame product? 💜\n'
+    save_scene_memo(p,text)
+    write(p.root/'working/validation/report.json',{'passed':False,'input_signature':p.signature()})
+    out=tmp_path/'revision';export_revision(p,destination=out,allow_unvalidated=True)
+    provenance=read(out/'provenance.json');memo=provenance['scene_memo']
+    assert(out/memo['path']).read_bytes()==text.encode()and sha(out/memo['path'])==memo['sha256']
+    before={f.relative_to(out).as_posix():sha(f)for f in out.rglob('*')if f.is_file()}
+    save_scene_memo(p,'Now different products.')
+    assert before=={f.relative_to(out).as_posix():sha(f)for f in out.rglob('*')if f.is_file()}
+    out.rename(tmp_path/'moved');verify_package(tmp_path/'moved')

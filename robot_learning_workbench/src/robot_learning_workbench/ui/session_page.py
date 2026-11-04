@@ -44,6 +44,7 @@ class CapturePage(QWidget):
         self.capture_button=QPushButton('캡처');self.capture_button.setObjectName('primaryAction');self.capture_button.clicked.connect(lambda:self.send('session_snapshot'))
         self.finish_button=QPushButton('종료');self.finish_button.setObjectName('stopAction');self.finish_button.clicked.connect(self.finish)
         for i,b in enumerate((self.connect_button,self.start_teleop_button,self.capture_button,self.finish_button)):actions.addWidget(b,0,i)
+        self.connection_hint=QLabel();self.connection_hint.setWordWrap(True);self.connection_hint.setObjectName('mutedLabel');left.addWidget(self.connection_hint)
         self.capture_hint=QLabel();self.capture_hint.setWordWrap(True);self.capture_hint.hide();left.addWidget(self.capture_hint)
         self.teleop_hint=QLabel();self.teleop_hint.setWordWrap(True);self.teleop_hint.setObjectName('mutedLabel');left.addWidget(self.teleop_hint);self.teleop_hint.hide()
         self.operation_message=QLabel();self.operation_message.setWordWrap(True);left.addWidget(self.operation_message);self.operation_message.hide()
@@ -59,6 +60,8 @@ class CapturePage(QWidget):
         note=QLabel('종료: 로봇·카메라 연결 해제, Torque 유지');note.setWordWrap(True);note.setObjectName('mutedLabel');right.addWidget(note)
         diagnostics=QPushButton('진단 로그');diagnostics.setCheckable(True);layout.addWidget(diagnostics);self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumHeight(100);self.log.hide();diagnostics.toggled.connect(self.log.setVisible);layout.addWidget(self.log)
         self.buttons(False)
+        self.catalog_job=BackendJob(python,self);self.catalog_job.finished.connect(self.projects_loaded)
+        self.catalog_job.start('source_scenes',workspace=str(self.workspace))
     def active(self):return self.client.active()or self.settings.calibration_client.active()
     def cancel_run(self):self.client.cancel();self.settings.calibration_client.cancel()
     def buttons(self,connected):
@@ -66,6 +69,14 @@ class CapturePage(QWidget):
         idle=not self.active()and not self.finishing and self.job.process.state()==QProcess.ProcessState.NotRunning
         connected=connected and not self.finishing and not self.client.cancel_requested
         self.connect_button.setEnabled(idle and self.project is not None and self.settings.saved_recipe is not None)
+        reason=''
+        if self.finishing:reason='현재 연결 종료를 기다리세요.'
+        elif self.active():reason='현재 Session이 연결 중이거나 실행 중입니다.'
+        elif not idle:reason='Project·장치 구성 불러오기를 기다리세요.'
+        elif self.project is None:reason='위에서 Project를 선택하거나 새 프로젝트를 만드세요.'
+        elif self.settings.saved_recipe is None:reason='장치 설정에서 저장된 로봇·카메라 구성을 선택하고 저장하세요.'
+        self.connect_button.setToolTip(reason);self.connection_hint.setText(reason)
+        self.connection_hint.setVisible(bool(reason)and idle)
         progress=self.last_progress
         self.start_teleop_button.setEnabled(connected and progress.get('teleoperation_available',False)and not progress.get('teleop_active',False))
         self.capture_button.setEnabled(connected and progress.get('capture_request_allowed',False))
@@ -75,6 +86,18 @@ class CapturePage(QWidget):
         for button in self.project_buttons:button.setEnabled(idle)
         self.settings.configuration.setEnabled(idle);self.materials.setEnabled(idle)
         self.settings_button.setEnabled(idle);self.project_combo.setEnabled(idle)
+    def projects_loaded(self,response):
+        if not response.get('ok'):
+            self.show_error(response.get('error',{}).get('message','Project 목록을 읽지 못했습니다.'));return
+        if self.active():return
+        selected=self.project['project']if self.project else self.project_combo.currentData()
+        self.project_combo.blockSignals(True);self.project_combo.clear();self.project_combo.addItem('Project 선택 또는 새 프로젝트 만들기',None)
+        for item in response['result']['scenes']:
+            self.project_combo.addItem(item['name'],item['project']);self.project_combo.setItemData(self.project_combo.count()-1,item['project'],Qt.ItemDataRole.ToolTipRole)
+        index=self.project_combo.findData(selected)
+        if selected and index<0:
+            self.project_combo.addItem(self.project['name']if self.project else Path(selected).name,selected);index=self.project_combo.count()-1
+        self.project_combo.setCurrentIndex(max(index,0));self.project_combo.blockSignals(False)
     def edit_settings(self):
         if self.active():return
         self.settings.exec();self.buttons(False)
@@ -100,7 +123,11 @@ class CapturePage(QWidget):
         try:self.job.start('session_project',path=str(path),workspace=str(self.workspace))
         except Exception as error:self.buttons(False);self.show_error(str(error))
     def select_project(self,index):
+        if self.active():return
         path=self.project_combo.itemData(index)
+        if path is None:
+            self.project=None;self.settings.saved_recipe=None;self.snapshot_table.reset();self.materials.load({})
+            self.project_path.setText('Project를 선택하세요');self.device_state.setText('장치 설정에서 로봇/카메라를 선택하세요');self.buttons(False);return
         if path and(self.project is None or path!=self.project['project']):self.load_project(path)
     def project_result(self,response):
         if self.active():self.show_error('연결 중 Project 변경 결과를 적용하지 않습니다');return

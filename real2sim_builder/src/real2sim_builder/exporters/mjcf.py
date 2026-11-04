@@ -24,7 +24,10 @@ def export(scene,root,path):
     custom=ET.SubElement(model,'custom')
     ET.SubElement(custom,'text',name='canonical_frames',data=json.dumps(scene['frames'],sort_keys=True))
     ET.SubElement(custom,'text',name='semantic_roles',data=json.dumps({o['id']:o['role'] for o in scene['objects']},sort_keys=True))
-    ET.SubElement(model,'option',timestep='.002',gravity='0 0 -9.81')
+    option=ET.SubElement(model,'option',timestep='.002',gravity='0 0 -9.81')
+    # Same native contact setting as the Workbench physics model. A convex mesh
+    # resting on a flat support needs multiple contacts, not a single point.
+    ET.SubElement(option,'flag',multiccd='enable')
     visual=ET.SubElement(model,'visual')
     width=max(c['resolution'][0] for c in scene['cameras']);height=max(c['resolution'][1] for c in scene['cameras'])
     ET.SubElement(visual,'global',offwidth=str(width),offheight=str(height))
@@ -43,7 +46,7 @@ def export(scene,root,path):
             for i,part in enumerate(parts(obj,field)):
                 attrs={'name':obj['id']+'_'+field+'_'+str(i),**pose(part['pose']),
                     'contype':'0' if field=='visual' else '1','conaffinity':'0' if field=='visual' else '1',
-                    'group':'1' if field=='visual' else '3','rgba':numbers([*(obj['color']['value'] or [.5]*3),1 if field=='visual' else 0]),
+                    'group':'1' if field=='visual' else '3','rgba':numbers([*part.get('color',obj['color']['value'] or [.5]*3),1 if field=='visual' else 0]),
                     'mass':str(float(mass)/len(collisions)) if dynamic and field=='collision' else '0'}
                 kind=part['type'];dims=part['dimensions'];attrs['type']=kind
                 if kind=='box':attrs['size']=numbers(dims/2)
@@ -61,7 +64,7 @@ def export(scene,root,path):
                     attrs['mesh']=mesh_names[key]
                 friction=obj['physics']['friction']['value']
                 if friction is not None:attrs['friction']=numbers([friction,.005,.0001])
-                texture=obj['visual'].get('texture') if field=='visual' else None
+                texture=part.get('texture',obj['visual'].get('texture')) if field=='visual' else None
                 if texture:
                     if texture not in texture_names:
                         name='texture_'+str(len(texture_names));texture_names[texture]=name

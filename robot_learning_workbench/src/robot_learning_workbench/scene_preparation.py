@@ -1,6 +1,5 @@
 """Scene material preparation using the existing Builder Project/Evidence contract."""
 from pathlib import Path
-import tempfile
 from real2sim_builder.project import Project
 from real2sim_builder.files import read,write,sha
 from real2sim_builder.candidate import exclusive
@@ -24,23 +23,20 @@ def scene_details(path):
         for row in evidence.get(key,[]):
             file=project.root/row['path'];status='MISSING'if not file.is_file()else'CHANGED'if row.get('sha256')and sha(file)!=row['sha256']else'REGISTERED'
             inputs.append({'kind':kind,'path':row['path'],'sha256':row.get('sha256'),'status':status})
-    notes=''
-    if evidence.get('briefs'):
-        row=evidence['briefs'][-1];file=project.root/row['path']
-        if not file.is_file()or sha(file)!=row['sha256']:raise ValueError('Scene notes missing or changed')
-        notes=file.read_text()
+    from real2sim_builder.evidence import scene_memo
+    memo=scene_memo(project)
     ready=False;needs=['Scene/Candidate not created; inputs may be saved independently']
     current=project.root/'working/current_scene.yaml'
     if current.is_file():
         from real2sim_builder.scene import validate
         try:validate(read(current),project.root,complete=True);ready=True;needs=[]
         except(ValueError,FileNotFoundError)as error:needs=[str(error)]
-    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':notes,'notes_saved':bool(evidence.get('briefs')),'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
+    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':memo['text'],'notes_saved':memo['saved'],'scene_memo':{k:v for k,v in memo.items()if k!='text'},'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
 
 
 def save_inputs(path,files,notes):
     """No input is required. Store context first; geometry import is explicit later."""
-    from real2sim_builder.evidence import add_image,add_video,copy_input,add_brief
+    from real2sim_builder.evidence import add_image,add_video,copy_input,save_scene_memo
     project=Project(path);project.require_writable()
     if not isinstance(notes,str):raise ValueError('Scene notes must be text')
     files=[Path(p).resolve()for p in files]
@@ -53,7 +49,7 @@ def save_inputs(path,files,notes):
             if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):add_image(project,file,camera='reference',context_only=True)
             elif suffix in('.mp4','.mov','.avi'):add_video(project,file,camera='reference')
             else:
-                if suffix in('.urdf','.obj'):
+                if suffix in('.urdf','.obj','.usd','.usda','.usdc'):
                     from real2sim_builder.export import copy_native_asset,verify_native_closure
                     stored=copy_native_asset(file,project.root/'input/models');verify_native_closure(project.root,stored.relative_to(project.root).as_posix());relative=stored.relative_to(project.root).as_posix()
                 else:relative=copy_input(project,file,'models'if suffix=='.stl'else'metadata')
@@ -61,11 +57,7 @@ def save_inputs(path,files,notes):
                 rows=evidence.setdefault(key,[])
                 if not any(row['path']==relative for row in rows):rows.append({'path':relative,'sha256':sha(project.root/relative),'source':str(file),'status':'UNVERIFIED_INPUT'})
                 write(project.root/'input/evidence.yaml',evidence);project.invalidate()
-    with exclusive(project):
-        previous=scene_details(project.root)['notes']
-        if previous!=notes or not project.evidence.get('briefs'):
-            with tempfile.TemporaryDirectory(dir=project.root/'scratch')as temporary:
-                file=Path(temporary)/'scene-notes.txt';file.write_text(notes);add_brief(project,file)
+    save_scene_memo(project,notes)
     return scene_details(project.root)
 
 

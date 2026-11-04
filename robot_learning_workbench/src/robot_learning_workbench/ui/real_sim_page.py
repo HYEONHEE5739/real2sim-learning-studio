@@ -36,9 +36,15 @@ class RealSimPage(QWidget):
         box.addWidget(QLabel('이번 실행의 Paired Capture · Real Side / Sim Side / Real Wrist / Sim Wrist'))
         self.run_folder=QLabel();self.run_folder.setWordWrap(True);self.run_folder.hide();box.addWidget(self.run_folder)
         self.snapshot_table=SnapshotTable(paired=True,parent=self);self.snapshot_table.error.connect(self.show_error);box.addWidget(self.snapshot_table,1)
+        self.refit_button=QPushButton('촬영 자료로 Scene 재정합');self.refit_button.clicked.connect(self.open_refinement);box.addWidget(self.refit_button)
         self.log=QPlainTextEdit();self.log.hide();box.addWidget(self.log);self.buttons()
         self.catalog_signature=None;self.catalog_timer=QTimer(self);self.catalog_timer.setInterval(1500);self.catalog_timer.timeout.connect(self.refresh_scenes);self.catalog_timer.start()
         self.refresh_scenes()
+    def open_refinement(self):
+        if self.active()or not self.project:return
+        from real2sim_builder.ui_reconstruction import ReconstructionDialog
+        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True)
+        dialog.exec()
     @property
     def rows(self):return self.snapshot_table.rows
     def active(self):return self.client.active()
@@ -58,6 +64,7 @@ class RealSimPage(QWidget):
         idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
         ready=self.client.running and not self.client.cancel_requested and self.last_progress.get('session_state')=='OBSERVING'and self.last_progress.get('teleoperation_available',False)
         self.scene_combo.setEnabled(idle);self.engine.setEnabled(idle);self.connect_button.setEnabled(idle and self.template is not None or bool(ready))
+        if hasattr(self,'refit_button'):self.refit_button.setEnabled(idle and self.project is not None)
         self.connect_button.setText('Teleoperation 시작'if ready else'Real/Sim 연결 · Teleop')
         self.capture_button.setEnabled(self.client.running and not self.client.cancel_requested and self.last_progress.get('capture_request_allowed',False))
         self.capture_button.setText('Capture 처리 중…'if self.last_progress.get('capture_pending')else'Capture');self.stop_button.setEnabled(self.active())

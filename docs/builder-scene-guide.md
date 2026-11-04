@@ -1,5 +1,9 @@
 # 새 SO-101 Scene 제작과 Workflow 연결
 
+2026-11-04 자동 제작 확장: Scene Prepare의 기존 배치를 유지하고 Auto Reconstruction에 USDA Library·Codex 작업자료/명시 CLI 실행·촬영 배치 선택을 연결했다. SAM→DA3가 모델링보다 먼저 실행되며 Camera K/행렬·보드 클릭은 필수 입력이 아니다. 새 Visual은 Codex/Blender 물체 자산이고, 치수만으로 Primitive Visual을 생성하는 기본 경로는 제거했다. Real/Sim 중단 후 **촬영 자료로 Scene 재정합**을 열면 기존 Pair의 실제 RGB/q로 자산을 재사용해 정합한다. 정확한 현재 흐름·명령·제한은 [2026-11-04 자동 정합 안내](../real2sim_builder/AUTO_SCENE_FITTING.md)를 따른다. 아래 이전 실행/Scene별 기록은 당시 범위로 유지한다.
+
+2026-11-03 연결 화면 수정: Scene Prepare의 Project 목록에서 저장된 Project를 선택하면 연결된 장치 구성을 복원한다. Project를 선택하지 않았거나 장치 구성이 없으면 로봇 연결 버튼 아래와 툴팁에 이유를 표시한다. 새 Project는 장치 설정에서 구성을 선택·저장한 뒤 연결한다. Project 선택/설정 복원만으로 Serial·Camera·모터를 연결하지 않는다. 회귀 `test_capture_connection_ready.py`와 기존 Capture/장치 설정/메모 UI 검사 총 11개 통과. 실제 실물 연결·구동은 이 수정에서 실행하지 않았다.
+
 기존 Project/Scene을 덮어쓰지 않고 새 Builder Project와 Export Revision을 만든다. 실제 촬영·모터 동작은 사용자의 현장 조작이다. 이 안내의 명령은 제작 API 사용 예시이며 자동 실행되지 않는다. 이번 변경은 소스 구현만 수행했으며 UI·엔진·하드웨어 실행으로 확인하지 않았다.
 
 **두 화면의 역할:** Scene Prepare는 완성된 Scene이 없는 새 Project에서 초기 Input·메모·실측 Snapshot을 모으는 단계다. 기존 Project는 명시적으로 열 때만 복원한다. Real/Sim은 제작한 Scene의 정합을 반복하는 단계다. 두 화면의 아래 목록은 이번 연결에서 촬영한 결과만 표시하며, 종료 후에도 유지하고 다음 실행을 시작하면 화면 목록만 비운다. Project를 열 때 과거 Capture를 일괄 표시하지 않는다. 오른쪽 Input 목록은 직접 추가한 자료이며 Capture 이력과 섞지 않는다.
@@ -125,3 +129,10 @@ Mimic은 기존 물체 기준 Pick & Place 생성기다. 다른 Acceptance 함�
 실물 Teleoperation은 Scene Prepare의 **텔레옵 시작** 버튼 또는 **Real/Sim 연결 · Teleop** 동작으로 바로 시작한다. 별도 체크리스트·승인 팝업·제안 SHA 전달 단계는 없다. 연결만 하는 Capture 버튼은 관측으로 시작하며, 화면 열기·설정 복원만으로 구동하지 않는다. 시작 명령을 받은 Worker가 현재 장치/보정·Position Mode·Feedback·목표를 확인하고, 미구동 축에 인코딩된 Leader 목표를 설정한 뒤 Torque를 켠다. 따라서 시작 시 실제 Follower가 움직일 수 있다. 측정값은 그대로 보존하며 실제 목표만 기존 model/motor/Precision 교집합으로 제한한다. SDK Encoding·Watchdog·Stop/Cancel과 중단 시 Torque 유지 정책은 유지한다. 이번 변경으로 실기 동작을 확인한 것은 아니며, 자율 Follower Policy Rollout은 아직 구현하지 않았다.
 
 Scene Prepare의 기본 조작은 **로봇 연결 → 텔레옵 시작 → 캡처 → 종료**다. 종료는 Teleop 제어·카메라·장치 연결과 해당 Session Worker를 정리하고 저장된 Snapshot은 유지한다. 촬영 대기는 화면에 짧게 표시하며 시간 정합·안정성의 상세 진단은 기존 결과/로그에 남긴다. Real/Sim의 Scene 목록 조회는 JSON 계약·Manifest를 확인하며 USD SDK나 엔진을 초기화하지 않는다.
+
+
+## 공용 Object Library와 현재 Scene 자료
+
+새 USDA는 `workbench_runs/object_assets/<id>/<version>/`에 저장되고 Scene Prepare의 각 Project는 자기 Input/메모/Capture/정합 결과를 보관합니다. 같은 Workspace의 새 Scene은 Auto Reconstruction의 USDA 목록에서 기존 **Workspace** 자산을 골라 재사용할 수 있습니다. **Legacy**는 예전에 Project 안에 저장한 자산이며 지우거나 자동 이동하지 않습니다. 필요한 경우 **선택 Legacy 자산을 공용 Library에 등록**으로 복사 등록하고 해당 Instance에서 새 참조를 선택하세요.
+
+Scene 자료 저장은 Project의 `input/scene_memo.txt` 하나를 갱신합니다. Codex는 저장한 현재 원문과 사진을 함께 해석합니다. Python은 문장 의미를 키워드로 판단하지 않습니다. 빈 메모는 빈 입력이며 안내 양식은 입력 예시일 뿐입니다. 과거 파일은 보존하고 현재 메모와 합치지 않습니다. 메모를 바꾸면 새 분석을 요청하며 기존 USDA/Export는 유지합니다. Auto Reconstruction을 다시 열면 실측/USDA가 없는 Object도 Group·선택·요청과 함께 복원됩니다. 새 정합 결과는 같은 Project의 새 Candidate/Export로 남으며 과거 Revision은 바뀌지 않습니다. 상세 경로·CLI는 [자동 Scene 제작](../real2sim_builder/AUTO_SCENE_FITTING.md)의 최신 Workspace 절을 참고하세요.

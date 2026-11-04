@@ -44,11 +44,15 @@ class Candidate:
             raise ValueError('Unknown candidate: ' + name)
 
     @classmethod
-    def create(cls, project, name, target_object=None, allow=None):
+    def create(cls, project, name, target_object=None, allow=None, *, source_scene=None, source_revision=None):
         identifier(name)
         with exclusive(project):
             root = project.root / 'scratch/agent' / name
             scene = project.scene if (project.root / 'working/current_scene.yaml').exists() else empty(project.info['name'])
+            current_signature=project.signature(scene)
+            if source_scene is not None:
+                if not source_revision:raise ValueError('Source Scene requires a verified Revision identity')
+                scene=copy.deepcopy(source_scene);validate(scene,project.root)
             scope = None
             if target_object is not None:
                 if target_object not in {o['id'] for o in scene['objects']}:
@@ -59,7 +63,7 @@ class Candidate:
                 scope = {'target_object': target_object, 'allow': fields}
             root.mkdir(parents=True, exist_ok=False)
             write(root / 'candidate_scene.yaml', scene)
-            write(root / 'candidate.json', {'scope': scope, 'base_scene_sha256': sha(root / 'candidate_scene.yaml'), 'id': name, 'status': 'OPEN', 'base_signature': project.signature(scene), 'base_exists': (project.root / 'working/current_scene.yaml').exists()})
+            write(root / 'candidate.json', {'scope': scope, 'base_scene_sha256': sha(root / 'candidate_scene.yaml'), 'id': name, 'status': 'OPEN', 'base_signature': current_signature, 'source_revision': source_revision, 'base_exists': (project.root / 'working/current_scene.yaml').exists()})
         return cls(project, name)
 
     @property

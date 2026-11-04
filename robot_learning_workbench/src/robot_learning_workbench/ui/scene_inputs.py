@@ -23,13 +23,18 @@ DEFAULT_NOTES = """[장면과 작업 설명]
 class SceneInputs(QWidget):
     saveRequested=pyqtSignal(list,str)
     def __init__(self,workspace,parent=None):
-        super().__init__(parent);self.workspace=str(workspace);self.pending=[];box=QVBoxLayout(self);box.setContentsMargins(0,0,0,0)
+        super().__init__(parent);self._loaded_notes='';self._displayed_notes='';self.workspace=str(workspace);self.pending=[];box=QVBoxLayout(self);box.setContentsMargins(0,0,0,0)
         box.addWidget(QLabel('Input Data · 모두 선택 사항'));self.add=QPushButton('＋ Input Data 추가');box.addWidget(self.add);self.add.clicked.connect(self.choose)
         self.files=QListWidget();self.files.setTextElideMode(Qt.TextElideMode.ElideMiddle);self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff);self.files.setMaximumHeight(170);box.addWidget(self.files)
-        box.addWidget(QLabel('Scene 메모'));self.notes=QPlainTextEdit();self.notes.setPlainText(DEFAULT_NOTES);self.notes.setMinimumHeight(140);self.notes.setStyleSheet('QPlainTextEdit { background: #f4f5f7; color: #18212d; border: 1px solid #abb9c8; border-radius: 6px; padding: 8px; }');box.addWidget(self.notes,1)
-        self.save=QPushButton('Scene 자료 저장');self.save.clicked.connect(lambda:self.saveRequested.emit(self.pending,self.notes.toPlainText()));box.addWidget(self.save)
+        box.addWidget(QLabel('Scene 메모'));self.notes=QPlainTextEdit();self.notes.setPlaceholderText(DEFAULT_NOTES);self.notes.setMinimumHeight(140);self.notes.setStyleSheet('QPlainTextEdit { background: #f4f5f7; color: #18212d; border: 1px solid #abb9c8; border-radius: 6px; padding: 8px; }');box.addWidget(self.notes,1)
+        self.save=QPushButton('Scene 자료 저장');self.save.clicked.connect(lambda:self.saveRequested.emit(self.pending,self.note_text()));box.addWidget(self.save)
         self.reconstruct=QPushButton('Auto Reconstruction');box.addWidget(self.reconstruct);self.reconstruct.setEnabled(False)
         self.reconstruct.clicked.connect(self.open_reconstruction);self.project_path=None;self.backend_python=None
+
+    def note_text(self):
+        text=self.notes.toPlainText()
+        # Qt normalizes display line endings; an untouched prompt retains bytes.
+        return self._loaded_notes if text==self._displayed_notes else text
 
     def open_reconstruction(self):
         if not self.project_path or not self.backend_python:return
@@ -41,5 +46,5 @@ class SceneInputs(QWidget):
             if file not in self.pending:self.pending.append(file);self.files.addItem('추가 예정 · '+file)
     def load(self,data):
         self.project_path=data.get('project');self.reconstruct.setEnabled(bool(self.project_path and self.backend_python))
-        self.pending=[];self.files.clear();self.notes.setPlainText(data.get('notes','')if data.get('notes_saved')or data.get('notes')else DEFAULT_NOTES)
+        self.pending=[];self.files.clear();self._loaded_notes=data.get('notes','');self.notes.setPlainText(self._loaded_notes);self._displayed_notes=self.notes.toPlainText()
         for row in data.get('inputs',[]):self.files.addItem(row.get('status','등록')+' · '+row.get('path',''))

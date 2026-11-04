@@ -14,6 +14,9 @@ class SceneView:
         self.path=Path(scene).resolve();self.engine=engine;self.settings_path=Path(settings).resolve();self.mapping=copy.deepcopy(mapping)
         self.package=load_scene(self.path);self.scene_identity=asdict(self.package.identity)
         if engine not in self.package.scene['engines']:raise ValueError('Selected Scene does not declare this engine')
+        authored=self.package.root/'authored_scene.json'
+        self.source_scene={'package_path':str(self.package.root),'identity':self.scene_identity,
+            'authored_scene_sha256':file_sha256(authored)if authored.is_file()else None}
         self.settings_sha256=file_sha256(self.settings_path);self.settings=json.loads(self.settings_path.read_text());self.settings.pop('package_root',None)
         self.render_type=self.settings.pop('render_type','native')
         if self.render_type not in('native','authored'):raise ValueError('Unsupported Scene render settings')
@@ -116,7 +119,7 @@ class NativeRenderer:
         steps=self.total_physics_steps-self.last_frame_steps;self.last_frame_steps=self.total_physics_steps
         return {'images':images,'measured_q_rad':measured.tolist(),'applied_sim_joint_rad':applied.tolist(),'sim_joint_delta_rad':(applied.astype(np.float64)-measured).tolist(),
             'sim_target_joint_rad':target.tolist(),'sim_object_poses_world':objects,'simulation_time_s':simulation_time,
-            'scene_identity':self.view.scene_identity,'engine':self.view.engine,'physics_steps':steps,'total_physics_steps':self.total_physics_steps,'state_application':self.state_application,
+            'scene_identity':self.view.scene_identity,'source_scene':self.view.source_scene,'engine':self.view.engine,'physics_steps':steps,'total_physics_steps':self.total_physics_steps,'state_application':self.state_application,
             'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,
             'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED'}
     def close(self):

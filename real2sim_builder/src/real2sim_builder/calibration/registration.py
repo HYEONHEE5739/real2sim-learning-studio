@@ -68,3 +68,91 @@ def camera_from_anchors(world_points,uv,k,distortion,*,max_rmse_px=3.):
     return {'status':'ESTIMATED','T_world_camera':np.linalg.inv(pose).tolist(),'rmse_px':rmse,
             'anchor_count':len(points),'provenance':'optimized','physical_verified':False,
             'scope':'known-intrinsic metric-anchor PnP; independent validation is separate'}
+
+
+def wrist_from_motion(link_poses,camera_poses):
+    """Metric hand-eye/robot-world fit: s*C_i = X*FK(q_i)*Mount.
+
+    DA3 camera poses must already share one relative frame. Joint values and
+    model geometry are fixed. A full-rank multi-motion solve supplies scale;
+    simply having a URDF does not. World is the robot-base gauge, not a measured
+    tabletop/world registration.
+    """
+    from scipy.optimize import least_squares
+    from scipy.spatial.transform import Rotation
+    a=np.asarray(link_poses,float);b=np.asarray(camera_poses,float)
+    if a.shape!=b.shape or a.ndim!=3 or a.shape[1:]!=(4,4)or not np.isfinite(a).all()or not np.isfinite(b).all():raise ValueError('Matching finite FK and relative Camera poses required')
+    unresolved={'status':'UNRESOLVED','physical_verified':False,'needs':['Move the wrist through distinct rotations and translations while objects remain fixed']}
+    if len(a)<4:return unresolved
+    def pose(v):
+        t=np.eye(4);t[:3,:3]=Rotation.from_rotvec(v[3:]).as_matrix();t[:3,3]=v[:3];return t
+    def pack(t):return np.r_[t[:3,3],Rotation.from_matrix(t[:3,:3]).as_rotvec()]
+    def residual(x):
+        base=pose(x[:6]);mount=pose(x[6:12]);scale=np.exp(x[12]);out=[]
+        for f,c in zip(a,b):
+            predicted=base@f@mount
+            out.extend(predicted[:3,3]-c[:3,3]*scale)
+            out.extend(Rotation.from_matrix(predicted[:3,:3]@c[:3,:3].T).as_rotvec())
+        return np.asarray(out)
+    solutions=[]
+    for scale in(.1,1.,10.):
+        seed=b[0].copy();seed[:3,3]*=scale
+        initial=np.r_[pack(seed@np.linalg.inv(a[0])),np.zeros(6),np.log(scale)]
+        solutions.append(least_squares(residual,initial,loss='soft_l1',f_scale=.01,max_nfev=300,
+            bounds=(np.r_[np.full(12,-np.inf),-8.],np.r_[np.full(12,np.inf),8.])))
+    best=min(solutions,key=lambda s:np.linalg.norm(residual(s.x)));rank=int(np.linalg.matrix_rank(best.jac,tol=1e-7))
+    rmse=float(np.sqrt(np.mean(residual(best.x)**2)))
+    if rank<13 or rmse>.02:return {**unresolved,'rank':rank,'rmse':rmse}
+    return {'status':'OPTIMIZED','scale':float(np.exp(best.x[12])),'T_relative_base':pose(best.x[:6]).tolist(),
+        'T_link_camera':pose(best.x[6:12]).tolist(),'rank':rank,'rmse':rmse,'physical_verified':False,
+        'gauge':'robot_base; absolute tabletop/world pose not measured','provenance':'optimized'}
+
+
+def align_depth_batches(batches):
+    """Align independent DA3 batches using actual shared-image depth points.
+
+    A shared camera center alone cannot determine scale. Matching pixels in the
+    shared depth view provide 3D correspondences; disconnected components stay
+    unresolved. Returned similarities map each batch into the first batch.
+    """
+    from ..files import sha
+    loaded=[]
+    for batch in batches:
+        if sha(batch['path'])!=batch['metadata']['sha256']:raise ValueError('DA3 batch bytes changed')
+        with np.load(batch['path'],allow_pickle=False)as data:loaded.append({k:v.copy()for k,v in data.items()})
+    def points(index,name):
+        data=loaded[index];i=batches[index]['image_ids'].index(name);depth=data['depth'][i];k=data['intrinsics'][i]
+        h,w=depth.shape;v,u=np.mgrid[0:h:max(1,h//35),0:w:max(1,w//45)]
+        z=depth[v,u].ravel();rays=np.linalg.solve(k,np.array([u.ravel(),v.ravel(),np.ones(u.size)]))
+        ext=np.eye(4);ext[:data['extrinsics'][i].shape[0]]=data['extrinsics'][i];pose=np.linalg.inv(ext)
+        return (rays.T*z[:,None])@pose[:3,:3].T+pose[:3,3],(h,w)
+    resolved={0:{'state':'PREDICTED','scale':1.,'T_common_batch':np.eye(4).tolist(),'scope':'relative reference frame; metric scale unresolved'}}if batches else{}
+    while True:
+        progress=False
+        for target in range(len(batches)):
+            if target in resolved:continue
+            for parent,binding in list(resolved.items()):
+                common=set(batches[parent]['image_ids'])&set(batches[target]['image_ids'])
+                sources=[];targets=[]
+                for name in sorted(common):
+                    a,shape=points(target,name);b,other=points(parent,name)
+                    if shape!=other:continue
+                    keep=np.isfinite(a).all(1)&np.isfinite(b).all(1)
+                    if keep.sum()<30:continue
+                    matrix=np.asarray(binding['T_common_batch']);sources.append(a[keep]);targets.append((b[keep]*binding['scale'])@matrix[:3,:3].T+matrix[:3,3])
+                if not sources:continue
+                a=np.concatenate(sources);b=np.concatenate(targets)
+                fit=align_points(a,b,estimate_scale=True)
+                if fit['status']!='ESTIMATED':continue
+                for _ in range(3):
+                    errors=np.asarray(fit['residual']);keep=errors<=np.percentile(errors,80)
+                    fit=align_points(a[keep],b[keep],estimate_scale=True)
+                    matrix=np.asarray(fit.get('T_target_source',np.eye(4)));errors=np.linalg.norm(a*fit.get('scale',1)@matrix[:3,:3].T+matrix[:3,3]-b,axis=1)
+                    fit['residual']=errors.tolist()
+                if fit['status']!='ESTIMATED'or fit['rmse']>max(1e-5,np.linalg.norm(np.ptp(b,axis=0))*.03):continue
+                resolved[target]={'state':'PREDICTED','scale':fit['scale'],'T_common_batch':fit['T_target_source'],
+                    'overlap':sorted(common),'rmse':fit['rmse'],'scope':'overlap depth similarity; metric scale unresolved'}
+                progress=True;break
+        if not progress:break
+    return {'batches':[resolved.get(i,{'state':'UNRESOLVED','needs':['Add overlapping views; independent DA3 frames were not merged']})for i in range(len(batches))],
+            'metric_scale_verified':False,'physical_verified':False}

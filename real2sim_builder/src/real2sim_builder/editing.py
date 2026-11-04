@@ -21,8 +21,13 @@ def preserve(before, after, path='scene'):
             for key, old in before.items():
                 preserve(old, None, path + '.' + key)
     elif isinstance(before, list):
+        identified=bool(before)and all(isinstance(o,dict)and 'id'in o for o in before)
+        by_id={o['id']:o for o in after}if identified and isinstance(after,list)else{}
         for i, old in enumerate(before):
-            following = after[i] if isinstance(after, list) and i < len(after) else None
+            following = by_id.get(old['id'])if identified else after[i] if isinstance(after, list) and i < len(after) else None
+            # Removing a placed asset instance preserves the independent
+            # measured asset in the library; it does not edit its dimensions.
+            if identified and following is None and path.endswith('.objects')and old.get('object_asset'):continue
             preserve(old, following, path + '.' + str(i))
 
 
@@ -64,7 +69,19 @@ def apply(scene, operations, root):
         name = operation.get('id')
         if name:
             identifier(name)
-        if op == 'add_object':
+        if op == 'use_object_asset':
+            obj=next(o for o in result['objects']if o['id']==name)
+            if obj.get('link')or obj['role']=='reference_robot':raise ValueError('Robot object cannot be replaced by a modeled asset')
+            old=copy.deepcopy(obj)
+            for key,row in operation['assets'].items():
+                if key in result['assets']and result['assets'][key]!=row:raise ValueError('Object asset key conflict')
+                result['assets'][key]=copy.deepcopy(row)
+            for field in('visual','collision','object_asset'):obj[field]=copy.deepcopy(operation[field])
+            dims=operation['dimension_record']
+            if obj['dimensions']['value']is not None and not np.allclose(obj['dimensions']['value'],dims['value'],rtol=.02,atol=1e-5):raise ValueError('Asset dimensions disagree with existing measured geometry')
+            if obj['dimensions']['provenance']not in PROTECTED:obj['dimensions']=copy.deepcopy(dims)
+            preserve(old,obj,name)
+        elif op == 'add_object':
             if any((o['id'] == name for o in result['objects'])):
                 raise ValueError('Duplicate object ID')
             t = operation.get('pose', np.eye(4).tolist())
@@ -72,6 +89,13 @@ def apply(scene, operations, root):
             obj = {'id': name, 'role': operation.get('role', 'fixture'), 'frame': operation.get('frame', 'world'), 'pose': value(t, 'estimated'), 'dimensions': value(operation.get('dimensions')), 'color': value(operation.get('color', [0.6] * 3), 'estimated'), 'visual': shape, 'collision': operation.get('collision', {'type': 'unknown'}), 'physics': {'mass_kg': value(None), 'friction': value(None)}}
             if operation.get('dimensions') is not None:
                 obj['dimensions'] = value(operation['dimensions'], 'estimated')
+            if operation.get('dimension_record'):obj['dimensions']=copy.deepcopy(operation['dimension_record'])
+            if operation.get('unknown_pose'):obj['pose']=value(None)
+            if operation.get('object_asset'):
+                for key,row in operation['assets'].items():
+                    if key in result['assets']and result['assets'][key]!=row:raise ValueError('Object asset key conflict')
+                    result['assets'][key]=copy.deepcopy(row)
+                obj['object_asset']=copy.deepcopy(operation['object_asset'])
             if 'spawn'in operation:obj['spawn']=operation['spawn']
             result['objects'].append(obj)
         elif op == 'remove_object':
@@ -79,6 +103,7 @@ def apply(scene, operations, root):
             result['objects'].remove(obj)
         elif op in ('update_pose', 'update_dimensions', 'set_material', 'set_visual_mesh', 'set_collision'):
             obj = next((o for o in result['objects'] if o['id'] == name))
+            if obj.get('object_asset')and op!='update_pose':raise ValueError('Edit geometry/material/collision through a new object asset version; instance edits change pose only')
             old = copy.deepcopy(obj)
             evidence = operation.get('evidence', ['agent candidate hypothesis'])
             if op in ('update_pose', 'update_dimensions'):

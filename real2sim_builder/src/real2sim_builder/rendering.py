@@ -44,8 +44,8 @@ def _blender_build(description):
     background.inputs['Strength'].default_value = 1
     for row in description['objects']:
         meshes = []
-        mat = _blender_material(row)
-        for part in row['parts']:
+        for index,part in enumerate(row['parts']):
+            mat = _blender_material({**row,**{k:part[k]for k in('color','roughness','metallic','texture')if k in part},'id':row['id']+'_'+str(index)})
             kind = part['type']
             dims = part['dimensions']
             if kind == 'mesh':
@@ -272,6 +272,43 @@ def _blender_main():
     folder = Path(request['output'])
     folder.mkdir(parents=True, exist_ok=True)
     action = request['action']
+    if action=='object-author':
+        bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
+        runpy.run_path(request['script'],run_name='__main__')
+        # Distinct data names retain each Object Xform and its custom properties
+        # even when Blender default Cube/Cube.001 names would otherwise collapse.
+        for obj in bpy.context.scene.objects:
+            if obj.type=='MESH':obj.data.name=obj.name+'_Geometry'
+            parent=obj;collision=False
+            while parent:
+                collision=collision or bool(parent.get('r2s_collision'));parent=parent.parent
+            if collision:
+                obj.hide_render=False;obj.hide_viewport=False;obj.hide_set(False)
+        bpy.context.scene.unit_settings.system='METRIC';bpy.context.scene.unit_settings.scale_length=1
+        bpy.ops.file.pack_all();bpy.ops.wm.save_as_mainfile(filepath=str(folder/'source.blend'))
+        outputs=[]
+        for name in request['object_ids']:
+            roots=[o for o in bpy.context.scene.objects if o.get('r2s_id')==name and not o.parent]
+            if len(roots)!=1:raise ValueError('One root with r2s_id per requested object is required: '+name)
+            root=roots[0];objects=[root,*root.children_recursive];inverse=root.matrix_world.inverted()
+            saved={o:o.matrix_world.copy()for o in objects}
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in objects:obj.select_set(True)
+            # Freeze poses before mutating a parent; preserve object-local shape.
+            for obj in objects:obj.matrix_world=inverse@saved[obj]
+            target=folder/name;target.mkdir(exist_ok=True)
+            options={'filepath':str(target/(name+'.usda')),'selected_objects_only':True,'export_animation':False,
+                'export_uvmaps':True,'export_materials':True,'relative_paths':True,'root_prim_path':'/Object',
+                'export_cameras':False,'export_lights':False,'export_custom_properties':True}
+            supported=bpy.ops.wm.usd_export.get_rna_type().properties
+            if 'export_textures_mode'in supported:options['export_textures_mode']='NEW'
+            elif 'export_textures'in supported:options['export_textures']=True
+            if 'convert_scene_units'in supported:options.update(convert_scene_units='METERS',meters_per_unit=1.)
+            bpy.ops.wm.usd_export(**options)
+            for obj in objects:obj.matrix_world=saved[obj]
+            outputs.append({'id':name,'usda':str(target/(name+'.usda'))})
+        (folder/'result.json').write_text(json.dumps({'status':'OK','objects':outputs,'blend':str(folder/'source.blend')}))
+        return
     if action in ('build', 'render'):
         _blender_build(request['scene'])
     else:
@@ -415,27 +452,99 @@ def worker_environment():
     return environment
 
 
-def capability():
+def capability(*, environment=None):
     requested=os.environ.get('REAL2SIM_BLENDER','blender')
     executable=shutil.which(requested)
     if not executable: return {'available':False,'reason':'Blender executable not found; set REAL2SIM_BLENDER to an existing executable','requested':requested}
     try:
-        result=subprocess.run([executable,'--version'],capture_output=True,text=True,timeout=15,env=worker_environment())
+        result=subprocess.run([executable,'--version'],capture_output=True,text=True,timeout=15,env=worker_environment()if environment is None else environment)
         if result.returncode: raise RuntimeError(result.stderr)
         return {'available':True,'executable':executable,'version':result.stdout.splitlines()[0]}
     except (OSError,subprocess.SubprocessError,RuntimeError) as exc:
         return {'available':False,'reason':str(exc),'requested':requested}
 
 
-def invoke(request, folder):
-    available=capability()
+def object_worker_environment():
+    """No inherited credentials, Python hooks, loader injection or user config."""
+    return {'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8','LC_ALL':'C.UTF-8',
+        'TMPDIR':'/tmp','XDG_CACHE_HOME':'/tmp/cache','XDG_CONFIG_HOME':'/tmp/config',
+        'PYTHONNOUSERSITE':'1','OMP_NUM_THREADS':'2','OPENBLAS_NUM_THREADS':'2'}
+
+
+def object_sandbox(executable,folder):
+    """Empty root, installed Blender resources/system libraries, one owned job.
+
+    Discover the trusted installation before running generated code. No host
+    home, project, authentication directories, executable search tree or GPU
+    devices are mounted. A missing runtime fails closed, without a root bind.
+    """
+    import re
+    sandbox=shutil.which('bwrap')
+    if not sandbox:raise Unavailable('Object authoring requires installed bwrap')
+    executable=Path(executable).resolve();folder=Path(folder).resolve()
+    environment=object_worker_environment()
+    probe=subprocess.run([str(executable),'--background','-noaudio','--factory-startup','--python-expr',
+        'import bpy,json;print("R2S_RESOURCE="+json.dumps((bpy.utils.resource_path("SYSTEM") or bpy.utils.resource_path("LOCAL"))))'],
+        capture_output=True,text=True,timeout=30,env=environment,check=True)
+    found=re.search(r'^R2S_RESOURCE=(.+)$',probe.stdout,re.MULTILINE)
+    if not found:raise Unavailable('Cannot discover installed Blender resources for isolated authoring')
+    resource=json.loads(found.group(1))
+    if not resource or not Path(resource).is_absolute():raise Unavailable('Invalid Blender runtime resource path')
+    resources=Path(resource).resolve()
+    if not resources.is_dir()or not(resources/'scripts').is_dir()or resources in(Path('/'),Path.home())or Path(__file__).resolve().is_relative_to(resources):
+        raise Unavailable('Blender system resource directory missing or unsafe')
+    dependencies=subprocess.run(['ldd',str(executable)],capture_output=True,text=True,timeout=15,check=True,env=environment)
+    libraries=re.findall(r'(?:=>\s*|^\s*)(/[^\s]+)',dependencies.stdout,re.MULTILINE)
+    if not libraries or 'not found'in dependencies.stdout:raise Unavailable('Blender runtime dependencies unresolved')
+    mounts={str(executable):executable,str(resources):resources,str(Path(__file__).resolve()):Path(__file__).resolve()}
+    for library in libraries:
+        path=Path(library)
+        if not path.is_file():raise Unavailable('Blender dependency missing: '+str(path))
+        if 'ld-linux'in path.name:mounts[str(path)]=path.resolve()
+        else:
+            if path.parent in(Path('/'),Path.home()):raise Unavailable('Unsafe Blender dependency directory')
+            mounts[str(path.parent)]=path.parent.resolve()
+    # Optional system font/cache configuration only, never the user's config.
+    for path in('/usr/share/fonts','/etc/fonts','/etc/ld.so.cache','/etc/localtime'):
+        if Path(path).exists():mounts[path]=Path(path).resolve()
+    command=[sandbox,'--tmpfs','/','--dev','/dev','--proc','/proc','--tmpfs','/tmp',
+        '--unshare-net','--unshare-pid','--die-with-parent','--new-session']
+    for target,source in sorted(mounts.items(),key=lambda item:len(item[0])):
+        command.extend(['--ro-bind',str(source),target])
+    command.extend(['--bind',str(folder),str(folder)])
+    for name in('inputs','author.py'):
+        path=folder/name
+        if path.exists():command.extend(['--ro-bind',str(path),str(path)])
+    command.extend(['--chdir',str(folder)])
+    return command,environment
+
+
+def invoke(request, folder, *, checkpoint=None, timeout_s=600):
+    available=capability(environment=object_worker_environment())if request.get('sandbox')else capability()
     if not available['available']: raise Unavailable(available['reason'])
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     write(folder/'request.json',request)
     command=[available['executable'],'--background','-noaudio','--factory-startup','--python-exit-code','1',
              '--python',str(Path(__file__).resolve()),'--','--blender-worker',str(folder/'request.json')]
+    environment=worker_environment()
+    if request.get('sandbox'):
+        prefix,environment=object_sandbox(available['executable'],folder)
+        command=[*prefix,*command]
     with (folder/'blender.log').open('w') as stream:
-        subprocess.run(command,stdout=stream,stderr=subprocess.STDOUT,check=True,timeout=600,env=worker_environment())
+        import signal,time
+        child=subprocess.Popen(command,stdout=stream,stderr=subprocess.STDOUT,env=environment,start_new_session=True)
+        started=time.monotonic()
+        try:
+            while child.poll()is None:
+                if checkpoint:checkpoint()
+                if time.monotonic()-started>timeout_s:raise TimeoutError('Blender worker timeout')
+                time.sleep(.1)
+            if child.returncode:raise subprocess.CalledProcessError(child.returncode,command)
+        finally:
+            if child.poll()is None:
+                os.killpg(child.pid,signal.SIGTERM)
+                try:child.wait(timeout=3)
+                except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait()
     return read(folder/'result.json')
 
 
@@ -445,6 +554,7 @@ def description(scene, root):
         pieces=[]
         for part in parts(obj,'visual'):
             row={k:(v.tolist() if isinstance(v,np.ndarray) else v) for k,v in part.items()}
+            if row.get('texture'):row['texture']=str(local_path(root,scene['assets'][row['texture']]['path']))
             if part['type']=='mesh':
                 path=local_path(root,scene['assets'][part['asset']]['path'])
                 vertices,faces=mesh_data(path)
@@ -562,3 +672,48 @@ def synchronize(candidate, result):
             preserve(before,node,'light.'+row['id']);scene['lights']['sources'].append(node)
         preserve(old,scene['lights'],'lights')
     candidate.save(scene)
+
+
+def author_object_assets(candidate,script,object_ids,measurements=None,*,request_ids=None,on_registered=None):
+    """Run the existing Blender worker for selected new assets only.
+
+    The bpy script is authored by Codex, not generated from dimensions. Existing
+    Scene objects and prior Blender workspaces remain byte-identical.
+    """
+    from .object_assets import register_object_asset
+    from .candidate import exclusive
+    from .scene import identifier
+    from pxr import Usd,UsdGeom,UsdPhysics
+    import uuid
+    names=[identifier(n)for n in object_ids]
+    if not names or len(set(names))!=len(names):raise ValueError('Unique object IDs required')
+    script=Path(script).resolve()
+    if not script.is_file():raise FileNotFoundError(script)
+    with exclusive(candidate.project):
+        candidate.require_open();folder=candidate.root/'blender/objects'/uuid.uuid4().hex
+        folder.mkdir(parents=True);owned=folder/'author.py';shutil.copyfile(script,owned)
+        if(script.parent/'inputs').is_dir():
+            if (script.parent/'inputs').is_symlink()or any(p.is_symlink()for p in(script.parent/'inputs').rglob('*')):
+                raise ValueError('Object authoring inputs may not contain symlinks')
+            shutil.copytree(script.parent/'inputs',folder/'inputs')
+        result=invoke({'action':'object-author','script':str(owned),'object_ids':names,'output':str(folder),'sandbox':True},folder,checkpoint=candidate.project.checkpoint)
+        records=[]
+        for row in result['objects']:
+            path=Path(row['usda']);stage=Usd.Stage.Open(str(path))
+            if not stage:raise ValueError('Blender did not produce readable USDA')
+            UsdGeom.SetStageMetersPerUnit(stage,1);UsdGeom.SetStageUpAxis(stage,'Z')
+            for prim in stage.Traverse():
+                parent=prim;collision=False
+                while parent and not parent.IsPseudoRoot():
+                    collision=collision or bool(parent.GetAttribute('userProperties:r2s_collision').Get());parent=parent.GetParent()
+                if collision and prim.IsA(UsdGeom.Mesh):
+                    UsdPhysics.CollisionAPI.Apply(prim).CreateCollisionEnabledAttr(True)
+                    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr('convexHull')
+                    UsdGeom.Imageable(prim).CreateVisibilityAttr('invisible')
+            stage.GetRootLayer().Save()
+            records.append(register_object_asset(candidate.project,path,asset_id=row['id'],
+                dimensions=(measurements or{}).get(row['id']),blend=result['blend'],generation_id=(request_ids or{}).get(row['id'])))
+            write(folder/'registered.json',records)
+            if on_registered:on_registered(records[-1])
+        write(folder/'registered.json',records)
+        return {'status':'REGISTERED_UNVALIDATED','assets':records,'physical_verified':False}

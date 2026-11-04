@@ -110,3 +110,63 @@ def test_cancel_releases_only_the_owned_model_process_group(tmp_path):
         child=int(pid.read_text());state=__import__('pathlib').Path('/proc')/str(child)/'stat'
         assert not state.exists()or state.read_text().split()[2]=='Z'
     finally:unrelated.terminate();unrelated.wait(timeout=3)
+
+
+def test_two_instances_associate_by_box_and_never_share_one_mask(tmp_path):
+    from real2sim_builder.inference import associate_instances
+    from real2sim_builder.files import sha
+    from PIL import Image
+    import numpy as np,copy
+    masks=[]
+    for name,x in [('left',2),('right',22)]:
+        a=np.zeros((24,40),np.uint8);a[4:20,x:x+12]=255;p=tmp_path/(name+'.png');Image.fromarray(a).save(p)
+        masks.append({'path':str(p),'sha256':sha(p)})
+    report={'images':[{'id':'side','resolution':[40,24]}],'segments':[{'image_id':'side','object_id':n,'masks':masks,'status':'AMBIGUOUS'}for n in('cup1','cup2')]}
+    objects={'cup1':{'asset_group':'cups','images':{'side':{'box_xyxy':[0,0,18,24]}}},
+             'cup2':{'asset_group':'cups','images':{'side':{'box_xyxy':[20,0,39,24]}}}}
+    original=copy.deepcopy(report);result=associate_instances(report,objects)
+    assert [r['association']['mask_index']for r in result['segments']]==[0,1]
+    assert report==original
+    ambiguous=associate_instances(report,{'cup1':{'asset_group':'cups'},'cup2':{'asset_group':'cups'}})
+    assert all(r['association']['status']=='AMBIGUOUS'for r in ambiguous['segments'])
+    duplicate=associate_instances(report,objects,{'side':{'cup1':0,'cup2':0}})
+    assert all(r['association']['status']=='AMBIGUOUS'for r in duplicate['segments'])
+    assert 'same Mask'in ' '.join(duplicate['association_needs'])
+
+
+def test_shared_prompt_runs_sam_once_without_overwriting_object_ids(tmp_path,monkeypatch):
+    from real2sim_builder.project import Project,Candidate
+    from real2sim_builder.observations import register_image
+    from real2sim_builder import inference
+    from real2sim_builder.files import write,sha
+    from PIL import Image
+    import numpy as np,sys
+    p=Project.create(tmp_path/'projects','sam sharing');c=Candidate.create(p,'two')
+    image=tmp_path/'photo.png';Image.new('RGB',(40,30),'white').save(image)
+    register_image(p,image,camera='side',camera_type='side',scene_state='layout')
+    monkeypatch.setattr(inference,'_runtime',lambda *args:({'python':sys.executable,'model':'controlled fixture'},{}))
+    calls=[]
+    def worker(project,python,kind,request,folder,timeout):
+        if kind=='sam':
+            calls.append(len(request['tasks']))
+            for task in request['tasks']:
+                path=__import__('pathlib').Path(task['output']);path.mkdir(parents=True,exist_ok=True);masks=[]
+                for index,x in enumerate([2,22]):
+                    pixels=np.zeros((30,40),np.uint8);pixels[4:22,x:x+12]=255;file=path/f'mask{index}.png';Image.fromarray(pixels).save(file)
+                    masks.append({'path':str(file),'sha256':sha(file)})
+                write(path/'result.json',{'image_id':task['image_id'],'object_id':task['object_id'],'source_image_sha256':task['source_sha256'],'masks':masks,'status':'AMBIGUOUS'})
+                (path/'COMPLETE').touch()
+        else:
+            path=__import__('pathlib').Path(request['output']);path.mkdir(parents=True,exist_ok=True)
+            n=len(request['images']);file=path/'depth.npz'
+            np.savez(file,depth=np.ones((n,30,40)),intrinsics=np.repeat(np.array([[30,0,20],[0,30,15],[0,0,1.]])[None],n,axis=0),
+                extrinsics=np.repeat(np.eye(4)[None],n,axis=0),original_to_processed=np.repeat(np.eye(3)[None],n,axis=0))
+            write(path/'result.json',{'sha256':sha(file)})
+    monkeypatch.setattr(inference,'_run_worker',worker)
+    config={'objects':{'cup1':{'prompt':'paper cup'},'cup2':{'prompt':'paper cup'}}}
+    report=inference.run_models(c,config,scene_state='layout')
+    assert calls==[1]
+    assert [r['object_id']for r in report['segments']]==['cup1','cup2']
+    assert report['segments'][0]['masks']==report['segments'][1]['masks']
+    assert all(r['association']['status']=='AMBIGUOUS'for r in report['segments'])
+    inference.run_models(c,config,scene_state='layout');assert calls==[1]

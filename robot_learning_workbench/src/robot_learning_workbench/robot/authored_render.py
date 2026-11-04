@@ -56,7 +56,7 @@ class AuthoredRenderer:
             mujoco.mj_forward(self.model,self.data);images={}
             for n in('side','wrist'):images[n]=camera_rgb(self.renderer,self.data,n).copy()
         cameras={c['id']:{'resolution':c['resolution'],'K':c['K']['value'],'T_world_optical':world_pose(scene,c).tolist()}for c in scene['cameras']if c['id']in('side','wrist')}
-        return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'engine':self.view.engine,'physics_steps':0,'state_application':'authored_measured_fk',
+        return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'source_scene':self.view.source_scene,'engine':self.view.engine,'physics_steps':0,'state_application':'authored_measured_fk',
                 'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED','physical_verified':False}
     def close(self):
         if self.renderer:self.renderer.close();self.renderer=None

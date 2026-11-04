@@ -103,6 +103,12 @@ def test_native_mask_refinement_improves_train_and_only_reports_holdout(tmp_path
     scene['reconstruction_observations']['clouds'].append(hostile)
     second,_=fit_clouds(p,scene,{'supports':{'block':'table'}})
     assert first=={**second,'reconstruction_observations':first['reconstruction_observations']}
+    from real2sim_builder.calibration.hybrid import compare_backends
+    from real2sim_builder.automation import draft_readiness
+    fitted,comparison=compare_backends(p,{**scene,'reconstruction_observations':{'scene_state_id':'layout','clouds':[row]}},tmp_path/'comparison',
+        {'backend':'icp_mask','objects':['block'],'supports':{'block':'table'},'max_evaluations':30})
+    assert draft_readiness(p,fitted,comparison)['status']=='DRAFT_READY'
+    assert comparison['winner']is None and comparison['default_backend']is None
 
 
 def test_physics_probe_steps_gravity_and_keeps_articulation_unverified(tmp_path):

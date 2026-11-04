@@ -95,6 +95,55 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def associate_instances(report,objects,selections=None):
+    """Assign per-image observations independently from shared asset identity.
+
+    No mask-order/left-to-right identity guess and no Camera/3D assumptions.
+    Explicit selections, image boxes or an unambiguous unique candidate suffice.
+    Conflicting assignments remain unresolved for the existing mask-selection UI.
+    """
+    import copy
+    import numpy as np
+    from PIL import Image
+    from .files import sha
+    result=copy.deepcopy(report);used={};needs=[];selections=selections or{}
+    for row in result.get('segments',[]):
+        name=row['object_id'];image=row['image_id'];masks=row['masks'];selected=selections.get(image,{}).get(name)
+        basis='explicit_selection';index=None;external=None
+        if isinstance(selected,str):external=Path(selected)
+        elif selected is not None:
+            if type(selected)is not int or not 0<=selected<len(masks):raise ValueError('Mask selection index is outside candidates')
+            index=selected
+        else:
+            query=objects.get(name,{});box=query.get('images',{}).get(image,{}).get('box_xyxy',query.get('box_xyxy'))
+            if box is not None:
+                scores=[]
+                for mask in masks:
+                    if sha(mask['path'])!=mask['sha256']:raise ValueError('Association Mask SHA changed')
+                    with Image.open(mask['path'])as rgb:a=np.asarray(rgb.convert('L'))>0
+                    x0,y0,x1,y1=map(int,box)
+                    scores.append(float(a[max(0,y0):max(0,y1),max(0,x0):max(0,x1)].sum()/max(1,a.sum())))
+                ranked=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)
+                if ranked and scores[ranked[0]]>.5 and(len(ranked)==1 or scores[ranked[0]]-scores[ranked[1]]>.1):index=ranked[0];basis='image_box'
+            elif len(masks)==1:index=0;basis='unique_candidate'
+        if index is None and external is None:
+            row['association']={'status':'AMBIGUOUS'if masks else'NOT_FOUND','basis':'No unique Object observation correspondence'}
+            needs.append(image+'/'+name+': choose a Mask; Asset Group is not Object association');continue
+        file=external or Path(masks[index]['path'])
+        if external is None and sha(file)!=masks[index]['sha256']:raise ValueError('Association Mask SHA changed')
+        with Image.open(file)as rgb:a=np.asarray(rgb.convert('L'))>0
+        signature=hashlib.sha256(str(a.shape).encode()+a.tobytes()).hexdigest()
+        row['association']={'status':'ASSIGNED_ESTIMATED','basis':basis,'mask_index':index,'mask_path':str(file),
+            'mask_sha256':sha(file),'provenance':'user_selected'if selected is not None else'derived','physical_identity_verified':False}
+        used.setdefault((image,signature),[]).append(row)
+    for rows in used.values():
+        if len(rows)>1:
+            names=', '.join(r['object_id']for r in rows)
+            for row in rows:row['association']={'status':'AMBIGUOUS','basis':'Conflicting same Mask assignments'}
+            needs.append(rows[0]['image_id']+': same Mask assigned to multiple Objects: '+names)
+    result['association_needs']=list(dict.fromkeys(needs));return result
+
+
 def build_point_clouds(candidate,report,*,selections=None):
     """Join masks and depth only through registered metric cameras and anchors.
 
@@ -103,12 +152,15 @@ def build_point_clouds(candidate,report,*,selections=None):
     """
     import numpy as np
     from PIL import Image
-    from .files import write,sha
+    from .files import read,write,sha
     from .scene import world_pose,camera_calibration_signature
     from .observations import registered_images,source_record_digest
     from .capture import observation_scene
     from .candidate import exclusive
     selections=selections or{}
+    config_path=candidate.root/'reconstruction-config.yaml'
+    config=read(config_path)if config_path.is_file()else{}
+    report=associate_instances(report,config.get('objects',{}),selections)
     with exclusive(candidate.project):
         candidate.require_open();scene=candidate.scene
         images,state,needs=registered_images(candidate.project,report['scene_state_id'],scene=scene)
@@ -119,15 +171,19 @@ def build_point_clouds(candidate,report,*,selections=None):
                 raise ValueError('Depth artifact identity or Candidate ownership changed')
             with np.load(file,allow_pickle=False)as data:
                 validate_depth_output(data,len(batch['image_ids']))
-                for index,image_id in enumerate(batch['image_ids']):depths[image_id]=({k:v[index].copy()for k,v in data.items()},batch)
+                for index,image_id in enumerate(batch['image_ids']):depths.setdefault(image_id,({k:v[index].copy()for k,v in data.items()},batch))
         for segment in report['segments']:
             candidate.project.checkpoint();image=by_id.get(segment['image_id']);name=segment['object_id'];label=segment['image_id']+'/'+name
             if image is None:needs.append(label+': Camera not metric-registered');continue
             if image['sha256']!=segment['source_image_sha256']:raise ValueError('Segmentation source identity changed')
-            binding=scene.get('view_registrations',{}).get(image['id'],{}).get('metric_anchors',{})
-            if binding.get('source')not in('measured','calibrated')or not binding.get('evidence'):
+            registration=scene.get('view_registrations',{}).get(image['id'],{});binding=registration.get('metric_anchors',{})
+            motion_scale=registration.get('depth_scale')
+            if motion_scale is None and(binding.get('source')not in('measured','calibrated')or not binding.get('evidence')):
                 needs.append(label+': visible measured scale anchors required');continue
-            selected=selections.get(image['id'],{}).get(name)
+            association=segment.get('association',{})
+            if association.get('status')!='ASSIGNED_ESTIMATED':
+                needs.append(label+': unresolved Mask/Object association');continue
+            selected=selections.get(image['id'],{}).get(name,association.get('mask_index'))
             if selected is None and len(segment['masks'])!=1:
                 needs.append(label+': select the correct mask or supply an edited mask');continue
             if isinstance(selected,str):source=Path(selected).resolve();digest=sha(source)
@@ -140,10 +196,11 @@ def build_point_clouds(candidate,report,*,selections=None):
             if mask.shape!=tuple(image['resolution'][::-1]):raise ValueError('Edited mask must use original RGB resolution')
             posed=observation_scene(scene,image,candidate.project.root,complete=False)
             cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
-            if any(cam[field]['provenance']not in('measured','calibrated')for field in('K','distortion'))or any(cam['distortion']['value']):
+            if (motion_scale is None and any(cam[field]['provenance']not in('measured','calibrated')for field in('K','distortion')))or any(cam['distortion']['value']):
                 needs.append(label+': calibrated undistorted rays required for depth clouds');continue
             arrays,batch=depths[image['id']];affine=arrays['original_to_processed']
-            scale=depth_scale_from_anchors(arrays['depth'],affine,binding.get('uv_px',[]),binding.get('world_points_m',[]),camera_pose,binding.get('evidence',[]))
+            scale={'status':'ESTIMATED','anchor':{'scale':motion_scale,'source':'measured','evidence':registration.get('calibration_evidence',[])},
+                'scope':'estimated registration scale from recorded metric baseline/motion; not physical calibration'}if motion_scale is not None else depth_scale_from_anchors(arrays['depth'],affine,binding.get('uv_px',[]),binding.get('world_points_m',[]),camera_pose,binding.get('evidence',[]))
             if scale['status']!='ESTIMATED':needs.extend(label+': '+reason for reason in scale['needs']);continue
             k=affine@np.asarray(cam['K']['value']);points,info=object_points(arrays['depth'],mask,k,affine,confidence=arrays.get('conf'))
             world=metric_points(points,scale['anchor'],camera_pose)['points_world_m']
@@ -154,12 +211,16 @@ def build_point_clouds(candidate,report,*,selections=None):
                           'camera_pose':camera_pose.tolist(),'scale':scale,'algorithm_sha256':sha(Path(__file__))}
             folder=candidate.root/'inference/clouds'/_digest(dependencies);folder.mkdir(parents=True,exist_ok=True)
             stored_mask=folder/'mask.png';Image.fromarray(mask.astype('uint8')*255).save(stored_mask)
-            cloud=folder/'points.npz';np.savez_compressed(cloud,points_world_m=world)
+            cloud=folder/'points.npz'
+            pixel=(points@k.T);pixel=pixel[:,:2]/pixel[:,2:3]
+            original=(np.c_[pixel,np.ones(len(pixel))]@np.linalg.inv(affine).T)[:,:2]
+            np.savez_compressed(cloud,points_world_m=world,points_camera_relative=points,uv_original=original,depth_relative=points[:,2])
             records.append({'image_id':image['id'],'object_id':name,'split':image['split'],'group_id':image['group_id'],
                 'path':cloud.relative_to(candidate.project.root).as_posix(),'sha256':sha(cloud),
                 'mask':stored_mask.relative_to(candidate.project.root).as_posix(),'mask_sha256':sha(stored_mask),
                 'mask_kind':'visible_fragment','points':len(world),'units':'m','frame':'world','provenance':'derived',
-                'identity_verified':False,'dependencies':dependencies,'point_filter':info})
+                'identity_verified':False,'dependencies':dependencies,'point_filter':info,'camera':image['camera'],
+                'depth_scale':scale['anchor']['scale'],'depth_batch':batch.get('cache_key',batch['path'])})
         scene['reconstruction_observations']={'scene_state_id':state,'clouds':records};candidate.save(scene)
         result={'status':'METRIC_ESTIMATED'if records else'NEEDS_MORE_DATA','clouds':records,'needs':list(dict.fromkeys(needs)),
                 'physical_verified':False,'scene_state_id':state}
@@ -181,7 +242,10 @@ def _run_worker(project,python,kind,request,folder,timeout):
                 project.checkpoint()
                 if time.monotonic()-started>timeout:raise TimeoutError(kind+' worker deadline exceeded')
                 time.sleep(.1)
-            if child.returncode:raise RuntimeError(kind+' worker failed; inspect '+str(folder/'worker.log'))
+            if child.returncode:
+                tail=(folder/'worker.log').read_text(errors='replace')[-16000:]
+                reason='VRAM_OUT_OF_MEMORY'if any(t in tail.lower()for t in('cuda out of memory','outofmemoryerror','cuda error: out of memory'))else'MODEL_EXECUTION_FAILED'
+                raise RuntimeError(kind+' '+reason+'; inspect '+str(folder/'worker.log'))
         finally:
             if child.poll()is None:
                 os.killpg(child.pid,signal.SIGTERM)
@@ -242,7 +306,7 @@ def run_models(candidate,config,*,scene_state=None):
         config=json.loads(json.dumps(config));objects=config.get('objects',{})
         if not objects:return {'status':'NEEDS_MORE_DATA','needs':['Object IDs with SAM prompts or explicit box hints required']}
         sam,sam_identity=_runtime(candidate.project,config,'sam',root/'sam-runtime')
-        tasks=[];segments=[]
+        tasks=[];segments=[];queued=set()
         for image in images:
             for name,query in objects.items():
                 from .scene import identifier
@@ -251,22 +315,33 @@ def run_models(candidate,config,*,scene_state=None):
                 params={'prompt':query.get('prompt'),'box_xyxy':hint.get('box_xyxy',query.get('box_xyxy')),
                         'conf':sam.get('conf',.25),'imgsz':sam.get('imgsz',1024),'half':True,'device':sam.get('device','cuda:0')}
                 if not params['prompt']and params['box_xyxy']is None:raise ValueError('SAM query or box required for '+name)
-                key=_digest({'image':image['sha256'],'object':name,'parameters':params,'model':sam_identity})
+                key=_digest({'image':image['sha256'],'parameters':params,'model':sam_identity})
                 folder=root/'sam'/key;record=folder/'result.json'
                 if (folder/'COMPLETE').exists():
                     cached=read(record)
                     if any(sha(Path(m['path']))!=m['sha256']for m in cached['masks']):raise ValueError('Cached SAM mask changed')
-                else:tasks.append({'image':prepared[image['id']]['path'],'sha256':prepared[image['id']]['sha256'],
+                elif key not in queued:
+                    queued.add(key);tasks.append({'image':prepared[image['id']]['path'],'sha256':prepared[image['id']]['sha256'],
                     'source_sha256':image['sha256'],'image_id':image['id'],'object_id':name,'parameters':params,'output':str(folder)})
                 segments.append({'image_id':image['id'],'object_id':name,'path':str(record),'cache_key':key})
         if tasks:_run_worker(candidate.project,sam['python'],'sam',{'model':sam['model'],'tasks':tasks},root/'sam-job',float(sam.get('timeout_s',900)))
-        for row in segments:row.update(read(row['path']))
+        for row in segments:
+            name=row['object_id'];image=row['image_id'];row.update(read(row['path']));row.update(object_id=name,image_id=image)
+        association=associate_instances({'segments':segments},objects,config.get('selections'))
+        segments=association['segments']
         da3,da3_identity=_runtime(candidate.project,config,'da3',root/'da3-runtime')
         batch_size=da3.get('batch_size',2);resolution=da3.get('process_res',280)
         if type(batch_size)is not int or not 1<=batch_size<=4 or type(resolution)is not int or not 140<=resolution<=504:raise ValueError('DA3 batch_size 1..4 and process_res 140..504 required for this local worker')
-        batches=[]
-        for first in range(0,len(images),batch_size):
-            selected=images[first:first+batch_size]
+        batches=[];selections=[]
+        # Overlap a real reference RGB between independently inferred batches.
+        # Holdout outputs never replace the training prediction of that RGB.
+        reference=next((i for i in images if i['split']=='train'),images[0])
+        for split in('train','validation'):
+            group=[i for i in images if i['split']==split and i['id']!=reference['id']]
+            if batch_size==1:selections.extend([[i]for i in images if i['split']==split]);continue
+            if not group and reference['split']==split:selections.append([reference])
+            for first in range(0,len(group),batch_size-1):selections.append([reference,*group[first:first+batch_size-1]])
+        for selected in selections:
             params={'process_res':resolution,'device':da3.get('device','cuda:0'),'method':'upper_bound_resize'}
             # Known Cameras can condition DA3. Raw/unregistered views retain its
             # estimated cameras and relative depth; no metric flag is inferred.
@@ -296,6 +371,7 @@ def run_models(candidate,config,*,scene_state=None):
         report={'status':'INFERRED','scene_state_id':state,'images':images,'segments':segments,'depth_batches':batches,
                 'models':{'sam':sam_identity,'da3':da3_identity},'prepared_rgb':prepared,'derived':True,'physical_verified':False,
                 'metric_scale':'NOT_ESTABLISHED_BY_AI','needs':needs}
+        report['association_needs']=association['association_needs']
         write(root/'results.json',report)
         return report
 

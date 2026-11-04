@@ -64,6 +64,23 @@ def identifier(name):
 def local_path(root, relative):
     if Path(relative).is_absolute():
         raise ValueError('Assets must be package-relative')
+    parts=Path(relative).parts
+    if parts[:3]==('..','..','object_assets'):
+        # This single external namespace is the Workspace's immutable Library.
+        # Export rewrites it to a normal package-local closure before publishing.
+        root=Path(root).resolve()
+        if not(root/'project.yaml').is_file()or len(parts)<6:
+            raise ValueError('Workspace asset requires a Scene Project and exact version')
+        identifier(parts[3])
+        if not re.fullmatch('[0-9a-f]{64}',parts[4])or any(p in('..','.')for p in parts[5:]):
+            raise ValueError('Invalid Workspace asset version/path')
+        base=root.parent.parent/'object_assets';target=base
+        if base.is_symlink():raise ValueError('Workspace asset symlink is forbidden')
+        for part in parts[3:]:
+            target=target/part
+            if target.is_symlink():raise ValueError('Workspace asset symlink is forbidden')
+        if not target.resolve().is_relative_to(base.resolve()):raise ValueError('Workspace asset escapes Library')
+        return target
     p = (Path(root) / relative).resolve()
     if not p.is_relative_to(Path(root).resolve()):
         raise ValueError('Asset path escapes package')
@@ -118,7 +135,13 @@ def validate(scene, root=None, complete=False):
                 raise ValueError('Unknown geometry')
             if geometry['type'] == 'compound':
                 from real2sim_builder.calibration.geometry import parts
-                parts(obj, field)
+                for part in parts(obj, field):
+                    if part.get('asset')and part['asset']not in scene['assets']:raise ValueError('Unknown compound asset')
+                    if part.get('texture')and part['texture']not in scene['assets']:raise ValueError('Unknown compound texture')
+                    if field=='collision'and part['type']=='mesh'and root:
+                        temporary=__import__('copy').deepcopy(obj);temporary[field]={k:v for k,v in part.items()if k not in('pose','dimensions')}
+                        minimal=empty('collision validation');minimal['objects']=[temporary];minimal['frames']=scene['frames'];minimal['assets']=scene['assets']
+                        validate(minimal,root)
             if geometry.get('texture') and geometry['texture'] not in scene['assets']:
                 raise ValueError('Unknown texture asset')
             if geometry['type'] == 'mesh':

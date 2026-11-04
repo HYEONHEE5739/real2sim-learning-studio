@@ -398,7 +398,12 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
         write(staging/'calibration.json',calibration)
         write(staging/'scene.json',spec)
         write(staging/'authored_scene.json',working)
-        write(staging/'provenance.json',{'project':copy.deepcopy(project.info),'candidate':candidate,'input_signature':signature,'validation':report,
+        from .evidence import scene_memo
+        memo=scene_memo(project)
+        if memo['sha256']!=signature['scene_memo_sha256']:raise ExportError('INPUT_CHANGED','scene_memo','Scene memo changed while exporting')
+        (staging/'scene_memo.txt').write_bytes(memo['text'].encode('utf-8'))
+        memo_record={'path':'scene_memo.txt','sha256':memo['sha256'],'saved':memo['saved']}
+        write(staging/'provenance.json',{'scene_memo':memo_record,'project':copy.deepcopy(project.info),'candidate':candidate,'input_signature':signature,'validation':report,
               'original_scene':scene,'evidence':project.evidence,'native_assets':derivations,'calibration_execution':'declarations_only; no parameter application'})
         def manifest():
             write(staging/'manifest.json',{'schema_version':1,'files':[{'path':p.relative_to(staging).as_posix(),'size_bytes':p.stat().st_size,'sha256':sha(p)} for p in sorted(staging.rglob('*')) if p.is_file() and p!=staging/'manifest.json']})

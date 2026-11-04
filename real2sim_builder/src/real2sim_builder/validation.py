@@ -137,7 +137,7 @@ from scipy.spatial.transform import Rotation
 TOLERANCE=1e-5
 
 
-def physics_probe(project,scene,folder,*,steps=500):
+def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
     """Execute passive MuJoCo object settling; never certify robot/PhysX by proxy.
 
     Uses the existing MJCF collision exporter. Unknown mass/friction are reported
@@ -145,18 +145,18 @@ def physics_probe(project,scene,folder,*,steps=500):
     """
     from pathlib import Path
     from .scene import validate
-    from .exporters import mjcf
+    from .exporters import mjcf,usd
     from .files import write
     from .calibration.geometry import parts
-    import mujoco
     if type(steps)is not int or not 1<=steps<=2500:raise ValueError('Physics probe requires 1..2500 actual steps')
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    output=folder/('physics-isaac.json'if engine=='isaac'else'physics.json')
     report={'status':'NEEDS_MORE_DATA','physical_verified':False,'robot_articulation':'NOT_TESTED',
             'isaac':{'status':'NOT_TESTED','physics_steps':0},'scope':'passive object gravity/contact only; not a Task or articulated robot test',
             'needs':[],'mujoco':{'status':'NOT_TESTED','steps':0},'containers':[]}
     try:validate(scene,project.root,complete=True)
     except ValueError as error:
-        report['needs'].append(str(error));write(folder/'physics.json',report);return report
+        report['needs'].append(str(error));write(output,report);return report
     dynamic=[o for o in scene['objects']if o['role']=='manipulable_object']
     for obj in dynamic:
         for field in('mass_kg','friction'):
@@ -166,7 +166,39 @@ def physics_probe(project,scene,folder,*,steps=500):
         if obj['collision']['type']=='container':
             report['containers'].append({'id':obj['id'],'open_geometry_declared':True,
                 'collision_parts':len(parts(obj,'collision')),'block_drop_test':'NOT_TESTED'})
-    if report['needs']:write(folder/'physics.json',report);return report
+    if report['needs']:write(output,report);return report
+    if engine=='isaac':
+        # This function runs after AppLauncher only. CLI owns a separate child;
+        # importing Builder/Qt never initializes Kit or claims GPU memory.
+        from isaacsim.core.api import SimulationContext
+        from isaacsim.core.prims import RigidPrim
+        from isaacsim.core.utils.stage import open_stage
+        from pxr import UsdGeom,UsdPhysics
+        path=folder/'scene.usda';usd.export(scene,project.root,path);open_stage(str(path))
+        context=SimulationContext(physics_dt=.002,rendering_dt=.02,stage_units_in_meters=1.,backend='numpy',device='cpu')
+        bodies=None
+        try:
+            bodies=RigidPrim(prim_paths_expr=['/Scene/'+o['id']for o in dynamic],track_contact_forces=True,
+                contact_filter_prim_paths_expr=[[]for _ in dynamic])if dynamic else None
+            context.reset()
+            if bodies:bodies.initialize()
+            stage=__import__('omni.usd',fromlist=['get_context']).get_context().get_stage()
+            initial=np.asarray(bodies.get_world_poses()[0]).copy()if bodies else np.empty((0,3))
+            for _ in range(steps):project.checkpoint();context.step(render=False)
+            final=np.asarray(bodies.get_world_poses()[0])if bodies else np.empty((0,3))
+            velocities=np.asarray(bodies.get_velocities())if bodies else np.empty((0,6))
+            forces=np.asarray(bodies.get_net_contact_forces(dt=.002))if bodies else np.empty((0,3))
+            report['isaac']={'status':'STEPPED','physics_steps':steps,'simulation_seconds':steps*.002,
+                'initial_positions_m':initial.tolist(),'final_positions_m':final.tolist(),'finite':bool(np.isfinite(final).all()and np.isfinite(velocities).all()),
+                'max_final_speed':float(np.max(abs(velocities)))if velocities.size else 0.,'net_contact_forces_n':forces.tolist(),
+                'enabled_colliders':sum(p.HasAPI(UsdPhysics.CollisionAPI)and UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()is not False for p in stage.Traverse())}
+            report['needs']+=['Independent physical parameter, open-container drop and articulated robot/gripper validation required']
+            write(folder/'physics-isaac.json',report)
+            return report
+        finally:
+            context.stop();bodies=None;SimulationContext.clear_instance()
+    if engine!='mujoco':raise ValueError('Physics engine must be mujoco or isaac')
+    import mujoco
     path=folder/'scene.xml';mjcf.export(scene,project.root,path)
     model=mujoco.MjModel.from_xml_path(str(path));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     def contacts():
@@ -188,6 +220,30 @@ def physics_probe(project,scene,folder,*,steps=500):
     report['needs']+=['Isaac/PhysX steps and robot articulation collision require native execution validation',
                        'Open-container block-drop and independent physical parameter validation remain required']
     write(folder/'physics.json',report);return report
+
+
+def isaac_physics_worker(project,candidate,folder,steps):
+    """Bounded owned native child; an installed Isaac environment is required."""
+    import os,signal,subprocess,sys,time
+    from .files import read
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);started=time.monotonic()
+    (folder/'physics-isaac.json').unlink(missing_ok=True)
+    command=[sys.executable,'-B','-m','real2sim_builder.cli','physics-check',str(project.root),'--candidate',candidate,
+        '--steps',str(steps),'--engine','isaac','--native-worker']
+    with(folder/'isaac-worker.log').open('w')as log:
+        child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        try:
+            while child.poll()is None:
+                project.checkpoint()
+                if time.monotonic()-started>240:raise TimeoutError('Isaac physics probe timed out; inspect '+str(folder/'isaac-worker.log'))
+                time.sleep(.1)
+            if child.returncode:raise RuntimeError('Isaac physics child failed; inspect '+str(folder/'isaac-worker.log'))
+            return read(folder/'physics-isaac.json')
+        finally:
+            if child.poll()is None:
+                os.killpg(child.pid,signal.SIGTERM)
+                try:child.wait(timeout=3)
+                except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait()
 
 
 def check(scene,root,mjcf,usd):

@@ -8,7 +8,7 @@ from real2sim_builder.files import read, sha, write
 
 
 def measured_geometry(scene, measurements):
-    """Build primitive geometry from explicit measurements, leaving pose unknown.
+    """Record measurements; new visuals await a Codex/Blender object asset.
 
     This cannot change a robot, a protected measurement, or a camera. No hidden
     surface or physics material is inferred from RGB/depth.
@@ -19,7 +19,7 @@ def measured_geometry(scene, measurements):
         dims=np.asarray(spec['dimensions_m'],float)
         if not evidence or dims.shape!=(3,)or not np.isfinite(dims).all()or min(dims)<=0:
             raise ValueError('Positive measured dimensions and their evidence are required')
-        if kind not in('box','cylinder','sphere','container'):raise ValueError('Use existing CAD asset import for complex geometry')
+        if kind not in('box','cylinder','sphere','container','mesh'):raise ValueError('Unknown measured object kind')
         existing=objects.get(name)
         if existing and (existing.get('link')or existing['role']=='reference_robot'):raise ValueError('Robot geometry is locked')
         if existing and existing['dimensions']['provenance']in('measured','calibrated')and not np.array_equal(existing['dimensions']['value'],dims):
@@ -28,8 +28,7 @@ def measured_geometry(scene, measurements):
             continue
         geometry={'type':kind}
         if kind=='container':
-            if not spec.get('wall_m'):raise ValueError('Measured open-container wall thickness required')
-            geometry.update(wall=value(spec['wall_m'],'measured',evidence),round=bool(spec.get('round',False)))
+            geometry.update(wall=value(spec.get('wall_m'),'measured'if spec.get('wall_m')is not None else'unknown',evidence),round=bool(spec.get('round',False)))
             if 'bottom_diameter_m'in spec:geometry['bottom_diameter_m']=spec['bottom_diameter_m']
         if existing:
             # Measurements do not replace an existing CAD/compound visual or
@@ -38,7 +37,7 @@ def measured_geometry(scene, measurements):
             continue
         role=spec.get('role','manipulable_object')
         obj={'id':name,'role':role,'frame':'world','pose':value(None),
-             'dimensions':value(dims.tolist(),'measured',evidence),'visual':copy.deepcopy(geometry),'collision':copy.deepcopy(geometry),
+             'dimensions':value(dims.tolist(),'measured',evidence),'visual':{'type':'unknown'},'collision':copy.deepcopy(geometry)if kind!='mesh'else{'type':'unknown'},
              'color':value(spec.get('color',[.5,.5,.5]),'estimated',['display default; not a color measurement']),
              'physics':{'mass_kg':value(None),'friction':value(None)}}
         for field in('mass_kg','friction'):

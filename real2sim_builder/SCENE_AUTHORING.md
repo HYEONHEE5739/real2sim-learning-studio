@@ -1,19 +1,38 @@
 # 자동 Scene 제작·정합 가이드
 
-2026-11-03. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**과 Builder의 **Start Reconstruction**이다. Codex가 매번 좌표를 수작업으로 작성하는 방식을 기본 사용자 흐름으로 삼지 않는다. 구현·실행 범위와 남은 공백은 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [단계별 기록](../docs/automated-reconstruction.md)을 따른다.
+2026-11-04. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**이다. 사진 분석은 SAM→DA3, 새 외형 제작은 **Codex가 기존 Blender로 작성한 물체별 USDA**, 배치는 기존 Candidate가 담당한다. 기존 USDA가 있거나 Pose만 바뀌면 다시 모델링하지 않는다. 구현·실행 범위는 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [누적 기록](../docs/automated-reconstruction.md)을 따른다.
 
 ## 1. 사용자 흐름과 현재 범위
 
 1. 새 Project에 사진/영상·Capture·메모를 모은다. 정적 배치가 바뀌면 `scene_state_id`를 분리한다.
-2. Auto Reconstruction의 사진·실측 탭에서 사진의 Camera/렌즈 ID·유형·배치를 등록하고, 물체 ID·실측 치수(mm)·역할·SAM 설명을 입력한다. 외부 영상은 기존 Video 추출을 통해 배치·시각·영상 group을 함께 등록한다. Wrist는 공식 동기 관측을 사용한다.
+2. Auto Reconstruction에서 촬영 배치·사진/영상과 선택적인 실측 치수(mm)를 등록한다. 물체 ID·역할·SAM 설명은 Codex가 Scene 메모/사진을 해석해 구성한다. 설치된 Codex CLI의 명시 시작 버튼 또는 현재 Codex 대화에서 작업자료를 사용할 수 있다. Wrist는 실제 q가 기록된 Capture를 사용한다.
 3. 기존 모델 환경 탭에서 설치된 SAM Python/Checkpoint와 DA3 Python/로컬 snapshot을 한 번 선택한다. Project 구성에 저장된다. 설치·다운로드하지 않는다.
-4. 같은 Candidate에서 SAM → DA3 → 등록된 metric 점군 → ICP/공동 Landmark/실제 렌더 Mask 정합을 실행한다. 모호한 Mask는 상태 탭에서 선택하거나 원 해상도의 수정 PNG를 지정하고 다시 실행한다.
-5. Camera 등록·Anchor·치수·독립 검증 자료가 부족하면 Candidate와 추론 캐시를 유지하고 필요한 자료를 표시한다. Current와 기존 Export는 바꾸지 않는다.
+4. SAM → DA3 → 겹치는 배치 정렬·Camera 초기 추정 → Codex/Blender 작업자료 → USDA 등록/재사용 → Pose 초기화·공동 Depth/Camera/Object 정합 → 렌더/Mask 비교 순서다. 모호한 Mask는 상태 탭에서 선택·수정하고 다시 실행한다.
+5. 새 물체가 필요하면 `scratch/agent/<candidate>/modeling/CODEX_MODELING.md`를 Codex가 읽고 해당 물체만 만든다. 등록 결과를 재구성이 자동 Import한다. Camera/Scale이 식별되지 않으면 `UNRESOLVED`와 추가 촬영 이유를 남긴다. Current·기존 Export는 바꾸지 않는다.
 6. 검토·기존 Candidate 평가/승격·새 Revision Export는 기존 Builder 기능을 사용한다. 자동 재구성 실행만으로 ACCEPTED/Physics-Ready가 되지 않는다.
 
-고정 Side와 측정 q/FK가 있는 Wrist는 기존 검증된 Calibration을 우선한다. External은 알려진 K와 측정 World 코너로 PnP 등록한다. 실측 World 위치·크기가 있는 보드의 네 코너를 사진에서 지정하는 UI를 제공하며 4×4 행렬을 작성할 필요가 없다. 새 Camera/Robot Calibration을 자연어 메모에서 발명하지 않는다.
+사용자에게 K·Extrinsic·Wrist Mount·보드 코너 입력을 요구하지 않는다. DA3 K와 상대 Pose를 초기 추정하고, 공통 이미지의 Depth로 배치 좌표계를 정렬한다. 실제 q/FK의 충분한 Wrist 운동 또는 검증된 카메라 baseline이 Scale 근거다. 기존 검증된 Calibration은 고정한다. 근거가 없으면 Scale=1로 진행하지 않는다. 보드 지정은 고급 진단용 선택 기능이다.
 
-현재 자동 경로의 Camera는 metric 점군 생성 후 고정이다. 미검증 shared Camera/Mount의 기존 Landmark joint fitter는 디버깅 API로 남아 있으나 **Camera/depth 공동 bundle adjustment, 일반 자동 렌즈 보정, Isaac PhysX/Articulation 완전 검증, Backend 최종 선정은 미완료**다. 실제 Side/Wrist 추론을 수행했으며, 독립 validation/external 사진은 사용자 확인 결과 없다. 이를 완전 자동 Physics-Ready Scene 생성 완료로 보고하지 않는다.
+공동 정합은 원 optical Depth를 매 평가마다 재투영하며 Side Pose, 공유 Wrist Mount, External Pose, 선택한 K/Robot Base/Depth Scale과 Object Pose를 다룬다. Rank가 부족하면 보정을 적용하지 않는다. 일반 렌즈 왜곡 자동 추정·실물 정확도·최종 Backend 선정·전체 Robot/Gripper 물리 검증은 완료하지 않았다. 현재 실제 두 장의 Camera/Scale은 UNRESOLVED다.
+
+## 물체 USDA 자산과 Codex 명령
+
+신규 Library는 Workspace의 `object_assets/<asset_id>/<version>/manifest.json`에 있다. Project의 `input/object_assets/`는 Legacy로 유지한다. 같은 USDA를 여러 Instance가 참조하고, Instance 제거는 Library를 삭제하지 않는다. Scene Pose는 Candidate에만 있고 USDA root는 identity다. m/+Z·defaultPrim·Mesh/UV/Texture·상대 종속 경로·SHA를 검사한다. Visual과 convex Collision은 분리한다. 알 수 없는 Collision은 UNRESOLVED다.
+
+다음 명령은 **Codex가 사용하는 제작 API**다. 사용자가 터미널/JSON을 작성하는 필수 절차가 아니다.
+
+```bash
+python -m real2sim_builder.cli object-asset PROJECT list
+python -m real2sim_builder.cli object-asset PROJECT register --id banana --path /path/banana.usda
+python -m real2sim_builder.cli object-asset PROJECT instantiate --candidate NAME --object banana_2 --manifest ../../object_assets/banana/VERSION/manifest.json
+python -m real2sim_builder.cli blender-object-author PROJECT --candidate NAME --script author.py --objects banana
+python -m real2sim_builder.cli modeling-run PROJECT --candidate NAME
+python -m real2sim_builder.cli refit-pairs PROJECT --candidate NEW_NAME --scene-state NEW_LAYOUT
+```
+
+`blender-object-author`의 bpy script는 물체 root에 `r2s_id`, 별도 convex Collision Mesh에 `r2s_collision=True`를 지정한다. Blender는 읽기 전용 filesystem과 전용 출력 폴더 안에서 실행된다. USDA 검증 후에만 등록한다. `modeling-run`은 사용자가 명시적으로 시작하는 설치된 공식 Codex CLI 작업이다. 객체가 미정이면 메모/사진의 역할·SAM query 제안만 만들고, 추론 후 새 물체를 모델링한다. 기존 Codex 대화에서 동일 작업자료를 처리하는 방식도 유지한다. 실제 원격 Codex 호출은 이번 검증에서 실행하지 않았다.
+
+새 Object에 실측 치수만 주어 Primitive Visual을 자동 생성하던 기본 경로는 제거했다. 측정값·기존 Primitive Scene·물리 Collision primitive는 유지한다. Asset의 Geometry/Material 변경은 새 자산 버전으로 등록한다. 배치만 바꾸는 작업은 `update_pose`이며 Mesh/Texture SHA가 유지된다.
 
 GLB/glTF 입력·출력과 전용 Scan 모듈/CLI/UI는 제거했다. 일반 OBJ/STL·Robot URDF/USD·실측 Geometry constraint와 기존 Revision 계약은 유지한다. 아래 편집 명령은 수동 디버깅/특수 Scene용 도구이며 일반 사용자의 필수 절차가 아니다.
 
@@ -22,7 +41,7 @@ GLB/glTF 입력·출력과 전용 Scan 모듈/CLI/UI는 제거했다. 일반 OBJ
 Scene Prepare 메모의 `[항상 배치할 구성요소]`와 `[선택형 작업 물체]`를 Codex가 먼저
 읽고 각 Object에 생성 정책을 명시한다. 사용자가 자연어로 분류하면 Codex가 아래
 Builder 편집/API로 구조화한다. 사용자에게 JSON/CLI를 직접 작성하도록 요구하지 않는다.
-메모 양식의 빈 칸과 안내 문장은 사용자 측정값이 아니다. 미제공 치수·물성은 unknown으로 둔다.
+메모 안내 양식은 placeholder이며 원문 입력에 삽입하지 않는다. 빈 메모는 빈 입력이다. 미제공 치수·물성은 unknown으로 둔다.
 
 - `spawn: always`: 기본 구성요소. 물리적으로 static이라는 뜻은 아니다.
 - `spawn: recipe`: Source/DataGen/Sim 평가 Script의 `objects`에 포함될 때 생성하는 물체.
@@ -82,7 +101,8 @@ objects:
 ```text
 workbench_runs/scenes/<project-folder>/
   project.yaml
-  input/evidence.yaml           # 등록된 입력·메모·Capture 참조
+  input/evidence.yaml           # 등록된 입력·Capture 참조
+  input/scene_memo.txt           # 현재 자유 메모 원문 하나
   input/captures/<session>/     # Snapshot 또는 Real/Sim Pair 원본
   input/observations/<session>/ # model 미결합 Camera/SDK 관측
   working/current_scene.yaml   # 현재 authoring Scene (초기에는 없을 수 있음)
@@ -194,3 +214,39 @@ input/evidence.yaml에 등록된 입력과 Snapshot을 이용해 Scene을 제작
 - [Evidence](src/real2sim_builder/evidence.py) · [Capture](src/real2sim_builder/capture.py): 입력/관측 등록
 - [Reconstruction](src/real2sim_builder/reconstruction.py) · [Validation](src/real2sim_builder/validation.py): fitting·진단·비교
 - [현재 UI/Workflow 안내](../docs/builder-scene-guide.md): Scene Prepare·Real/Sim·Source 사용
+
+
+## 후속 정합과 모델링 실행 — 2026-11-04
+
+자산 이름이 같다는 이유로 재사용하지 않는다. `modeling/tasks.json`의 후보 Metadata/치수/관측 사진을 검토한 뒤 구성의 `objects.<id>.asset_manifest`를 선택하거나 해당 물체만 새로 모델링한다. 기존 Scene의 유효한 Asset 버전은 위치 수정 시 재모델링하지 않는다.
+
+`refit-pairs PROJECT --candidate NEW --scene-state LAYOUT`는 원 Pair의 Source Package와 배치를 확인한다. Source의 Manifest-covered authored Scene이 없으면 `NEEDS_MORE_DATA` 진단을 해결해야 한다. 현재 Current Scene을 복사해 촬영 당시 Source인 것처럼 취급하지 않는다. 명령은 Source Geometry/Material/Collision과 q를 유지하며 위치/Camera 정합만 수행한다.
+
+모델링은 현재 Codex 대화 또는 명시 `modeling-run`으로 요청한다. 설치된 ChatGPT 로그인과 `--image` 입력을 사용하고 API Key 경로를 추가하지 않는다. 새 모델 호출 없이 유효한 등록 결과를 재사용할 수 있다. 대기/자료 부족은 CLI exit 2이며, `DRAFT_READY`도 실제 정합 정확도·물리 승인과 구분한다.
+
+
+## Asset Group 제작 절차 — 2026-11-04
+
+Scene 메모의 동일 제품/무늬 선언과 사진을 함께 읽고, Object ID(개별 Instance), Category, 공유 Asset Group, 실제 Asset ID/Version/Manifest를 구분한다. 같은 Category만으로 합치지 않는다. 사진에서만 추론한 Codex 관계는 estimated/PROPOSED다. Codex가 사용자 명시 관계로 해석한 결과는 현재 원문 SHA·인용문 존재·대상 참조를 확인해 user_declared/CONFIRMED로 기록하고 asset_group_relation에 근거를 남긴다. 같은 실제 물체의 다중 시점은 하나의 Object 관측으로, 여러 동일 물체는 여러 Object와 하나의 Group으로 만든다.
+
+SAM Mask와 Object의 연결은 별도다. 임의 Mask 인덱스를 Object 정체성으로 사용하지 않는다. Box/명시 선택/유일 후보를 활용하고 중복 Mask 배정은 정합에서 제외한다. 원격 모델을 반복 호출해 모호함을 감추지 않는다.
+
+그룹별 모델링 root의 r2s_id는 asset_group이며 members의 Object ID마다 똑같은 Mesh를 다시 생성하지 않는다. USDA 등록 뒤 record_modeling_results로 frozen Group Fingerprint를 기록하고 attach_modeled_assets/instance_operation으로 각 Instance를 만든다. 과거 results.json의 이름만 보고 재사용하지 않는다. 기존 Manifest 명시 선택, 동일 Fingerprint 또는 검토 후 새 모델링을 사용한다.
+
+자세 변경과 동일 Instance 추가는 모델 생성 이유가 아니다. 기존 Scene/확정 Group 동일성이 유지되고 형상 변경 근거가 없으면 새 사진/Mask를 관측으로 받아 기존 Manifest를 재사용한다. 생성 Fingerprint와 원 입력 SHA는 그대로 두고 새 관측 이력을 분리한다. 실측/형상/Material 변화는 해당 그룹을 검토한다. Material 차이는 material_variant 또는 별도 Group/Asset으로 처리한다. Group 분리는 필요한 Object 참조만 새 Asset으로 옮기며 원 USDA는 보존한다.
+
+Blender에는 지정 입력과 설치 런타임만 제공한다. host 전체 root/home/인증 파일/환경변수 접근을 전제로 한 스크립트를 작성하지 않는다. 입력 Texture는 Path(__file__).parent / 'inputs' 안에서 읽는다. 상세 Config와 Sandbox/캐시 조건은 AUTO_SCENE_FITTING.md의 최신 Asset Group 절을 따른다.
+
+
+## v3 모델링 요청과 재사용
+
+사용자의 `검토 후 새 모델링`은 기존 캐시/Manifest보다 우선한다. Group별 modeling_request_id를 저장하고 성공한 Asset 등록 즉시 완료 처리한다. 실패 후에는 미완료 그룹만 다시 실행한다. 새 요청은 새 불변 Version이며 과거 USDA를 덮어쓰지 않는다. 명시 Manifest 선택은 과거 관계 미확정만 해소하고 실측 충돌·파일 무효·관측 수량 문제를 숨기지 않는다.
+
+메모에서 동일 제품이라고 명시한 문장을 확인했으면 다시 동일성 질문을 만들지 않는다. Mask가 모호하면 제품 공유 관계와 구별하여 Association만 검토한다. 기존 Scene의 자산 선택을 오래된 자동 캐시로 되돌리지 않는다. Category만 같은 새 Object에 기존 자산을 임의 연결하지 않는다. 새 사진에서 형상/무늬 차이를 발견하면 형상 제약·Material Variant·명시 새 모델링으로 표현하며 단순 이동·회전을 그 근거로 삼지 않는다. 실제 함수·구성 예와 제한은 AUTO_SCENE_FITTING.md의 v3 절을 따른다.
+
+
+## Workspace 소유권과 현재 메모
+
+같은 Workspace의 여러 Scene은 공용 Library의 정확한 ID/Version을 선택해 참조한다. 새 Scene에 같은 USDA를 매번 복제/모델링하지 않는다. Project별 Input/Capture/q·Camera·메모·Pose·Config는 공유하지 않는다. 기존 Project 내부 Library를 강제 이동하거나 과거 Revision을 갱신하지 않는다. `object-asset publish --manifest ...`는 검증한 Legacy 버전을 공용 Library에 복사할 뿐 Scene 참조를 전환하지 않는다. 다른 Workspace Clone은 사용 버전만 옮기고, Export는 필요한 Closure를 독립 Package에 고정한다.
+
+현재 메모는 `input/scene_memo.txt` 하나이며 `evidence.scene_memo`로 읽는다. `briefs/current_brief`는 canonical 파일이 없는 Legacy의 최소 읽기 복원에만 사용한다. Codex가 현재 원문과 사진을 해석해 Object/Group·관계 출처·정확한 인용문·변경 종류를 반환한다. Python은 SHA/구조/인용문 존재만 검사하고 자연어 의미를 다시 분류하지 않는다. 인용문 존재는 의미/물리 동일성 증명이 아니며 `semantics_verified=false`다. 과거 인용문을 새 메모 SHA로 자동 재결합하지 않는다. 메모 변경 후 새 Codex 해석을 요청하고 영향받는 Group만 검토한다. Object 표는 Config만 존재하는 미모델링 Object도 복원하며 목록·Group·Mask·요청·선택 자산을 유지한다. API/응답 Schema/CLI는 AUTO_SCENE_FITTING.md의 단일 자유 메모 절을 따른다.

@@ -359,12 +359,35 @@ def import_reference(project, workspace, capture):
     return project.scene
 
 
-def add_brief(project, path):
-    project.require_writable()
-    relative = copy_input(project, path, 'notes')
-    evidence = project.evidence
-    evidence.setdefault('briefs', []).append({'path': relative, 'sha256': sha(project.root / relative)})
-    write(project.root / 'input/evidence.yaml', evidence)
-    project.invalidate()
-    return relative
+def scene_memo(project):
+    """Current literal prompt, with one read-only fallback for legacy Projects."""
+    import hashlib
+    path=project.root/'input/scene_memo.txt';relative='input/scene_memo.txt'
+    if not path.exists():
+        evidence=project.evidence
+        selected=evidence.get('current_brief')or next(iter(reversed(evidence.get('briefs',[]))),None)
+        if selected is None:return {'path':None,'text':'','sha256':hashlib.sha256(b'').hexdigest(),'saved':False}
+        relative=selected['path'];path=local_path(project.root,relative)
+        if not path.is_relative_to(project.root/'input')or not path.is_file()or sha(path)!=selected['sha256']:
+            raise ValueError('Legacy Scene memo missing or changed')
+    if path.is_symlink():raise ValueError('Scene memo symlink is forbidden')
+    data=path.read_bytes()
+    return {'path':relative,'text':data.decode('utf-8'),'sha256':hashlib.sha256(data).hexdigest(),'saved':True}
 
+
+def save_scene_memo(project,text):
+    """Update one prompt atomically; execution snapshots belong to Candidate."""
+    import os,uuid
+    from .candidate import exclusive
+    if not isinstance(text,str):raise ValueError('Scene memo must be text')
+    with exclusive(project):
+        path=project.root/'input/scene_memo.txt';data=text.encode('utf-8')
+        if path.is_file()and not path.is_symlink()and path.read_bytes()==data:return scene_memo(project)
+        temporary=path.with_name('.scene_memo_'+uuid.uuid4().hex)
+        try:
+            with temporary.open('xb')as stream:
+                stream.write(data);stream.flush();os.fsync(stream.fileno())
+            os.replace(temporary,path)
+        finally:temporary.unlink(missing_ok=True)
+        project.invalidate()
+        return scene_memo(project)

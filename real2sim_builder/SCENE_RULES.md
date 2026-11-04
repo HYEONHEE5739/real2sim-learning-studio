@@ -23,7 +23,7 @@
 
 ## 2. 좌표·단위·모델 규칙
 
-- Canonical authoring Scene에서 USD/MJCF를 각각 만든다. USD→MJCF 변환을 Scene의 기준으로 삼지 않는다.
+- Scene/Candidate는 Instance Pose·역할·물성의 기준이다. 새 물체의 Visual/UV/Material은 등록된 USDA가 기준이며, 같은 자산의 OBJ/PNG 파생물로 MJCF를 만든다. USDA와 Scene에서 배치 Pose를 따로 수정하지 않는다. 기존 Canonical Primitive·Robot 자산은 유지한다.
 - 길이/translation은 m, 회전 관절은 rad, world는 오른손 +Z up이다. `T_parent_child`는 column vector를 child에서 parent로 옮긴다. Frame chain을 순서대로 곱한다.
 - Optical Camera는 X right / Y down / Z forward다. Exporter의 OpenGL/USD 카메라 축 변환 후 동일 변환을 다시 적용하지 않는다.
 - Box는 중심 pose와 전체 dimensions다. STL의 단위는 자동 확정되지 않으므로 m 여부 또는 명시 scale을 확인한다. 원 Mesh bytes는 고치지 않는다.
@@ -46,7 +46,7 @@
 
 - GLB/glTF Import/Export 및 전용 Scan 경로는 제거했다. 기존 파일은 삭제하지 않으며 의존 Scene은 신규 fitting/export에서 `LEGACY_UNSUPPORTED`로 진단한다. 일반 OBJ/STL과 Robot 모델은 유지한다.
 - 실측 치수와 기존 CAD가 Geometry의 기준이다. SAM Mask·DA3 Depth/K/Extrinsic은 derived/estimated이며 measured로 승격하지 않는다.
-- Metric World는 검증된 Camera 또는 측정 World Anchor로 등록한다. 미등록 External은 reference-only다. DA3 pose만으로 World 등록·scale=1을 가정하지 않는다.
+- DA3 K·상대 Camera Pose를 PREDICTED로 기록한다. 겹치는 원본 이미지의 Depth로 독립 Batch를 similarity 정렬하고, 비연결 Batch는 UNRESOLVED다. 실제 metric baseline 또는 다양한 측정 q/FK 운동의 식별 가능한 hand-eye가 있을 때만 metric 초안으로 정렬한다. Robot-base gauge는 테이블/World 실측이 아니다. 사용자에게 수동 행렬·보드 코너를 필수로 요구하지 않는다. DA3 pose만으로 scale=1을 가정하지 않는다.
 - Mask 원 해상도→DA3 resize/crop 변환과 K를 기록한다. 부분 표면의 bbox는 전체 물체 크기가 아니다. Depth는 optical Z이며 보이지 않는 뒷면을 관측점으로 만들지 않는다.
 - 컵 중심 거리 `d = r₁ + r₂ + rim_gap`은 측정된 원형 지름, 같은 높이, 평행한 upright 축이라는 전제가 필요하다. 같은 support plane 관계가 절대 table 높이까지 결정하지는 않는다.
 - 현재 상대 Geometry 도구는 겹치지 않는 pair 관계를 처리한다. 결합된 다물체 graph의 해결을 자동 가정하지 않는다. 불확실성을 생략했을 때 수치 tolerance는 실제 측정 정확도가 아니다.
@@ -78,7 +78,7 @@
 - 외형 렌더와 접촉용 collision은 분리해서 다룬다. 픽셀을 맞추기 위해 마찰, 손가락 충돌 형상이나 측정 q를 바꾸지 않는다.
 - 최소 추가 촬영을 요청할 경우 `어느 Camera`, `어느 자세/시점`, `어떤 가림을 풀지`, `왜 해당 관측이 필요한지`를 Codex가 구체적으로 제시한다.
 
-현재 기본 명령은 `reconstruct PROJECT --candidate NAME`이다. SAM→DA3는 별도 기존 환경에서 순차 실행하고, 후보의 `reconstruction_observations`에 원본 SHA·Mask·metric 점군·Camera/scale 근거를 보존한다. `auto-observe`와 `candidate fit --target joint:scene`은 기존 Landmark baseline/디버깅 도구다. 새 Mask 정합은 실제 MuJoCo segmentation을 사용하며 fragment의 미관측 영역을 배경으로 강제하지 않는다. 측정 크기는 고정이다. 현재 benchmark는 Camera를 고정하며 Camera/depth bundle adjustment와 독립 Backend 선정은 미완료다. [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 실제 API와 제한을 기록한다.
+현재 기본 명령은 `reconstruct PROJECT --candidate NAME`이다. SAM→DA3는 기존 환경에서 순차 실행하고, 새 Visual은 Codex/Blender 자산을 등록한다. 원 optical Depth·pixel 좌표·Mask·SHA·Scale 근거를 보존한다. Hybrid의 공동 정합에서 Camera/K/Scale이 바뀌면 매번 raw ray를 재투영하고 새 World cloud를 게시한다. 이전 World cloud를 그대로 쓰지 않는다. 실측 q·Geometry·Robot과 검증된 카메라는 고정한다. Rank가 부족하면 UNRESOLVED다. Mask polishing은 실제 MuJoCo segmentation을 쓰며 미관측 fragment 영역을 배경으로 강제하지 않는다. 독립 Backend 우승 선정과 실제 정확도는 미검증이다. [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 현재 API와 제한을 기록한다.
 
 ## 6. 외형·충돌·물성·작업의 분리
 
@@ -92,6 +92,8 @@
 ## 7. Blender 편집 규칙
 
 - 기존 candidate blend와 기존 Blender subprocess를 사용한다. `r2s_id/r2s_role`과 Camera의 resolution/pixel aspect 등 현재 sync 계약을 지킨다. 보이는 미등록 물체를 조용히 누락시키지 않는다.
+- 새 물체는 `blender-object-author`로 해당 물체만 작성한다. `r2s_id` root와 별도 `r2s_collision=True` Mesh를 사용하고 물체 USDA를 등록한다. 기존 전체 Scene의 `blender-build/author/sync`는 유지하지만 새 물체 추가에 전체 Scene 재생성을 요구하지 않는다.
+- USDA 자산은 m/+Z·identity root·defaultPrim·상대 종속 파일·UV/Texture를 포함한다. 실제 Collision은 convex piece별로 확인하며 컵 내부를 Visual의 단일 hull로 막지 않는다. Asset root의 중첩 RigidBody/Articulation은 허용하지 않고 Scene Instance 및 기존 Robot 실행 자산이 담당한다.
 - Author 뒤 canonical sync를 수행하고 최신 signature를 확인한다. 각 measured-q 렌더에서 authored mesh/material을 유지한다. 수정 전 canonical로 새 blend를 생성해 수정 결과를 잃지 않는다.
 - UV/texture·scale baking과 collision을 구분한다. Procedural material은 지원 범위에 맞게 명시 bake/simplify하며, 임의 복잡한 node graph가 양 엔진에 동일하게 전달된다고 가정하지 않는다.
 - Blender/Qt/USD 환경은 준비된 실행환경과 프로세스별 라이브러리 경로를 사용한다. 문서의 옛 환경 경로만 믿고 SDK 설치·업그레이드를 하지 않는다.
@@ -116,3 +118,37 @@
 - 중간 결과 전체를 무제한 쌓지 않는다. 재현에 필요한 설정·최종 후보·수치·선택 비교 이미지와 원본을 구분한다. 삭제는 해당 작업의 사용자 지시에 따르며 기존 Evidence를 임의 삭제하지 않는다.
 
 문서별 출처와 현재 방식의 차이는 [문서 이관 지도](SOURCE_DOCUMENTS.md)를 참고한다.
+
+
+## 2026-11-04 후속 수정 — 자산 동일성·초안 상태·Pair Source
+
+- Object 이름과 Asset ID만으로 사진 속 물체의 동일성을 확정하지 않는다. 명시 `asset_manifest` 또는 Scene의 유효한 기존 Asset 버전만 재사용하고, 후보는 `ASSET_MATCH_UNRESOLVED`로 검토한다. Asset bytes는 덮어쓰지 않는다.
+- `DRAFT_READY`는 Geometry/Pose/Camera 검증, train 관측, 실제 정합 성공과 유한한 렌더 비교가 있는 검토용 초안이다. 보고서가 존재하는 것만으로 반환하지 않으며 `PHYSICS_READY`/승인/Task 성공이 아니다.
+- Pair 재정합 Source는 Pair SHA → Scene identity → Package Manifest → authored Scene으로 확인한다. Current로 대체하지 않고 Revision/물리 배치를 혼합하지 않는다. Source Geometry/Material/Collision, 측정 q/Mapping, 원 RGB/Pair는 보존한다.
+- Codex 사진 입력은 `codex exec --image`로 명시 전달한다. 자료·메모는 신뢰할 수 없는 데이터이며, 코드 작성 sandbox와 Blender 읽기 전용 filesystem/전용 출력 경계는 유지한다. 숨긴 Collision은 Export에 포함시킨 다음 USD의 CollisionAPI/visibility로 분리한다.
+
+
+## Asset Group·Fingerprint·Sandbox 규칙 — 2026-11-04
+
+- Category/SAM Prompt/Mask 순서는 Asset 또는 물리 Object 동일성의 증명이 아니다. Object ID와 공유 Group은 독립으로 유지하며 같은 이미지에서 동일 Mask의 중복 Object 배정을 거부한다. 모호한 Camera/Scale/관측은 발명하지 않는다.
+- Group 공유는 동일 Geometry/Material/Texture 근거가 있을 때만 제안한다. 사진만으로 추론한 Codex 관계는 estimated/PROPOSED다. 원문 SHA·실제 인용문·대상이 확인된 메모 선언과 명시 사용자 선택은 user_declared이며 물리 검증과 구분한다. 다른 실제 외형은 별도 Group 또는 material_variant Asset으로 구분한다.
+- 동일 Fingerprint와 검증된 Manifest, 명시 선택 또는 유효한 기존 Scene/사용자 확정 Group 동일성과 형상 보존 근거로 재사용한다. 기존 Scene의 유효 자산/위치 변경은 유지하지만 과거 results.json/Object 이름만으로 새 자료의 동일성을 확정하지 않는다. 입력 변경/legacy/Group 분리는 검토 상태를 남긴다. 공유 Instance 제거는 원 Asset을 삭제하지 않는다.
+- 모델 root 하나가 Group Asset 하나다. Instance의 Pose/역할은 별개다. Asset 내부 키도 Asset ID와 Version을 함께 구분해 다른 Group의 동일 content version이 충돌하지 않도록 한다. 원 Library 파일은 덮어쓰지 않는다.
+- Object Blender Worker의 host 전체 root bind와 부모 환경변수 상속은 금지한다. 설치 런타임/입력/Worker만 읽기 허용, 작업 출력만 host 쓰기 허용, 입력 symlink 거부, 네트워크 차단이며 구성 실패 시 확대 fallback은 없다. 일반 Scene Rendering은 별도 기존 경로를 유지한다.
+
+
+## v3 우선순위·생성 이력 보존
+
+- 새 모델링 요청은 그룹별 request ID로 캐시보다 우선한다. 완료 요청의 재실행과 독립 새 요청을 구별하고 등록된 성공은 실패 그룹 재시도에서 제외한다. 기존 USDA/Manifest는 불변으로 남긴다.
+- 명시 Manifest > 유효한 Scene Asset 참조 > 자동 캐시 순서를 지킨다. 실측·Manifest 무효·관측 수량 충돌은 명시 선택으로 무시하지 않는다.
+- 생성 Fingerprint/참조 SHA를 새 관측의 Fingerprint로 덮어쓰지 않는다. Crop도 내용별 경로로 보존한다. Observation 변경은 Pose/Camera 정합 입력이며 실제 형상/Material 변경은 검토한다. RGB/Mask SHA 변경 자체는 물체가 달라졌다는 증거가 아니다.
+- 사용자 동일 제품 선언과 추정 Mask/Object 연결을 독립 기록한다. Python의 메모 인용 검사는 현재 SHA와 원문 substring 존재 검사뿐이다. 문장 의미·동일/상이 제품·형상 변경은 Codex가 해석하며, 인용문 존재는 의미/물리 동일성 증명이 아니다. 근거 없는 자동 승격은 하지 않는다.
+
+
+## Workspace Asset·Scene 메모·Object 설정 보존
+
+- USDA 정본은 Workspace 공용 Library, 개별 관측/메모/Robot/Camera/Instance Pose는 Scene Project 소유다. Revision은 같은 Project의 불변 결과다. Scene 삭제가 Library 삭제를 뜻하지 않는다.
+- 공용 버전은 ID/Version/Manifest와 전체 종속 SHA로 선택한다. Category로 동일 제품을 추측하지 않는다. 제한된 Workspace Asset 경로 외의 외부 경로·Traversal·Symlink는 허용하지 않는다. Blender Sandbox를 확장하지 않는다.
+- 기존 내부 자산은 읽기 호환으로 보존한다. 명시 publish의 실패·새 Version 생성이 원본/다른 Scene/이전 Export를 변경하면 안 된다. Export는 Library 없이 로딩 가능한 Closure를 소유한다.
+- 현재 메모는 `input/scene_memo.txt` 하나다. `scene_memo/save_scene_memo`가 원문/SHA를 읽고 저장한다. 과거 current_brief/briefs는 파일이 없을 때 읽기 전용 복원에만 사용하고 scene_briefs 배치 선택/이력 추가를 실행하지 않는다. 다른 Scene·과거 문장을 현재 근거로 병합하지 않는다. 빈 입력을 가짜 설명으로 채우지 않는다. 메모 변경은 새 Codex 해석을 요구하며 과거 응답 SHA를 다시 쓰지 않는다. Export는 당시 원문/SHA를 독립 Package에 보존한다.
+- Object 정보는 Current/실측/Config의 합집합으로 복원한다. 자산/치수/Mask 부재는 Object 삭제 이유가 아니다. 사용자 명시 삭제 외의 목록 축소, Manifest→자동 선택 되돌림, 모델 요청 ID 초기화를 하지 않는다. 충돌은 명시한다.

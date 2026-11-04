@@ -103,7 +103,7 @@ def fit_clouds(project,scene,options=None):
         name=obj['id'];active=[r for r in rows if r['object_id']==name and r['split']=='train']
         if selected and name not in selected:continue
         if not active or obj['pose']['provenance']in('measured','calibrated')or obj.get('link')or obj['role']=='reference_robot':continue
-        if obj['dimensions']['provenance']not in('measured','calibrated'):
+        if obj['dimensions']['provenance']not in('measured','calibrated')and not obj.get('object_asset'):
             needs.append(name+': measured geometry required');continue
         points=[]
         for row in active:
@@ -278,17 +278,30 @@ def alignment_metrics(project,scene,folder,options=None):
     write(folder/'metrics.json',report);return report
 
 
+def backend_ready(result):
+    """A successful solve and finite rendered training comparisons, not just a report."""
+    stages=result.get('stages',{}).values()
+    if not any(r.get('status')in('ESTIMATED','IMPROVED','OPTIMIZED_UNVERIFIED')for r in stages):return False
+    if any(r.get('status')in('FAILED','UNRESOLVED','STOPPED')for r in stages):return False
+    if any(r.get('status')!='ESTIMATED'for r in result.get('stages',{}).get('icp',{}).get('objects',{}).values()):return False
+    rows=[r for r in result.get('metrics',{}).get('images',[])if r.get('split')=='train']
+    def finite(node):
+        if isinstance(node,dict):return all(finite(v)for v in node.values())
+        if isinstance(node,(list,tuple)):return all(finite(v)for v in node)
+        return bool(np.isfinite(node))if isinstance(node,(float,int))else True
+    return bool(rows)and all(isinstance(r.get('mae'),(float,int))for r in rows)and finite(result)
+
+
 def compare_backends(project,scene,folder,options=None):
     """Run A/B/C from identical inputs; no default winner without a fair holdout.
 
-    Registered metric cameras are fixed for this comparison: moving a camera
-    would invalidate a precomputed World cloud. The landmark fitter may still
-    jointly optimize object poses. A future camera/cloud bundle adjustment must
-    re-backproject the original depth, not reuse stale World points.
+    Hybrid refines raw optical depth and shared Camera/Object variables, then
+    republishes World clouds before mask fitting. Legacy clouds without raw
+    rays retain the fixed-camera baseline and report the missing inputs.
     """
     from pathlib import Path
     import time
-    from .joint import fit_joint_scene
+    from .joint import fit_joint_scene,fit_depth_bundle
     from ..scene import validate
     from ..editing import preserve
     from ..files import write
@@ -302,6 +315,7 @@ def compare_backends(project,scene,folder,options=None):
         if name!='landmark':trial,stages['icp']=fit_clouds(project,trial,options)
         if name!='icp_mask':
             trial,stages['joint']=fit_joint_scene(project,trial,{**options,'cameras':[]})
+        if name=='hybrid':trial,stages['depth_bundle']=fit_depth_bundle(project,trial,options)
         if name!='landmark':trial,stages['masks']=refine_masks(project,trial,folder/name,options)
         preserve(scene,trial);validate(trial,project.root)
         candidates[name]=trial
@@ -311,16 +325,19 @@ def compare_backends(project,scene,folder,options=None):
             'measured_fields_preserved':True,'physical_verified':False}
         results[name]['metrics']=alignment_metrics(project,trial,folder.parent/'renders'/('auto_'+name),options)
         results[name]['runtime_s']=time.monotonic()-started
+        results[name]['status']='FITTED_DRAFT'if backend_ready(results[name])else'NEEDS_MORE_DATA'
         write(folder/(name+'.yaml'),trial)
     held=any(r['split']=='validation'for r in rows)
     report={'status':'PROVISIONAL_COMPARISON','baseline':baseline,'backends':results,'requested_backend':options.get('backend','hybrid'),
             'default_backend':None,'winner':None,'independent_pose_accuracy_mm':None,
             'needs':(['Independent held-out observations required']if not held else[])+[
                 'Default backend selection requires comparable landmark/mask/depth metrics and independent validation',
-                'Shared Camera/depth bundle adjustment is not implemented; registered metric cameras remain fixed'],
+                'Draft fitting is not independent metric/physical validation'],
             'scope':'A/B/C draft outputs and solver diagnostics; not a completed accuracy benchmark'}
     selected=report['requested_backend']
     if selected not in candidates:raise ValueError('Backend must be landmark, icp_mask or hybrid')
+    if results[selected]['status']!='FITTED_DRAFT':
+        report['status']='NEEDS_MORE_DATA';report['needs'].append('Selected backend has no valid solved and rendered training result')
     write(folder/'comparison.json',report)
     return candidates[selected],report
 

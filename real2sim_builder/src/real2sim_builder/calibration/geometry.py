@@ -39,8 +39,9 @@ def parts(obj, field):
         result = []
         for part in geom.get('parts', []):
             size = np.asarray(part['dimensions'], float)
-            if part['type'] not in ('box','sphere','cylinder') or size.shape != (3,) or not np.isfinite(size).all() or min(size) <= 0:
+            if part['type'] not in ('box','sphere','cylinder','mesh') or size.shape != (3,) or not np.isfinite(size).all() or min(size) <= 0:
                 raise ValueError('Compound collision requires positive primitive dimensions')
+            if part['type']=='mesh'and not part.get('asset'):raise ValueError('Compound mesh requires an asset')
             result.append({**part, 'pose': transform(part['pose']), 'dimensions': size})
         if not result: raise ValueError('Empty compound geometry')
         return result

@@ -41,7 +41,8 @@ from .evidence import (
     import_metadata,
     import_robot,
     import_reference,
-    add_brief,
+    save_scene_memo,
+    scene_memo,
     PROVENANCE,
 )
 from .capture import (
@@ -67,7 +68,7 @@ from .candidate import exclusive, Candidate, rollback, restore_report, nonregres
 STAGES = ['ANALYZE', 'CAMERA & SCALE', 'GEOMETRY', 'VISUAL', 'PHYSICS', 'VALIDATION', 'EXPORT']
 
 
-STATUSES = {'DRAFT', 'RUNNING', 'PAUSED', 'STOPPED', 'ACCEPTED', 'NEEDS_MORE_DATA', 'FAILED'}
+STATUSES = {'DRAFT', 'RUNNING', 'PAUSED', 'STOPPED', 'ACCEPTED', 'NEEDS_MORE_DATA', 'FAILED', 'DRAFT_READY', 'WAITING_FOR_CODEX', 'WAITING_FOR_CODEX_ANALYSIS'}
 
 
 class Project:
@@ -107,6 +108,11 @@ class Project:
         return read(self.root / 'input/evidence.yaml')
 
     @property
+    def workspace(self):
+        """Workspace selected by the existing <workspace>/scenes Project pool."""
+        return self.root.parent.parent
+
+    @property
     def state(self):
         return read(self.root / 'working/state.json')
 
@@ -138,7 +144,8 @@ class Project:
     def signature(self, scene=None):
         """Bind a validation decision to the exact scene and local evidence bytes."""
         scene = scene if scene is not None else self.scene
-        evidence = self.evidence
+        evidence = {k:v for k,v in self.evidence.items()if k not in('briefs','current_brief','scene_briefs')}
+        memo=scene_memo(self)
         files = {}
 
         def collect(node):
@@ -159,7 +166,7 @@ class Project:
 
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()
-        return {'scene_sha256': digest(scene), 'evidence_sha256': digest(evidence), 'files': files}
+        return {'scene_sha256': digest(scene), 'evidence_sha256': digest(evidence), 'scene_memo_sha256':memo['sha256'], 'files': files}
 
     def checkpoint(self):
         self.require_writable()
@@ -208,6 +215,17 @@ def clone_project(source, destination):
         # Working ownership locks are not copied as live process claims.
         (temporary/'working/run.lock').unlink(missing_ok=True)
         (temporary/'working/control.json').unlink(missing_ok=True)
+        if original.workspace!=temporary.parent.parent:
+            from .object_assets import publish_object_asset
+            target=Project(temporary);references=set()
+            scenes=[temporary/'working/current_scene.yaml',*(temporary/'scratch/agent').glob('*/candidate_scene.yaml')]
+            for path in scenes:
+                if not path.is_file():continue
+                for asset in read(path).get('assets',{}).values():
+                    parts=Path(asset['path']).parts
+                    if parts[:3]==('..','..','object_assets'):
+                        references.add('/'.join(parts[:5])+'/manifest.json')
+            for reference in sorted(references):publish_object_asset(target,reference,source_project=original)
         if (temporary/'working/current_scene.yaml').is_file():
             validate(read(temporary/'working/current_scene.yaml'),temporary)
         os.rename(temporary,destination)

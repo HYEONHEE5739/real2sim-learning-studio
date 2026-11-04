@@ -15,8 +15,12 @@ def main(argv=None):
     sub.add_parser('capabilities')
     p=sub.add_parser('register-rgb');p.add_argument('project');p.add_argument('paths',nargs='+');p.add_argument('--camera',required=True);p.add_argument('--type',choices=['side','wrist','external'],required=True);p.add_argument('--scene-state',required=True);p.add_argument('--split',choices=['train','validation'],default='train');p.add_argument('--joints')
     p=sub.add_parser('reconstruct');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--config');p.add_argument('--scene-state')
+    p=sub.add_parser('object-asset');p.add_argument('project');p.add_argument('action',choices=['list','register','publish','instantiate']);p.add_argument('--id');p.add_argument('--path');p.add_argument('--dimensions');p.add_argument('--blend');p.add_argument('--manifest');p.add_argument('--candidate');p.add_argument('--object');p.add_argument('--pose');p.add_argument('--role',default='manipulable_object')
+    p=sub.add_parser('blender-object-author');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--script',required=True);p.add_argument('--objects',nargs='+',required=True)
+    p=sub.add_parser('modeling-run');p.add_argument('project');p.add_argument('--candidate',required=True)
+    p=sub.add_parser('refit-pairs');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--dataset');p.add_argument('--scene-state',required=True);p.add_argument('--config');p.add_argument('--include-flagged-reason')
     p=sub.add_parser('register-views');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--anchors');p.add_argument('--scene-state')
-    p=sub.add_parser('physics-check');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--steps',type=int,default=500)
+    p=sub.add_parser('physics-check');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--steps',type=int,default=500);p.add_argument('--engine',choices=['mujoco','isaac'],default='mujoco');p.add_argument('--native-worker',action='store_true',help=argparse.SUPPRESS)
     for name in ('diagnose','coverage','analyze-objects'):
         p=sub.add_parser(name);p.add_argument('project');p.add_argument('--candidate');p.add_argument('--engine',choices=['blender','mujoco'],default='mujoco')
     p=sub.add_parser('inspect');p.add_argument('project')
@@ -53,6 +57,44 @@ def main(argv=None):
         from .ui import launch
         launch(Path(args.projects));return
     project=Project(args.project)
+    if args.command=='modeling-run':
+        from .candidate import Candidate
+        from .automation import run_codex_modeling
+        result=run_codex_modeling(Candidate(project,args.candidate))
+        print(json.dumps(result,indent=2));return 2 if result['status']=='ASSET_REUSE_REVIEW_REQUIRED'else 0
+    if args.command=='object-asset':
+        from .object_assets import list_object_assets,register_object_asset,instance_operation,publish_object_asset
+        if args.action=='list':result=list_object_assets(project)
+        elif args.action=='publish':
+            if not args.manifest:parser.error('object-asset publish requires --manifest')
+            result=publish_object_asset(project,args.manifest)
+        elif args.action=='register':
+            if not args.id or not args.path:parser.error('register requires --id and --path')
+            result=register_object_asset(project,args.path,asset_id=args.id,dimensions=read(args.dimensions)if args.dimensions else None,blend=args.blend)
+        else:
+            if not args.manifest or not args.candidate or not args.object:parser.error('instantiate requires --manifest, --candidate and --object')
+            from .candidate import Candidate
+            selected=Candidate(project,args.candidate)
+            operation=instance_operation(project,args.manifest,args.object,pose=read(args.pose)if args.pose else None,role=args.role)
+            if any(o['id']==args.object for o in selected.scene['objects']):operation['op']='use_object_asset'
+            result=selected.edit([operation])
+        print(json.dumps(result,indent=2));return 0
+    if args.command=='blender-object-author':
+        from .candidate import Candidate
+        from .rendering import author_object_assets
+        selected=Candidate(project,args.candidate);config=project.root/'input/reconstruction.yaml'
+        measurements={r['id']:{'value':r['dimensions_m'],'provenance':'measured','evidence':r['evidence']}for r in read(config).get('measurements',[])}if config.is_file()else{}
+        from .automation import record_modeling_results
+        task=selected.root/'modeling/tasks.json';groups=read(task).get('groups',{})if task.is_file()else{}
+        requests={name:groups[name]['request_id']for name in args.objects if groups.get(name,{}).get('request_id')}
+        result=author_object_assets(selected,args.script,args.objects,measurements,request_ids=requests,
+            on_registered=lambda asset:record_modeling_results(selected,[asset]))
+        print(json.dumps(result,indent=2));return 0
+    if args.command=='refit-pairs':
+        from .automation import refit_pairs
+        result=refit_pairs(project,candidate=args.candidate,dataset=args.dataset,scene_state=args.scene_state,
+            config=read(args.config)if args.config else None,include_flagged_reason=args.include_flagged_reason)
+        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
     if args.command=='register-rgb':
         from .observations import register_sources
         rows=register_sources(project,args.paths,camera=args.camera,camera_type=args.type,scene_state=args.scene_state,split=args.split,
@@ -62,17 +104,27 @@ def main(argv=None):
         from .automation import reconstruct,save_configuration
         config=save_configuration(project,read(args.config))if args.config else None
         result=reconstruct(project,candidate=args.candidate,config=config,scene_state=args.scene_state)
-        print(json.dumps(result,indent=2));return 2 if result['status']=='NEEDS_MORE_DATA'else 0
+        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
     if args.command=='register-views':
         from .candidate import Candidate
         from .observations import register_views
         result=register_views(Candidate(project,args.candidate),read(args.anchors)if args.anchors else None,scene_state=args.scene_state)
-        print(json.dumps(result,indent=2));return 2 if result['status']=='NEEDS_MORE_DATA'else 0
+        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
     if args.command=='physics-check':
         from .candidate import Candidate,exclusive
         from .validation import physics_probe
         selected=Candidate(project,args.candidate)
-        with exclusive(project):result=physics_probe(project,selected.scene,selected.root/'physics',steps=args.steps)
+        if args.engine=='isaac'and args.native_worker:
+            from isaaclab.app import AppLauncher
+            launcher=AppLauncher(headless=True,enable_cameras=False,device='cpu',fast_shutdown=False)
+            try:result=physics_probe(project,selected.scene,selected.root/'physics',steps=args.steps,engine='isaac')
+            finally:launcher.app.close()
+            print(json.dumps(result,indent=2));return 0
+        with exclusive(project):
+            if args.engine=='isaac':
+                from .validation import isaac_physics_worker
+                result=isaac_physics_worker(project,args.candidate,selected.root/'physics',args.steps)
+            else:result=physics_probe(project,selected.scene,selected.root/'physics',steps=args.steps)
         print(json.dumps(result,indent=2));return 2 if result['status']=='NEEDS_MORE_DATA'else 0
     if args.command == 'auto-observe':
         from .observations import propose_observations, commit_observation_proposals
@@ -139,7 +191,7 @@ def main(argv=None):
     if args.command=='add':
         from . import project as evidence
         for path in args.paths:
-            if args.kind=='brief':evidence.add_brief(project,path)
+            if args.kind=='brief':evidence.save_scene_memo(project,Path(path).read_bytes().decode('utf-8'))
             elif args.kind in ('image','reference'):evidence.add_image(project,path,args.camera,args.split,context_only=args.kind=='reference')
             elif args.kind=='video':evidence.add_video(project,path,args.camera,args.split)
             elif args.kind=='scene':evidence.import_scene(project,path)

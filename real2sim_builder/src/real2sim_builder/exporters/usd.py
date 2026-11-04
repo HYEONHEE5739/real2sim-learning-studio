@@ -43,11 +43,20 @@ def export(scene,root,path):
                 '      token inputs:varname = "st"','      float2 outputs:result','    }'])
         lines.append('  }')
         mass=obj['physics']['mass_kg']['value'];dynamic=obj['role']=='manipulable_object' and mass is not None and mass>0
-        api=' (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])' if dynamic else ''
+        schemas=(["PhysicsRigidBodyAPI","PhysicsMassAPI"]if dynamic else[])+(["MaterialBindingAPI"]if obj.get('object_asset')else[])
+        api=' (prepend apiSchemas = '+json.dumps(schemas)+')'if schemas else''
         lines.append('  def Xform '+json.dumps(obj['id'])+api+' {');xform(world_pose(scene,obj))
+        if obj.get('object_asset'):lines.append('    rel material:binding:physics = <'+material+'>')
         lines.append('    custom string semantic_role = '+json.dumps(obj['role']))
         if dynamic:lines.extend(['    bool physics:rigidBodyEnabled = true','    float physics:mass = '+str(mass)])
         for field in ('visual','collision'):
+            if obj.get('object_asset'):
+                if field=='visual':
+                    record=obj['object_asset'];source=scene['assets'][record['entry_asset']]['path']
+                    relative=os.path.relpath(local_path(root,source),Path(path).parent)
+                    lines.append('    def Xform "Asset" (prepend references = @'+relative+'@<'+record['default_prim']+'>) {}')
+                # Object asset carries its own separate authored collision.
+                continue
             for i,part in enumerate(parts(obj,field)):
                 kind=part['type'];dtype={'box':'Cube','sphere':'Sphere','cylinder':'Cylinder','mesh':'Mesh'}[kind]
                 api=' (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])' if field=='collision' else ' (prepend apiSchemas = ["MaterialBindingAPI"])'
