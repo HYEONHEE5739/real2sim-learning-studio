@@ -186,9 +186,12 @@ def register_views(candidate,anchors=None,*,scene_state=None):
             else:
                 if binding.get('source')not in('measured','calibrated')or not binding.get('evidence'):
                     needs.append(image['id']+': metric World anchors are required; DA3 pose alone is not registration');continue
-                report=camera_from_anchors(binding.get('world_points_m',[]),binding.get('uv_px',[]),(pixel_affine@np.asarray(cam['K']['value'])@optical_rotation.T).tolist(),cam['distortion']['value'])
+                pixels=np.asarray(binding.get('uv_px',[]),float).reshape(-1,2)
+                sensor=np.c_[pixels,np.ones(len(pixels))]@np.linalg.inv(pixel_affine).T
+                report=camera_from_anchors(binding.get('world_points_m',[]),(sensor[:,:2]/sensor[:,2:]).tolist(),cam['K']['value'],cam['distortion']['value'])
                 if report['status']!='ESTIMATED':needs.extend(image['id']+': '+n for n in report['needs']);continue
-                pose=report['T_world_camera'];status='REGISTERED_ESTIMATED'
+                pose=np.asarray(report['T_world_camera']);pose[:3,:3]=pose[:3,:3]@optical_rotation.T
+                pose=pose.tolist();status='REGISTERED_ESTIMATED'
             from .scene import camera_calibration_signature
             row={'image_id':image['id'],'source_image_sha256':image['sha256'],'image_record_sha256':_digest(image),
                  'scene_state_id':state,'camera_type':kind,'camera':image['camera'],'status':status,'T_world_camera':pose,

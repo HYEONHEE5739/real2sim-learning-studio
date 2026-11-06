@@ -50,7 +50,7 @@ def test_simulation_binding_stays_stricter_than_offline_comparison(tmp_path,monk
     scene=load_scene(ROOT/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native/scene.json')
     if case=='degree':meaning['action']['units']=['degree']*6
     if case=='order':meaning['joint_order'].reverse()
-    p=NS(resolved_inputs={'policy':{'path':'controlled official fixture'}},input_documents={} if case=='absent' else {'policy_contract':meaning},scene=scene,scene_identity=meaning['scene_identity'],effective_settings={'execution':{}})
+    p=NS(stage='simulation_evaluation',resolved_inputs={'policy':{'path':'controlled official fixture'}},input_documents={} if case=='absent' else {'policy_contract':meaning},scene=scene,scene_identity=meaning['scene_identity'],effective_settings={'execution':{}})
     if case=='verified':assert policy.policy_inputs(p,model)[-1]==meaning
     else:
         with pytest.raises(ValueError):policy.policy_inputs(p,model)

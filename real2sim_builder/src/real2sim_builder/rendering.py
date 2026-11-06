@@ -360,8 +360,9 @@ class Renderer:
         self.mode=mode
         configure(mode)
         import mujoco
-        self.mj=mujoco;self.scene=scene;self.renderers={};self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
+        self.mj=mujoco;self.scene=scene;self.camera_views={c['id']:c for c in scene['cameras']};self.renderers={};self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
         scratch=Path(scratch);scratch.mkdir(parents=True,exist_ok=True)
+        self.root=root;self.scratch=scratch
         export(scene,root,scratch/'scene.xml')
         self.model=mujoco.MjModel.from_xml_path(str(scratch/'scene.xml'));self.data=mujoco.MjData(self.model)
         mujoco.mj_forward(self.model,self.data)
@@ -374,9 +375,22 @@ class Renderer:
         from .calibration.geometry import parts
         from .exporters.mjcf import material_parameters
         if scene['assets']!=self.scene['assets']:raise ValueError('Renderer geometry changed; recompile explicitly')
+        resized=False
         for obj in scene['objects']:
             old=next(o for o in self.scene['objects']if o['id']==obj['id'])
-            if any(obj[k]!=old[k]for k in('visual','collision','dimensions')):raise ValueError('Renderer geometry changed; recompile explicitly')
+            if any(obj[k]!=old[k]for k in('visual','collision')):raise ValueError('Renderer geometry changed; recompile explicitly')
+            if obj['dimensions']['value']!=old['dimensions']['value']:
+                from .calibration.geometry import dimension_axes
+                axes={i for group in dimension_axes(old) for i in group}
+                if not axes or any(obj['dimensions']['value'][i]!=old['dimensions']['value'][i] for i in range(3) if i not in axes):
+                    raise ValueError('Renderer dimensions are protected or require a new Asset Version')
+                resized=True
+        if resized:
+            # Compile the candidate geometry before replacing the live native model.
+            # This refreshes bounding volumes/inertias too; no stale collision bounds.
+            replacement=Renderer(scene,self.root,self.scratch,self.mode)
+            self.close();self.__dict__.update(replacement.__dict__)
+        for obj in scene['objects']:
             self._body_pose(obj['id'],world_pose(scene,obj))
             for index,part in enumerate(parts(obj,'visual')):
                 gid=self.mj.mj_name2id(self.model,self.mj.mjtObj.mjOBJ_GEOM,obj['id']+'_visual_'+str(index))
@@ -400,6 +414,7 @@ class Renderer:
             self.resolutions[camera['id']]=[w,h];self.model.cam_resolution[cid]=[w,h];self.model.cam_sensorsize[cid]=[w,h]
             self.model.vis.global_.offwidth=max(self.model.vis.global_.offwidth,w);self.model.vis.global_.offheight=max(self.model.vis.global_.offheight,h)
             self.model.cam_intrinsic[cid]=[k[0,0],k[1,1],w/2-k[0,2],k[1,2]-h/2]
+        self.camera_views={c['id']:c for c in scene['cameras']}
         self.mj.mj_forward(self.model,self.data)
 
     def _body_pose(self,name,pose):
@@ -428,7 +443,9 @@ class Renderer:
         if camera not in self.renderers:self.rgb(camera)
         renderer=self.renderers[camera];renderer.enable_depth_rendering()
         try:
-            renderer.update_scene(self.data,camera=camera);return renderer.render().copy()
+            renderer.update_scene(self.data,camera=camera)
+            from .cameras import distort_render
+            return distort_render(self.camera_views[camera],renderer.render().copy(),nearest=True)
         finally:renderer.disable_depth_rendering()
 
     def rgb(self,camera):
@@ -437,7 +454,8 @@ class Renderer:
         renderer=self.renderers[camera];renderer.update_scene(self.data,camera=camera)
         rgb=renderer.render().copy()
         linear=rgb.astype(float)/255.;display=np.where(linear<=.0031308,12.92*linear,1.055*linear**(1/2.4)-.055)
-        return np.rint(np.clip(display,0,1)*255).astype(np.uint8)
+        from .cameras import distort_render
+        return distort_render(self.camera_views[camera],np.rint(np.clip(display,0,1)*255).astype(np.uint8))
 
     def mask(self,camera,obj):
         if camera not in self.renderers:self.rgb(camera)
@@ -448,7 +466,8 @@ class Renderer:
             if body<0:raise ValueError('Unknown silhouette object')
             result=np.zeros(seg.shape[:2],bool)
             for gid in np.where(self.model.geom_bodyid==body)[0]:result|=(seg[:,:,0]==gid)&(seg[:,:,1]==int(self.mj.mjtObj.mjOBJ_GEOM))
-            return result
+            from .cameras import distort_render
+            return distort_render(self.camera_views[camera],result,nearest=True)
         finally:renderer.disable_segmentation_rendering()
 
     def close(self):
@@ -738,6 +757,10 @@ def author_object_assets(candidate,script,object_ids,measurements=None,*,request
     with exclusive(candidate.project):
         candidate.require_open();folder=candidate.root/'blender/objects'/uuid.uuid4().hex
         folder.mkdir(parents=True);owned=folder/'author.py';shutil.copyfile(script,owned)
+        task=script.parent/'tasks.json'
+        if task.is_file():
+            if task.is_symlink()or not isinstance(read(task),dict):raise ValueError('Owned modeling tasks must be a JSON mapping')
+            shutil.copyfile(task,folder/'tasks.json')
         if(script.parent/'inputs').is_dir():
             if (script.parent/'inputs').is_symlink()or any(p.is_symlink()for p in(script.parent/'inputs').rglob('*')):
                 raise ValueError('Object authoring inputs may not contain symlinks')

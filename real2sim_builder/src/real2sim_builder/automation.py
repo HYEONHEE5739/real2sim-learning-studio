@@ -25,10 +25,207 @@ def board_binding(scene,name,uv):
             'evidence':obj['dimensions'].get('evidence',[])+obj['pose'].get('evidence',[])+['measured World board '+name]}
 
 
-def reconstruct(project,*,candidate,config=None,scene_state=None):
+def fitting_scores(metrics):
+    """Comparable train-view residuals; no pooled score can hide a regression."""
+    import math,json
+    scores={}
+    for row in metrics.get('images',[]):
+        if row.get('split')!='train':continue
+        key=json.dumps([row['image_id'],row.get('camera_type'),row.get('q_measured')],sort_keys=True)
+        values=[row.get('mae'),row.get('rmse')]
+        iou=row.get('edge_iou');values.append(None if iou is None else 1-iou)
+        objects=sorted(row.get('objects',[]),key=lambda obj:obj['object_id'])
+        key+=json.dumps([obj['object_id']for obj in objects])
+        for obj in objects:
+            values.extend([1-obj['iou'],obj['center_error_px'],obj['observed_point_surface_rmse_m']])
+        if key in scores or any(isinstance(v,bool)or not isinstance(v,(int,float))or not math.isfinite(v)for v in values):return {}
+        scores[key]=values
+    return scores
+
+
+def retain_fitting(candidate,best,report):
+    """Retain a valid non-regressing round and its mutable Candidate closure."""
+    import shutil,uuid
+    metrics=read(candidate.root/'metrics.json');scores=fitting_scores(metrics)
+    if not scores:return best
+    signature=candidate.project.signature(candidate.scene)
+    if metrics.get('input_signature')!=signature:raise ValueError('Stale fitting checkpoint metrics')
+    if best:
+        previous=read(best/'manifest.json');old=previous['scores']
+        if any(signature[key]!=previous['signature'][key]for key in ('evidence_sha256','scene_memo_sha256')):return best
+        def external_files(record):
+            return {path:digest for path,digest in record['files'].items()
+                if not(candidate.project.root/path).is_relative_to(candidate.root)}
+        if external_files(signature)!=external_files(previous['signature']):return best
+        if scores.keys()!=old.keys():return best
+        pairs=[(value,prior)for key in scores for value,prior in zip(scores[key],old[key])]
+        if any(len(scores[k])!=len(old[k])for k in scores)or any(a>b for a,b in pairs)or not any(a<b for a,b in pairs):return best
+    folder=candidate.root/'fitting/checkpoints'/uuid.uuid4().hex
+    folder.mkdir(parents=True)
+    write(folder/'scene.yaml',candidate.scene);write(folder/'report.json',report)
+    paths=set()
+    for relative in signature['files']:
+        path=candidate.project.root/relative
+        if path.is_relative_to(candidate.root):paths.add(path)
+    for name in ('metrics.json','reconstruction-config.yaml','review-config.yaml','fitting/codex-review.json','modeling/results.json','modeling/tasks.json'):
+        path=candidate.root/name
+        if path.is_file():paths.add(path)
+    for name in ('fitting/final/previews','physics'):
+        path=candidate.root/name
+        if path.exists():paths.update(p for p in path.rglob('*')if p.is_file())
+    files={}
+    for path in paths:
+        relative=path.relative_to(candidate.root).as_posix();target=folder/'files'/relative
+        target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target);files[relative]=sha(target)
+    write(folder/'manifest.json',{'scores':scores,'signature':signature,'files':files,
+        'scene_sha256':sha(folder/'scene.yaml'),'report_sha256':sha(folder/'report.json')})
+    return folder
+
+
+def restore_fitting(candidate,folder):
+    """Validate all saved bytes before restoring only Candidate-owned files."""
+    import shutil
+    manifest=read(folder/'manifest.json')
+    for name,key in (('scene.yaml','scene_sha256'),('report.json','report_sha256')):
+        if sha(folder/name)!=manifest[key]:raise ValueError('Corrupt fitting checkpoint')
+    for relative,digest in manifest['files'].items():
+        target=(candidate.root/relative).resolve()
+        if not target.is_relative_to(candidate.root.resolve())or sha(folder/'files'/relative)!=digest:
+            raise ValueError('Corrupt fitting checkpoint file')
+    for relative,digest in manifest['signature']['files'].items():
+        path=candidate.project.root/relative
+        if not path.is_relative_to(candidate.root)and sha(path)!=digest:
+            raise ValueError('External input changed since fitting checkpoint')
+    for relative in manifest['files']:
+        target=candidate.root/relative;target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(folder/'files'/relative,target)
+    candidate.save(read(folder/'scene.yaml'))
+    if candidate.project.signature(candidate.scene)!=manifest['signature']:raise ValueError('Fitting checkpoint signature mismatch')
+
+
+def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False):
+    """Keep the best comparable round even on Stop, child failure or budget exit."""
+    best=[None];result=None;failure=None
+    with exclusive(project):
+        try:
+            result=_reconstruct_loop(project,candidate=candidate,config=config,scene_state=scene_state,
+                run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,modeling_timeout_s=modeling_timeout_s,
+                max_review_calls=max_review_calls,refit_only=refit_only,best=best)
+            return result
+        except Exception as error:
+            failure=error
+            raise
+        finally:
+            if best[0] is not None:
+                selected=Candidate(project,candidate)
+                restored=selected.project.signature(selected.scene)!=read(best[0]/'manifest.json')['signature']
+                restore_fitting(selected,best[0])
+                path=selected.root/'reconstruction.json'
+                final=result if result is not None else(read(path)if path.is_file()else {'status':'FAILED'})
+                if failure is not None:final.update(status='STOPPED'if isinstance(failure,InterruptedError)else'FAILED',error=str(failure))
+                final['selected_checkpoint']=str(best[0]);final['restored_best']=restored
+                final['input_signature']=project.signature(selected.scene)
+                if restored:
+                    final['latest_attempt']={k:copy.deepcopy(final[k])for k in ('stages','visual_review')if k in final}
+                    saved=read(best[0]/'report.json');final['stages']=saved.get('stages',{})
+                    final.pop('visual_review',None)
+                    if final.get('status')=='VISUAL_DRAFT_REVIEWED':final['status']='BEST_RESTORED_UNVERIFIED'
+                write(path,final)
+
+
+def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False,best=None):
     """Hold the existing Project lock across every pipeline stage."""
     with exclusive(project):
-        return _reconstruct(project,candidate=candidate,config=config,scene_state=scene_state)
+        if isinstance(max_modeling_calls,bool)or not isinstance(max_modeling_calls,int)or max_modeling_calls<0:
+            raise ValueError('Nonnegative integer max_modeling_calls required')
+        if isinstance(max_review_calls,bool)or not isinstance(max_review_calls,int)or max_review_calls<0:
+            raise ValueError('Nonnegative integer max_review_calls required')
+        calls=0;reviews=0;history=[]
+        while True:
+            result=_reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=refit_only)
+            if not run_modeling:return result
+            result['modeling_calls']=calls
+            if result.get('stages',{}).get('codex_review',{}).get('status')=='WAITING_FOR_CODEX_REVIEW' and result['status']not in('FAILED','STOPPED'):
+                best[0]=retain_fitting(Candidate(project,candidate),best[0],result)
+            if result['status']not in('WAITING_FOR_CODEX_ANALYSIS','WAITING_FOR_CODEX'):
+                review_stage=result.get('stages',{}).get('codex_review',{})
+                result.update(review_calls=reviews,review_history=history)
+                if review_stage.get('status')!='WAITING_FOR_CODEX_REVIEW' or result['status'] in ('FAILED','STOPPED'):
+                    write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                    return result
+                if reviews>=max_review_calls:
+                    result.update(status='REVIEW_BUDGET_EXHAUSTED',stop_reason='max_review_calls')
+                    write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                    return result
+                from .authoring import run_codex_modeling
+                selected=Candidate(project,candidate)
+                # Retain each evaluated Scene before a structural replacement.
+                # This is a resumable checkpoint, not a claim of global optimum.
+                import uuid
+                folder=selected.root/'fitting/reviews'/uuid.uuid4().hex
+                write(folder/'scene.yaml',selected.scene)
+                write(folder/'metrics.json',read(selected.root/'metrics.json'))
+                try:
+                    project.checkpoint()
+                    modeling_tasks(selected,config or read(project.root/'input/reconstruction.yaml'),None)
+                    judged=run_codex_modeling(selected,timeout_s=modeling_timeout_s,review_fitting=True)
+                except Exception as error:
+                    result.update(status='STOPPED'if isinstance(error,InterruptedError)else'FAILED',
+                        failed_stage='CODEX_REVIEW',error=str(error))
+                    write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                    if isinstance(error,InterruptedError):return result
+                    raise
+                reviews+=1;decision=judged['decision'];history.append(decision)
+                write(folder/'decision.json',judged)
+                result.update(review_calls=reviews,review_history=history,visual_review=decision)
+                action=decision['action']
+                if action in ('complete','needs_data'):
+                    result.update(status='VISUAL_DRAFT_REVIEWED'if action=='complete'else'NEEDS_MORE_DATA',physical_verified=False)
+                    write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                    return result
+                config=copy.deepcopy(config or read(project.root/'input/reconstruction.yaml'))
+                if action=='numeric':
+                    if decision['objects']:config.setdefault('fitting',{})['objects']=decision['objects']
+                else:
+                    if calls>=max_modeling_calls:
+                        result.update(status='WAITING_FOR_CODEX',stop_reason='max_modeling_calls')
+                        write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                        return result
+                    refit_only=False  # Explicit structural diagnosis: new Candidate asset versions, never source Export edits.
+                    config['fitting_feedback']=judged.get('feedback',{})
+                    for name in decision['objects']:
+                        if name not in config.get('objects',{}):raise ValueError('No modeling configuration for '+name)
+                        spec=config['objects'][name]
+                        spec.pop('asset_manifest',None)
+                        spec.update(modeling_action='new',modeling_request_id='review_'+uuid.uuid4().hex)
+                        spec['modeling_notes']=str(spec.get('modeling_notes',''))+'\nFitting review: '+decision['reason']
+                # Changes belong to this Candidate, never the user's original memo.
+                write(selected.root/'review-config.yaml',config)
+                continue
+            if calls>=max_modeling_calls:
+                result['stop_reason']='max_modeling_calls'
+                write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                return result
+            from .authoring import run_codex_modeling
+            try:
+                project.checkpoint()
+                modeled=run_codex_modeling(Candidate(project,candidate),timeout_s=modeling_timeout_s)
+            except Exception as error:
+                status='STOPPED'if isinstance(error,InterruptedError)else'FAILED'
+                result.update(status=status,error=str(error),failed_stage='CODEX_MODELING',modeling_calls=calls)
+                write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                project.update(status=status,stage='CODEX_MODELING',error=str(error),task='Candidate retained; resume reconstruction')
+                if isinstance(error,InterruptedError):return result
+                raise
+            calls+=1
+            if modeled['status']not in('REGISTERED_UNVALIDATED','ASSETS_READY','ANALYZED_OBJECT_PROPOSALS'):
+                result.update(status=modeled['status'],modeling_calls=calls,modeling=modeled)
+                write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                return result
+            # Analysis writes the typed plan through the existing configuration
+            # owner. Continue with that plan, never the stale caller snapshot.
+            saved=project.root/'input/reconstruction.yaml'
+            if saved.is_file() and not reviews:config=read(saved)
 
 
 def captured_robot(candidate,images):
@@ -120,7 +317,8 @@ def pair_source(project,images):
                         if len(bound)!=1:raise ValueError('Pair measured Robot model differs from source Revision without a verified baked binding')
                     mapping=baseline.get('joint_mapping')
                     if not mapping or mapping.get('sha256')!=image.get('mapping_sha256'):raise ValueError('Pair mapping identity mismatch')
-                    if model.get('mapping')and model['mapping'].get('sha256')!=mapping['sha256']:raise ValueError('Source Revision mapping differs from Pair')
+                    from .capture import mapping_coordinates_equal
+                    if model.get('mapping')and not mapping_coordinates_equal(model['mapping'],mapping):raise ValueError('Source Revision mapping differs from Pair')
             # Source geometry/assets are immutable; derived fitting inputs belong to the new layout.
             for key in('reconstruction_observations','derived_observations','view_registrations','camera_predictions','reconstruction_configuration'):
                 scene.pop(key,None)
@@ -132,7 +330,7 @@ def pair_source(project,images):
     return None,None,'PAIR_SOURCE_UNRESOLVED','Verified source Revision unavailable: '+'; '.join(failures)
 
 
-def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include_flagged_reason=None):
+def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include_flagged_reason=None,run_modeling=False,max_modeling_calls=6,max_review_calls=3):
     """Existing Pair reader/import -> layout-specific Candidate -> cached fitting.
 
     Runtime Sim is diagnostic only. Measured q and original Real RGB drive the
@@ -172,11 +370,12 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
             scene=selected.scene;scene['reconstruction_state']={'id':scene_state,'static_layout_verified':False};selected.save(scene)
         config=copy.deepcopy(read(project.root/'input/reconstruction.yaml')if config is None else config);config['scene_state_id']=scene_state
         config['image_ids']=[i['id']for i in paired]
-        result=_reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=True)
+        result=reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=True,
+            run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,max_review_calls=max_review_calls)
         result['source_revision']=revision
         result['pair_diagnostics']={'observations':[i['id']for i in paired],
             'tracking':[{'image_id':i['id'],'measured_q':i.get('q_measured'),'runtime':i.get('runtime_baseline')}for i in paired],
-            'geometry':'Source Revision geometry/material/collision unchanged; pose/camera fitting only',
+            'geometry':('Source Export unchanged; reviewed structural corrections create Candidate asset versions'if run_modeling else'Source Revision geometry/material/collision unchanged; pose/camera fitting only'),
             'appearance':'RGB residual alone cannot identify texture/light/geometry cause',
             'robot_q':'recorded measured q is immutable; runtime tracking differences are diagnostics'}
         write(selected.root/'reconstruction.json',result)
@@ -209,7 +408,8 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
     fitting.setdefault('optimize_appearance',not refit_only)
     fitting.setdefault('optimize_lighting',not refit_only)
     if refit_only:
-        # Pair refitting preserves the source Revision's material contract.
+        # Pair refitting preserves the source Revision's geometry and materials.
+        fitting['optimize_dimensions']=False
         fitting['optimize_appearance']=False;fitting['optimize_lighting']=False
     selected=Candidate(project,candidate)if(project.root/'scratch/agent'/candidate/'candidate.json').exists()else Candidate.create(project,candidate)
     selected.require_open()
@@ -279,6 +479,10 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
                     metrics=alignment_metrics(project,scene,selected.root/'fitting/final',fitting)
                     write(selected.root/'metrics.json',{**metrics,'scope':'train render only','passed':False,
                         'needs':['Unvalidated automated draft; independent reconstruction/physics review required']})
+                from .authoring import fitting_review
+                review=fitting_review(selected)
+                report['stages']['codex_review']={'status':review['status'],'path':str(selected.root/'fitting/codex-review.json'),'wrist_observed':review['wrist_observed']}
+                report['stages']['camera_quality']=metrics.get('camera_quality',{'status':'NOT_VERIFIED','needs':['Per-camera quality not evaluated']})
                 report['stages']['fitting']=comparison
                 progress('PHYSICS','Passive object collision/gravity probe')
                 with exclusive(project):report['stages']['physics']=physics_probe(project,selected.scene,selected.root/'physics')
@@ -290,6 +494,8 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
         elif report['stages'].get('fitting'):
             readiness=draft_readiness(project,selected.scene,report['stages']['fitting'])
             report['stages']['draft_readiness']=readiness;report['status']=readiness['status'];report['needs'].extend(readiness['needs'])
+            if report['status']=='DRAFT_READY'and report['stages']['camera_quality']['status']!='CRITERIA_MET_UNVERIFIED':
+                report['status']='NOT_VERIFIED'
         report['input_signature']=project.signature(selected.scene)
         write(selected.root/'reconstruction.json',report)
         project.update(status=report['status'],stage='VALIDATION',decision='CONTINUE'if report['status']=='DRAFT_READY'else'NEEDS_MORE_DATA',needs=report['needs'],task='Candidate retained; review reconstruction.json')

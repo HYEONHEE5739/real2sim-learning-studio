@@ -12,6 +12,24 @@ from .registration import align_points
 from ..scene import transform
 
 
+def view_priority(images,weights):
+    """Role budgets, not per-photo votes: phone count cannot swamp Wrist."""
+    from ..observations import camera_type
+    weights={**{'wrist':4.,'side':2.,'external':.5},**weights}
+    if set(weights)!={'wrist','side','external'}or any(not np.isfinite(v)or v<=0 for v in weights.values()):
+        raise ValueError('Positive finite wrist/side/external view weights required')
+    roles={i['id']:camera_type(i) for i in images}
+    return {'weights':weights,'roles':roles,'wrist_observed':'wrist'in roles.values(),
+            'scope':'Wrist primary, Side secondary; external views support reconstruction; not accuracy certification'}
+
+
+def view_loss(metrics,priority):
+    groups={}
+    for row in metrics:groups.setdefault(priority['roles'][row['image_id']],[]).append(row['loss'])
+    return float(sum(priority['weights'][role]*np.mean(values)for role,values in groups.items())/
+                 sum(priority['weights'][role]for role in groups))
+
+
 def surface_points(obj,scene,root,count=2000):
     """Sample the declared known geometry, not an invented hidden observation."""
     import trimesh
@@ -148,6 +166,7 @@ def fit_scene(project,scene,folder,options=None):
     from pathlib import Path
     from PIL import Image,ImageOps
     import cv2
+    import time
     from scipy.optimize import minimize
     from scipy.ndimage import distance_transform_edt,binary_erosion
     from .joint import select_parameters,apply_parameters
@@ -165,6 +184,10 @@ def fit_scene(project,scene,folder,options=None):
         'scope':'native multiview fitting; not independent calibration/Task approval','holdout_used_for_optimization':False}
     if not training:return scene,{**report,'needs':['Metric training observations required']}
     max_iterations=int(options.get('max_iterations',4));budget=int(options.get('max_evaluations',120))
+    max_seconds=float(options.get('max_seconds',900))
+    if not np.isfinite(max_seconds)or max_seconds<=0:raise ValueError('Positive finite max_seconds required')
+    started=time.monotonic()
+    class TimeBudget(Exception):pass
     patience=int(options.get('patience',2));minimum=float(options.get('minimum_improvement',1e-4))
     sigma=float(options.get('depth_sigma_m',.005));regression=float(options.get('max_view_regression',.05))
     weights={**{'rgb':.15,'mask':1.,'edge':.5,'depth':.25,'metric':.25,'prior':.005},**options.get('loss_weights',{})}
@@ -186,7 +209,7 @@ def fit_scene(project,scene,folder,options=None):
             if name not in models:models[name]=cKDTree(surface_points(next(o for o in scene['objects']if o['id']==name),scene,project.root))
     first=observation_scene(scene,by_id[train_ids[0]],project.root)
     strategy_rows=[]
-    from ..cameras import camera_pixels
+    from ..cameras import camera_pixels,optical_rays
     for row in training:
         image=by_id[row['image_id']];posed=observation_scene(scene,image,project.root)
         cam=next(c for c in posed['cameras']if c['id']==image['camera'])
@@ -209,7 +232,8 @@ def fit_scene(project,scene,folder,options=None):
     has_appearance=bool(appearance_plan['active']);geometry_done=False;previous_stage=None
     renderer_factory=options.pop('renderer_factory',Renderer)
     history=[];evaluations=0;best=copy.deepcopy(scene);best_scales={};best_loss=float('inf');best_metrics=[]
-    def summarize(metrics):return float(np.mean([r['loss']for r in metrics]))
+    priority=view_priority(images,options.get('view_weights',{}));report['view_priority']=priority
+    def summarize(metrics):return view_loss(metrics,priority)
     # One compiled native Scene and context, reused sequentially across views.
     with renderer_factory(first,project.root,folder/'native',options.get('renderer','software-egl'))as renderer:
         def measure(trial,scales,keys):
@@ -231,7 +255,7 @@ def fit_scene(project,scene,folder,options=None):
                     raw=loaded[key,name];scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',key),1.)
                     obj=next(o for o in posed['objects']if o['id']==name);pose=world_pose(posed,obj)
                     if 'uv_original'in raw and 'depth_relative'in raw:
-                        uv=raw['uv_original'];rays=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[uv,np.ones(len(uv))].T).T
+                        uv=raw['uv_original'];rays=optical_rays(cam,uv)
                         optical=rays*raw['depth_relative'][:,None]*scale;world=optical@camera_pose[:3,:3].T+camera_pose[:3,3]
                         if native_depth is None:native_depth=renderer.depth(image['camera'])
                         pixels=np.rint(uv).astype(int);h,w=mask.shape;valid=(pixels[:,0]>=0)&(pixels[:,0]<w)&(pixels[:,1]>=0)&(pixels[:,1]<h)
@@ -241,7 +265,11 @@ def fit_scene(project,scene,folder,options=None):
                         depth_loss=float(np.minimum(residual,3).mean())if len(residual)else 0.
                     else:
                         world=raw['points_world_m'];depth_loss=0.
-                    distances=models[name].query((world-pose[:3,3])@pose[:3,:3])[0]
+                    base_obj=next(o for o in scene['objects']if o['id']==name)
+                    tree=models[name]
+                    if obj['dimensions']['value']!=base_obj['dimensions']['value']:
+                        tree=cKDTree(surface_points(obj,posed,project.root))
+                    distances=tree.query((world-pose[:3,3])@pose[:3,:3])[0]
                     trimmed=np.sort(distances)[:max(1,int(len(distances)*.8))]
                     metric_loss=float(np.minimum(trimmed/sigma,3).mean())
                     object_metrics.append({'object_id':name,'mask':missing+extra,'edge':edge_loss,'depth':depth_loss,'metric':metric_loss,
@@ -249,13 +277,15 @@ def fit_scene(project,scene,folder,options=None):
                 rgb_loss=float(np.minimum(abs(rgb.astype(float)-real.astype(float))[union]/255.,.3).mean())if union.any()else float(np.minimum(abs(rgb.astype(float)-real.astype(float))/255.,.3).mean())
                 losses={name:float(np.mean([r[name]for r in object_metrics]))if object_metrics else 0. for name in('mask','edge','depth','metric')}
                 losses['rgb']=rgb_loss;total=sum(weights[k]*v for k,v in losses.items())
-                metrics.append({'image_id':key,'split':image['split'],'loss':float(total),'components':losses,'objects':object_metrics,
+                metrics.append({'image_id':key,'camera_type':camera_type(image),'split':image['split'],'loss':float(total),'components':losses,'objects':object_metrics,
                     'iou':float(np.mean([r['iou']for r in object_metrics]))if object_metrics else None})
             return metrics
         baseline=measure(best,{},train_ids);best_metrics=baseline;best_loss=summarize(baseline)
         write(folder/'best-scene.yaml',best);idle=0;stop='max_iterations'
         try:
             for iteration in range(max_iterations):
+                if evaluations>=budget:stop='max_evaluations';break
+                if time.monotonic()-started>=max_seconds:stop='max_seconds';break
                 project.checkpoint();seed=copy.deepcopy(best);seed_scales=dict(best_scales)
                 stage='appearance'if has_appearance and(geometry_done or iteration>=(max_iterations+1)//2)else'geometry'
                 blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage)
@@ -268,6 +298,7 @@ def fit_scene(project,scene,folder,options=None):
                 zero=np.zeros(len(indices));start=best_loss
                 def objective(unit):
                     nonlocal evaluations,best_loss,best,best_scales,best_metrics
+                    if time.monotonic()-started>=max_seconds:raise TimeBudget()
                     project.checkpoint();delta=np.zeros(len(radius));delta[indices]=unit*radius[indices]
                     trial,scales=apply_parameters(seed,selected_blocks,delta);evaluations+=1
                     scales={key:seed_scales.get(key,1.)*scales.get(key,1.)for key in seed_scales.keys()|scales.keys()}
@@ -279,7 +310,7 @@ def fit_scene(project,scene,folder,options=None):
                         best_loss,best,best_scales,best_metrics=score,trial,scales,metrics
                     return score+penalty
                 solution=minimize(objective,zero,method='Powell',bounds=[(-1.,1.)]*len(zero),
-                    options={'maxfev':budget,'xtol':.002,'ftol':minimum})
+                    options={'maxfev':max(1,(budget-evaluations)//(max_iterations-iteration)),'xtol':.002,'ftol':minimum})
                 improvement=start-best_loss;idle=idle+1 if improvement<minimum else 0
                 history.append({'iteration':iteration+1,'loss':best_loss,'improvement':improvement,'evaluations':int(solution.nfev),
                     'solver_converged':bool(solution.success),'variables':strategy['active'],'strategy':strategy})
@@ -289,9 +320,12 @@ def fit_scene(project,scene,folder,options=None):
                 saved=reproject_observations(project,best,best_scales,folder/'observations')
                 preserve(scene,saved);validate(saved,project.root,complete=True)
                 write(folder/'best-scene.yaml',saved);write(folder/'iterations.json',history)
+                if evaluations>=budget:stop='max_evaluations';break
                 if idle>=patience or(solution.success and improvement<minimum):
                     if stage=='geometry'and has_appearance:geometry_done=True;continue
                     stop='no_improvement'if idle>=patience else'converged';break
+        except TimeBudget:
+            stop='max_seconds'
         except (InterruptedError,ValueError,RuntimeError)as error:
             best=reproject_observations(project,best,best_scales,folder/'observations')
             preserve(scene,best);validate(best,project.root,complete=True)
@@ -305,10 +339,13 @@ def fit_scene(project,scene,folder,options=None):
     best=reproject_observations(project,best,best_scales,folder/'observations')
     preserve(scene,best);validate(best,project.root,complete=True)
     improved=best_loss<summarize(baseline)-minimum
-    status='UNRESOLVED'if stop=='unobservable'else'OPTIMIZED_UNVERIFIED'if improved and stop!='max_iterations'else'BUDGET_EXHAUSTED'if stop=='max_iterations'else'NOT_IMPROVED'
+    exhausted=stop in('max_iterations','max_evaluations','max_seconds')
+    status='UNRESOLVED'if stop=='unobservable'else'BUDGET_EXHAUSTED'if exhausted else'OPTIMIZED_UNVERIFIED'if improved else'NOT_IMPROVED'
     report.update(status=status,before=baseline,after=best_metrics,before_loss=summarize(baseline),after_loss=best_loss,
         holdout=held,training_view_count=len(train_ids),evaluations=evaluations,history=history,stop_reason=stop,
         weights=weights,depth_sigma_m=sigma,max_view_regression=regression,
+        budget={'max_iterations':max_iterations,'max_evaluations':budget,'max_seconds':max_seconds,
+                'scope':'whole fit call; objective evaluations; baseline and final evaluation reported separately'},
         best_scene=str(folder/'best-scene.yaml'),converged=stop in('converged','no_improvement'),
         metric_constraints='measured dimensions/poses locked; explicit support projection',robot_constraints='fixed measured q/FK; one shared mount per physical camera')
     write(folder/'best-scene.yaml',best);write(folder/'report.json',report)
@@ -325,6 +362,7 @@ def reproject_observations(project,scene,scales,folder):
     folder=Path(folder)
     if not folder.resolve().is_relative_to(project.root):folder=project.root/'scratch/render-fit-observations'
     folder=folder/uuid.uuid4().hex;folder.mkdir(parents=True,exist_ok=True);result=copy.deepcopy(scene)
+    from ..cameras import optical_rays
     images={i.get('id'):i for i in project.evidence['images']}
     for index,row in enumerate(result.get('reconstruction_observations',{}).get('clouds',[])):
         image=images.get(row['image_id'])
@@ -335,7 +373,7 @@ def reproject_observations(project,scene,scales,folder):
         if 'points_camera_relative'not in raw:continue
         posed=observation_scene(result,image,project.root,complete=False);cam=next(c for c in posed['cameras']if c['id']==image['camera'])
         points=raw['points_camera_relative']
-        if 'uv_original'in raw:points=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[raw['uv_original'],np.ones(len(points))].T).T*raw['depth_relative'][:,None]
+        if 'uv_original'in raw:points=optical_rays(cam,raw['uv_original'])*raw['depth_relative'][:,None]
         row['depth_scale']=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',row['image_id']),1.)
         pose=world_pose(posed,cam);raw['points_world_m']=(points*row['depth_scale'])@pose[:3,:3].T+pose[:3,3]
         target=folder/f'{index}.npz'
@@ -353,10 +391,10 @@ def alignment_metrics(project,scene,folder,options=None):
         from ..isaac_render import run_job
         return run_job(project,scene,folder,options,'compare')
     from PIL import Image,ImageOps
-    from ..validation import compare,mask_metrics
+    from ..validation import compare,mask_metrics,camera_quality
     from ..rendering import Renderer
     from ..capture import observation_scene
-    from ..observations import registered_images
+    from ..observations import registered_images,camera_type
     from ..scene import local_path,world_pose,validate
     from ..files import write
     options=options or{};rows=cloud_inputs(project,scene);images,state,needs=registered_images(project,scene=scene)
@@ -388,9 +426,9 @@ def alignment_metrics(project,scene,folder,options=None):
                     'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2))),
                     'independent_3d_position_error_m':None,'rotation_error_rad':None,
                     'scope':'derived depth surface residual; not independent measured pose accuracy'})
-            result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'split':image['split'],**metrics,'objects':objects})
+            result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects})
     report={'images':result,'scene_state_id':state,'needs':list(dict.fromkeys(needs)),
-            'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison'}
+            'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison','camera_quality':camera_quality(result,options.get('camera_quality'))}
     write(folder/'metrics.json',report);return report
 
 

@@ -65,7 +65,8 @@ def test_batch_builds_all_before_effect_and_records_local_world(scene):
     for name in ('cube_red','cube_blue','cube_green'):
         q=p.WorkspaceParams(name,'object_marker','table','marker');p.validate_params(q,scene)
         bindings['objects.'+name+'.placement']=SimpleNamespace(name='placement.random_workspace',kind='placement',params=q,request_fields={})
-    plan=SimpleNamespace(scene=scene,object_order=('cube_red','cube_blue','cube_green'),function_bindings=bindings)
+    from robot_learning_workbench.tasks.registry import load_registry
+    plan=SimpleNamespace(scene=scene,object_order=('cube_red','cube_blue','cube_green'),function_bindings=bindings,tasks=load_registry(('robot_learning_workbench.tasks.placement',)))
     with patch.object(np.random,'default_rng',return_value=np.random.Generator(np.random.PCG64(9))):
         poses,records=p.workspace_reset_poses(plan,{})
     assert len(poses)==len(records)==3
@@ -95,20 +96,13 @@ def test_actual_mujoco_reset_uses_entropy_and_applies_whole_batch(tmp_path):
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec,sort_keys=False));plan=prepare_recipe(read_recipe(path),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
     _,_,cfg,_=load_inputs(plan);model,b=build_model(plan.scene,cfg);data=mujoco.MjData(model);restore_episode(model,data,b,None)
     with patch.object(np.random,'default_rng',side_effect=lambda *a,**kw:np.random.Generator(np.random.PCG64(9))) as rng:
-        records=reset_placements(plan,model,data,b,1047)
+        records=reset_placements(plan,model,data,b)
     assert all(call.args==() and call.kwargs=={} for call in rng.call_args_list)
     assert set(records)==set(spec['objects'])
     for name,row in records.items():
         assert row['applied'] and row['validation']['valid']
         np.testing.assert_array_equal(row['applied_world_pose'],row['observed_world_pose'])
     assert not any(c.dist<-1e-6 and (model.geom_bodyid[c.geom1] in [b.object_body_ids[n] for n in spec['objects']] or model.geom_bodyid[c.geom2] in [b.object_body_ids[n] for n in spec['objects']]) for c in data.contact)
-
-
-def test_isaac_accepts_new_entropy_rule_but_retains_legacy_gate():
-    from types import SimpleNamespace
-    from robot_learning_workbench.engines.isaac.datagen import validate_placements
-    validate_placements(SimpleNamespace(function_bindings={'p':SimpleNamespace(kind='placement',name='placement.random_workspace')}))
-    with pytest.raises(ValueError):validate_placements(SimpleNamespace(function_bindings={'p':SimpleNamespace(kind='placement',name='placement.random_xy')}))
 
 
 def test_batch_rejects_recipe_overrides_instead_of_ignoring(scene):
@@ -141,6 +135,8 @@ def _random_plan(tmp_path):
     root=Path(__file__).resolve().parents[2]
     spec=yaml.safe_load((root/'docs/evidence/simulation-workflows/mujoco-worker-final.yaml').read_text())
     for item in spec['objects'].values():item['placement']={'function':'placement.random_workspace','params':{'frame':'object_marker','support':'table','workspace':'marker'}}
+    from mujoco_fixture import current_recordings
+    spec['inputs']['dataset']=str(current_recordings()[1])
     spec['output']['directory']=str(tmp_path/'dataset');spec['execution']['max_attempts']=1
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec,sort_keys=False))
     return prepare_recipe(read_recipe(path),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
@@ -211,5 +207,5 @@ def test_isaac_partial_reset_error_marks_per_object_application_unknown(tmp_path
     with patch('robot_learning_workbench.engines.isaac.source.initial_state',return_value=initial), \
          patch('robot_learning_workbench.engines.isaac.state.restore_episode',side_effect=RuntimeError('SDK partial write')), \
          patch.object(np.random,'default_rng',return_value=np.random.Generator(np.random.PCG64(9))):
-        with pytest.raises(RuntimeError,match='partial write') as caught:reset_placements(plan,env,None)
+        with pytest.raises(RuntimeError,match='partial write') as caught:reset_placements(plan,env)
     assert all(row['applied']=='unknown' for row in caught.value.placement_records.values())

@@ -10,6 +10,18 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+def dimension_axes(obj):
+    """Coupled free axes of an unbound primitive; library geometry needs a new version."""
+    record=obj['dimensions'];kind=obj['visual']['type']
+    if (obj.get('object_asset') or obj.get('link') or obj['role']=='reference_robot'
+            or record['provenance'] in ('measured','calibrated') or record['value'] is None
+            or kind not in ('box','sphere','cylinder') or obj['collision']['type']!=kind):return []
+    constraint=record.get('constraints',{})
+    known=constraint.get('value',constraint.get('dimensions_m',[None]*3))
+    groups={'box':[(0,),(1,),(2,)],'sphere':[(0,1,2)],'cylinder':[(0,1),(2,)]}[kind]
+    return [axes for axes in groups if all(known[i] is None for i in axes)]
+
+
 def mesh_data(path):
     path=Path(path)
     if path.suffix.lower()=='.obj':

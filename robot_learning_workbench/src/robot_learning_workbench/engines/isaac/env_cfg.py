@@ -246,11 +246,11 @@ def scene_execution_inputs(package,settings):
     from collections.abc import Mapping
     from scene_contract.transforms import resolve_transform
     from ...robot.calibration import JOINTS,joint_specs
-    from ..mujoco.model import _execution_urdf
+    from ...robot.calibration import execution_urdf
     files={f.path:f for f in package.files};identity=asdict(package.identity)
     if 'scene_identity'in settings and dict(settings['scene_identity'])!=identity:raise ValueError('Engine configuration belongs to another Scene revision')
     if tuple(package.scene['robot']['joint_order'])!=JOINTS:raise ValueError('Scene robot joint order must match SO101')
-    urdf=_execution_urdf(package);asset=package.scene['robot'].get('bindings',{}).get('isaac',{}).get('asset_path')
+    urdf=execution_urdf(package);asset=package.scene['robot'].get('bindings',{}).get('isaac',{}).get('asset_path')
     if asset not in files or Path(asset).suffix.lower()not in('.usd','.usda','.usdc'):raise ValueError('Declare robot.bindings.isaac.asset_path with a physics-enabled SO101 USD; the static Builder reference robot is not an Articulation')
     q=settings.get('initial_joint_rad')
     if isinstance(q,(list,tuple)):q=dict(zip(JOINTS,q))if len(q)==6 else{}

@@ -22,7 +22,8 @@ def test_control_cancel_and_stale_mark():
     events=[];state={'paused':False,'steps':0,'cancelled':False,'marks':[],'skipped':False}
     source.control_commands([{'command_id':'c','kind':'cancel','payload':{}}],state,events.append,tick=8,episode_id='a')
     assert state['cancelled'] and events[-1]['payload']['status']=='completed'
-    with pytest.raises(ValueError):source.control_commands([{'command_id':'m','kind':'mark','episode_id':'old','payload':{'frame':2,'event':'grasp'}}],state,events.append,tick=8,episode_id='a')
+    source.control_commands([{'command_id':'m','kind':'mark','episode_id':'old','payload':{'frame':2,'event':'grasp'}}],state,events.append,tick=8,episode_id='a')
+    assert events[-1]['payload']['status']=='rejected' and not state['marks']
 
 def test_source_recipe_accepts_explicit_engine_input_and_duration(tmp_path):
     import yaml
@@ -44,7 +45,7 @@ def test_actual_source_collect_publish_and_cancel(tmp_path):
     model,b=build_model(load_scene(root/'scene.json'),cfg);data=mujoco.MjData(model);restore_episode(model,data,b,None)
     initial=data.qpos[list(b.q_indices)].copy();target=initial.copy();target[0]+=.01
     with NativeRun(tmp_path/'out',{'stage':'source','seed':4}) as run:
-        segment=run.segment('a');ep,media,snapshot,status=source.collect_episode(model,data,b,segment,episode_id='one',seed=4,frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:())
+        segment=run.segment('a');ep,media,snapshot,status=source.collect_episode(model,data,b,segment,episode_id='one',frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:())
         assert status=='completed' and data.time==pytest.approx(2/30)
         segment.write_episode(ep,episode_id='one',metadata={'initial_snapshot':snapshot,'success_source':'recording_only'},media=media);segment.commit()
     saved=load_catalog(tmp_path/'out').episodes[0]
@@ -52,10 +53,10 @@ def test_actual_source_collect_publish_and_cancel(tmp_path):
     np.testing.assert_array_equal(read_array(saved,'joint_targets'),np.tile(target,(2,1)))
     assert all(v['shape']==[480,640,3] and v['frames']==2 for v in saved.media.values())
     with NativeRun(tmp_path/'cancel',{'stage':'source','seed':4}) as run:
-        seg=run.segment('c');ep,media,_,status=source.collect_episode(model,data,b,seg,episode_id='two',seed=4,frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:({'command_id':'cancel','kind':'cancel'},))
+        seg=run.segment('c');ep,media,_,status=source.collect_episode(model,data,b,seg,episode_id='two',frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:({'command_id':'cancel','kind':'cancel'},))
         assert status=='cancelled' and media=={}
         for kind in ('save','discard'):
-            ep,media,_,status=source.collect_episode(model,data,b,seg,episode_id='two',seed=4,frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:({'command_id':kind,'kind':kind},))
+            ep,media,_,status=source.collect_episode(model,data,b,seg,episode_id='two',frames=2,read_target=lambda:target,events=lambda e:None,commands=lambda:({'command_id':kind,'kind':kind},))
             assert status=='discarded' and not media
     assert not load_catalog(tmp_path/'cancel').episodes
 
@@ -139,7 +140,7 @@ def test_real_runner_source_resume_cancel_and_device_cleanup(tmp_path):
     config=dict(initial_joint_rad=[settings['initial_joint_rad'][n] for n in JOINTS],active_object_ids=['cube_red'],object_physics=json.loads((root/settings['baseline_metadata']['compiled_physics']['asset_path']).read_text())['objects'])
     (tmp_path/'engine.json').write_text(json.dumps(config));(tmp_path/'leader.json').write_text(json.dumps({'calibration_id':'leader'}))
     pose=resolve_transform(scene.scene['frames'],source=scene.scene['objects']['table']['frame_id'],target='world')
-    spec=dict(schema_version=1,stage='source',engine='mujoco',inputs={'scene':str(root/'scene.json'),'engine_config':'engine.json','device_profile':'leader.json'},execution={'episodes':1,'seed':7,'episode_time_s':.067,'reset_time_s':0.},output={'directory':'out'},objects={'cube_red':{'placement':{'function':'placement.fixed_xy','params':{'frame':'world','support':'table','xy_m':pose[:2,3].tolist()}}}})
+    spec=dict(schema_version=1,stage='source',engine='mujoco',inputs={'scene':str(root/'scene.json'),'engine_config':'engine.json','device_profile':'leader.json'},execution={'episodes':1,'episode_time_s':.067,'reset_time_s':0.},output={'directory':'out'},objects={'cube_red':{'placement':{'function':'placement.fixed_xy','params':{'frame':'world','support':'table','xy_m':pose[:2,3].tolist()}}}})
     registry=load_registry(('robot_learning_workbench.tasks.placement',));path=tmp_path/'source.yaml'
     def prepare():path.write_text(yaml.safe_dump(spec));return prepare_recipe(read_recipe(path),tasks=registry)
     device=RecordedLeader();events=[];result=source.run(prepare(),leader=device,events=events.append,commands=lambda:())
@@ -149,7 +150,7 @@ def test_real_runner_source_resume_cancel_and_device_cleanup(tmp_path):
     spec['inputs']['resume_dataset']=str(tmp_path/'out');spec['output']['directory']='resumed';spec['execution']['episodes']=2
     device=RecordedLeader();result=source.run(prepare(),leader=device,events=lambda e:None,commands=lambda:())
     assert result.completed_episodes==2 and device.closed
-    assert [r['seed'] for r in history(tmp_path/'resumed')]==[7,8]
+    assert all('seed'not in r for r in history(tmp_path/'resumed'))
     assert load_catalog(tmp_path/'out').identity==first.identity
     spec['inputs'].pop('resume_dataset');spec['output']['directory']='cancelled'
     device=RecordedLeader();result=source.run(prepare(),leader=device,events=lambda e:None,commands=lambda:({'command_id':'c','kind':'cancel'},))
@@ -163,7 +164,8 @@ def test_actual_annotation_cancel_never_publishes_partial_episode(tmp_path):
     from robot_learning_workbench.tasks.registry import load_registry
     from robot_learning_workbench.data.native import history
     settings=json.loads((ROOT/'docs/evidence/e01-v8-collision/runtime-inputs.json').read_text())
-    original=ROOT/'docs/evidence/mujoco-workflows/runs-final/source'
+    from mujoco_fixture import current_recordings
+    original=current_recordings()[0]
     spec=dict(schema_version=1,stage='annotation',engine='mujoco',inputs={'scene':str(Path(settings['package_root'])/'scene.json'),'dataset':str(original)},execution={'mode':'auto'},functions={'acceptance':{'function':'pick_place.annotation','params':{'object':'cube_red','target':'cup_a'}}},output={'directory':str(tmp_path/'cancelled')})
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec));registry=load_registry(('robot_learning_workbench.tasks.pick_place',));plan=prepare_recipe(read_recipe(path),tasks=registry)
     events=[]

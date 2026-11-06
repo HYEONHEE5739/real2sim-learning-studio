@@ -26,7 +26,7 @@ def validate_depth_output(arrays,count):
     if 'conf'in arrays and np.asarray(arrays['conf']).shape!=depth.shape:raise ValueError('DA3 confidence/depth shapes differ')
 
 
-def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confidence=0.,erode_px=1,max_points=20000):
+def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confidence=0.,erode_px=1,max_points=20000,distortion=None,distortion_rotation=None):
     """Backproject only observed mask pixels in the depth model's optical frame."""
     import cv2
     import numpy as np
@@ -45,8 +45,11 @@ def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confi
     v,u=np.nonzero(keep)
     if len(u)>max_points:
         selected=np.linspace(0,len(u)-1,max_points,dtype=int);v,u=v[selected],u[selected]
-    rays=np.linalg.solve(matrix,np.stack([u,v,np.ones(len(u))]))
-    points=(rays*z[v,u]).T
+    from .cameras import optical_rays
+    lens={'K':{'value':matrix},'distortion':{'value':distortion if distortion is not None else [0.]*5}}
+    if distortion_rotation is not None:lens['distortion_rotation']=distortion_rotation
+    rays=optical_rays(lens,np.c_[u,v])
+    points=rays*z[v,u,None]
     return points,{'points':len(points),'frame':'camera_optical','units':'DA3_relative','provenance':'derived',
                    'processed_resolution':[z.shape[1],z.shape[0]],'original_resolution':[source.shape[1],source.shape[0]],
                    'original_to_processed':a.tolist(),'hidden_surface_generated':False}
@@ -135,11 +138,22 @@ def cross_view_associations(report,objects):
     for row in report.get('segments',[]):
         a=row.get('association',{})
         if a.get('status')!='ASSIGNED_ESTIMATED':continue
+        reference=objects.get(row['object_id'],{}).get('representative_view')
+        if reference and row['image_id']!=reference:continue
         data=geometry(row['image_id'],{'path':a['mask_path'],'sha256':a['mask_sha256']})
         if data:tracks.setdefault(row['object_id'],[]).append(data)
+    for row in report.get('segments',[]):
+        reference=objects.get(row['object_id'],{}).get('representative_view')
+        a=row.get('association',{});track=tracks.get(row['object_id'])
+        if not reference or row['image_id']==reference or not track or a.get('status')!='ASSIGNED_ESTIMATED':continue
+        data=geometry(row['image_id'],{'path':a['mask_path'],'sha256':a['mask_sha256']})
+        if data:
+            center=np.median([t[0]for t in track],axis=0);size=np.median([t[1]for t in track])
+            if np.linalg.norm(center-data[0])/max(size,data[1])>.65:
+                row['association']={'status':'AMBIGUOUS','basis':'Semantic/representative 3D conflict','conflict':True}
     for image in views:
         rows=[r for r in report.get('segments',[])if r['image_id']==image]
-        unresolved=[r for r in rows if r['object_id']in tracks and r.get('association',{}).get('status')!='ASSIGNED_ESTIMATED']
+        unresolved=[r for r in rows if r['object_id']in tracks and r.get('association',{}).get('status')!='ASSIGNED_ESTIMATED'and not r.get('association',{}).get('conflict')]
         used={r['association']['mask_sha256']for r in rows if r.get('association',{}).get('status')=='ASSIGNED_ESTIMATED'}
         masks={m['sha256']:m for r in unresolved for m in r['masks']if m['sha256']not in used}
         masks=[m for m in masks.values()if geometry(image,m)]
@@ -186,7 +200,16 @@ def associate_instances(report,objects,selections=None):
             if type(selected)is not int or not 0<=selected<len(masks):raise ValueError('Mask selection index is outside candidates')
             index=selected
         else:
-            query=objects.get(name,{});box=query.get('images',{}).get(image,{}).get('box_xyxy',query.get('box_xyxy'))
+            query=objects.get(name,{});hint=query.get('images',{}).get(image,{})
+            box=hint.get('box_xyxy',query.get('box_xyxy'));points=hint.get('points',[])
+            if points:
+                compatible=[]
+                for k,mask in enumerate(masks):
+                    if sha(mask['path'])!=mask['sha256']:raise ValueError('Association Mask SHA changed')
+                    with Image.open(mask['path'])as rgb:a=np.asarray(rgb.convert('L'))>0
+                    if all(0<=int(p['xy'][0])<a.shape[1] and 0<=int(p['xy'][1])<a.shape[0]
+                           and bool(a[int(p['xy'][1]),int(p['xy'][0])])==bool(p['label'])for p in points):compatible.append(k)
+                if len(compatible)==1:index=compatible[0];basis='image_points'
             if box is not None:
                 scores=[]
                 for mask in masks:
@@ -195,8 +218,8 @@ def associate_instances(report,objects,selections=None):
                     x0,y0,x1,y1=map(int,box)
                     scores.append(float(a[max(0,y0):max(0,y1),max(0,x0):max(0,x1)].sum()/max(1,a.sum())))
                 ranked=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)
-                if ranked and scores[ranked[0]]>.5 and(len(ranked)==1 or scores[ranked[0]]-scores[ranked[1]]>.1):index=ranked[0];basis='image_box'
-            elif len(masks)==1:index=0;basis='unique_candidate'
+                if not points and ranked and scores[ranked[0]]>.5 and(len(ranked)==1 or scores[ranked[0]]-scores[ranked[1]]>.1):index=ranked[0];basis='image_box'
+            elif not points and len(masks)==1:index=0;basis='unique_candidate'
         if index is None and external is None:
             row['association']={'status':'AMBIGUOUS'if masks else'NOT_FOUND','basis':'No unique Object observation correspondence'}
             needs.append(image+'/'+name+': choose a Mask; Asset Group is not Object association');continue
@@ -210,8 +233,25 @@ def associate_instances(report,objects,selections=None):
     for rows in used.values():
         if len(rows)>1:
             names=', '.join(r['object_id']for r in rows)
-            for row in rows:row['association']={'status':'AMBIGUOUS','basis':'Conflicting same Mask assignments'}
+            # A sole visible candidate can belong to either occluded instance;
+            # geometry may resolve that ambiguity. Explicit conflicting hints
+            # must instead remain unresolved for review.
+            explicit=any(r['association']['basis']!='unique_candidate' for r in rows)
+            for row in rows:row['association']={'status':'AMBIGUOUS','basis':'Conflicting same Mask assignments','conflict':explicit}
             needs.append(rows[0]['image_id']+': same Mask assigned to multiple Objects: '+names)
+    # Different PNGs can encode the same instance with slightly different edges.
+    # Reject near-duplicate masks, not genuine occlusion/contained objects.
+    assigned=[r for r in result.get('segments',[])if r['association']['status']=='ASSIGNED_ESTIMATED']
+    for i,left in enumerate(assigned):
+        for right in assigned[i+1:]:
+            if left['image_id']!=right['image_id']:continue
+            with Image.open(left['association']['mask_path'])as rgb:a=np.asarray(rgb.convert('L'))>0
+            with Image.open(right['association']['mask_path'])as rgb:b=np.asarray(rgb.convert('L'))>0
+            if a.shape!=b.shape:raise ValueError('Association masks have different resolutions')
+            if (a&b).sum()/max(1,(a|b).sum())>.9:
+                for row in(left,right):row['_duplicate_mask']=True
+    for row in assigned:
+        if row.pop('_duplicate_mask',False):row['association']={'status':'AMBIGUOUS','basis':'Near-duplicate instance masks','conflict':True}
     result=cross_view_associations(result,objects)
     result['association_needs']=[r['image_id']+'/'+r['object_id']+': '+r['association']['basis']for r in result.get('segments',[])if r['association']['status']!='ASSIGNED_ESTIMATED']
     return result
@@ -269,13 +309,14 @@ def build_point_clouds(candidate,report,*,selections=None):
             if mask.shape!=tuple(image['resolution'][::-1]):raise ValueError('Edited mask must use original RGB resolution')
             posed=observation_scene(scene,image,candidate.project.root,complete=False)
             cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
-            if (motion_scale is None and any(cam[field]['provenance']not in('measured','calibrated')for field in('K','distortion')))or any(cam['distortion']['value']):
-                needs.append(label+': calibrated undistorted rays required for depth clouds');continue
+            if (motion_scale is None and any(cam[field]['provenance']not in('measured','calibrated')for field in('K','distortion'))):
+                needs.append(label+': calibrated lens rays required for depth clouds');continue
             arrays,batch=depths[image['id']];affine=arrays['original_to_processed']
             scale={'status':'ESTIMATED','anchor':{'scale':motion_scale,'source':'measured','evidence':registration.get('calibration_evidence',[])},
                 'scope':'estimated registration scale from recorded metric baseline/motion; not physical calibration'}if motion_scale is not None else depth_scale_from_anchors(arrays['depth'],affine,binding.get('uv_px',[]),binding.get('world_points_m',[]),camera_pose,binding.get('evidence',[]))
             if scale['status']!='ESTIMATED':needs.extend(label+': '+reason for reason in scale['needs']);continue
-            k=affine@np.asarray(cam['K']['value']);points,info=object_points(arrays['depth'],mask,k,affine,confidence=arrays.get('conf'))
+            k=affine@np.asarray(cam['K']['value']);points,info=object_points(arrays['depth'],mask,k,affine,confidence=arrays.get('conf'),
+                distortion=cam['distortion']['value'],distortion_rotation=cam.get('distortion_rotation'))
             world=metric_points(points,scale['anchor'],camera_pose)['points_world_m']
             if len(world)<50:needs.append(label+': fewer than 50 valid visible points');continue
             dependencies={'mask_sha256':digest,'depth_sha256':batch['metadata']['sha256'],'image_sha256':image['sha256'],
@@ -285,8 +326,8 @@ def build_point_clouds(candidate,report,*,selections=None):
             folder=candidate.root/'inference/clouds'/_digest(dependencies);folder.mkdir(parents=True,exist_ok=True)
             stored_mask=folder/'mask.png';Image.fromarray(mask.astype('uint8')*255).save(stored_mask)
             cloud=folder/'points.npz'
-            pixel=(points@k.T);pixel=pixel[:,:2]/pixel[:,2:3]
-            original=(np.c_[pixel,np.ones(len(pixel))]@np.linalg.inv(affine).T)[:,:2]
+            from .cameras import project_pixels
+            original=project_pixels(cam,points)
             np.savez_compressed(cloud,points_world_m=world,points_camera_relative=points,uv_original=original,depth_relative=points[:,2])
             records.append({'image_id':image['id'],'object_id':name,'split':image['split'],'group_id':image['group_id'],
                 'path':cloud.relative_to(candidate.project.root).as_posix(),'sha256':sha(cloud),
@@ -386,8 +427,9 @@ def run_models(candidate,config,*,scene_state=None):
                 identifier(name)
                 hint=query.get('images',{}).get(image['id'],{})
                 params={'prompt':query.get('prompt'),'box_xyxy':hint.get('box_xyxy',query.get('box_xyxy')),
+                        'points':hint.get('points',[]),
                         'conf':sam.get('conf',.25),'imgsz':sam.get('imgsz',1024),'half':True,'device':sam.get('device','cuda:0')}
-                if not params['prompt']and params['box_xyxy']is None:raise ValueError('SAM query or box required for '+name)
+                if not params['prompt']and params['box_xyxy']is None and not params['points']:raise ValueError('SAM query, points or box required for '+name)
                 key=_digest({'image':image['sha256'],'parameters':params,'model':sam_identity})
                 folder=root/'sam'/key;record=folder/'result.json'
                 if (folder/'COMPLETE').exists():
@@ -408,7 +450,8 @@ def run_models(candidate,config,*,scene_state=None):
         batches=[];selections=[]
         # Overlap a real reference RGB between independently inferred batches.
         # Holdout outputs never replace the training prediction of that RGB.
-        reference=next((i for i in images if i['split']=='train'),images[0])
+        preferred=[q.get('representative_view')for q in objects.values()]
+        reference=next((i for i in images if i['id']in preferred and i['split']=='train'),next((i for i in images if i['split']=='train'),images[0]))
         for split in('train','validation'):
             group=[i for i in images if i['split']==split and i['id']!=reference['id']]
             if batch_size==1:selections.extend([[i]for i in images if i['split']==split]);continue
@@ -444,7 +487,7 @@ def run_models(candidate,config,*,scene_state=None):
         report={'status':'INFERRED','scene_state_id':state,'images':images,'segments':segments,'depth_batches':batches,
                 'models':{'sam':sam_identity,'da3':da3_identity},'prepared_rgb':prepared,'derived':True,'physical_verified':False,
                 'metric_scale':'NOT_ESTABLISHED_BY_AI','needs':needs}
-        report['association_needs']=association['association_needs']
+        report=associate_instances(report,objects,config.get('selections'))
         write(root/'results.json',report)
         return report
 
@@ -470,16 +513,23 @@ def _worker(kind,request):
     import numpy as np
     import torch
     if kind=='sam':
-        from ultralytics.models.sam import SAM3SemanticPredictor
-        predictor=None;current=None
+        from ultralytics.models.sam import SAM3SemanticPredictor,SAM3Predictor
+        predictor=None;current=None;predictor_kind=None
         for task in request['tasks']:
             if checksum(task['image'])!=task['sha256']:raise ValueError('SAM source image changed')
             params=task['parameters'];folder=Path(task['output']);folder.mkdir(parents=True,exist_ok=True)
-            if predictor is None:
-                predictor=SAM3SemanticPredictor(overrides={'model':request['model'],'task':'segment','mode':'predict','half':True,'device':params['device'],
+            kind='interactive'if params.get('points')else'semantic'
+            if predictor is None or kind!=predictor_kind:
+                del predictor
+                torch.cuda.empty_cache();current=None;predictor_kind=kind
+                cls=SAM3Predictor if kind=='interactive'else SAM3SemanticPredictor
+                predictor=cls(overrides={'model':request['model'],'task':'segment','mode':'predict','half':True,'device':params['device'],
                     'conf':params['conf'],'imgsz':params['imgsz'],'save':False,'verbose':False})
             if task['image']!=current:predictor.set_image(task['image']);current=task['image']
-            result=predictor(text=[params['prompt']]if params['prompt']else None,bboxes=params['box_xyxy'])[0]
+            if kind=='interactive':
+                # One task is one Object with multiple positive/negative hints, not N Objects.
+                result=predictor(points=[[p['xy']for p in params['points']]],labels=[[p['label']for p in params['points']]],bboxes=[params['box_xyxy']]if params['box_xyxy']is not None else None)[0]
+            else:result=predictor(text=[params['prompt']]if params['prompt']else None,bboxes=params['box_xyxy'])[0]
             rows=[]
             if result.masks is not None:
                 from PIL import Image

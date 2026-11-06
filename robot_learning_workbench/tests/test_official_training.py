@@ -17,7 +17,7 @@ def test_training_plan_is_official_and_refuses_side_effecting_options(tmp_path):
     bad=copy.deepcopy(cfg);bad['dataset']['episodes']=[0]
     with pytest.raises(ValueError):validate_config(bad,dataset=Path(cfg['dataset']['root']),output=tmp_path/'out',mode='scratch')
     bad=copy.deepcopy(cfg);bad['log_freq']=100
-    with pytest.raises(ValueError):validate_config(bad,dataset=Path(cfg['dataset']['root']),output=tmp_path/'out',mode='scratch')
+    validate_config(bad,dataset=Path(cfg['dataset']['root']),output=tmp_path/'out',mode='scratch')  # Sparse logging is a supported official setting.
 
 
 def test_prepare_training_checks_official_metadata_without_rehashing_shared_video(tmp_path,monkeypatch):
@@ -75,7 +75,8 @@ def test_final_log_preserves_closed_checkpoint_and_frozen_config(tmp_path,monkey
     import json,os,yaml
     from robot_learning_workbench.learning import train as module
     from robot_learning_workbench.recipe import prepare_recipe,read_recipe
-    source=ROOT/'docs/evidence/learning-bundle/runs/act-second/checkpoints/000001'
+    from checkpoint_fixture import official_checkpoint
+    source=official_checkpoint(ROOT/'docs/evidence/learning-bundle/runs/act-second/checkpoints/000001')
     cfg=json.loads((source/'workbench-checkpoint.json').read_text())['config'];cfg['output_dir']=str(tmp_path/'out');cfg['steps']=2 if nonfinite else 1
     config_file=tmp_path/'train.json';config_file.write_text(json.dumps(cfg))
     recipe=tmp_path/'r.yaml';recipe.write_text(yaml.safe_dump(dict(schema_version=1,stage='train',inputs={'dataset':cfg['dataset']['root'],'training_config':str(config_file)},execution={'mode':'scratch'},output={'directory':cfg['output_dir']})))

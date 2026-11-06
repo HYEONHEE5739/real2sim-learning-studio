@@ -185,6 +185,9 @@ def execute(request: dict) -> dict:
     if op=='source_scenes':
         from ..scene_preparation import list_scenes
         return {'scenes':list_scenes(args['workspace'])}
+    if op=='pipeline_task':
+        from .pipeline_inputs import scene_task
+        return scene_task(**args)
     if op in ('pipeline_scenes','pipeline_dataset'):
         from .pipeline_inputs import scenes,dataset_inputs
         return scenes(**args)if op=='pipeline_scenes'else dataset_inputs(**args)

@@ -98,8 +98,8 @@ def test_partial_mask_count_does_not_block_explicit_asset_identity(tmp_path):
         i['sha256']=sha(c.root/i['path']);i['path']=(c.root/i['path']).relative_to(p.root).as_posix()
     config={'objects':{n:{'prompt':'cup','asset_group':'cups','asset_manifest':asset['manifest']}for n in('left','right')}}
     groups,_=modeling_groups(c,config,report)
-    assert group_asset(c,groups['cups'],{})[0]['version']==asset['version']
-    assert not groups['cups']['blocked']
+    assert all(group_asset(c,g,{})[0]['version']==asset['version'] for g in groups.values())
+    assert all(not g['blocked'] for g in groups.values())
 
 
 def test_metric_plane_initialization_uses_partial_measurements_and_shared_phone_k(tmp_path):
@@ -225,7 +225,7 @@ def test_simulator_closed_loop_joint_loss_decreases_across_views_and_restores_be
     from pathlib import Path
     from real2sim_builder.calibration.hybrid import fit_scene
     p,truth,scene=rendered_fixture(tmp_path);before=copy.deepcopy(scene)
-    result,report=fit_scene(p,scene,tmp_path/'fit',{'objects':['block'],'cameras':[],'supports':{'block':'table'},'max_iterations':3,'max_evaluations':90})
+    result,report=fit_scene(p,scene,tmp_path/'fit',{'objects':['block'],'cameras':[],'supports':{'block':'table'},'max_iterations':3,'max_evaluations':270})
     assert report['status']=='OPTIMIZED_UNVERIFIED',report
     assert report['after_loss']<report['before_loss']*.7,report
     assert all(a['loss']<=b['loss']+.05 for a,b in zip(report['after'],report['before']))
@@ -271,7 +271,7 @@ def test_joint_camera_object_fit_preserves_other_view_and_measured_fields(tmp_pa
             checkpoints.append(saved)
         return minimize(*args,**kwargs)
     monkeypatch.setattr(scipy.optimize,'minimize',inspect_closed_iteration)
-    result,report=fit_scene(p,scene,p.root/'scratch/joint',{'cameras':['side'],'objects':['block'],'supports':{'block':'table'},'max_iterations':3,'max_evaluations':160})
+    result,report=fit_scene(p,scene,p.root/'scratch/joint',{'cameras':['side'],'objects':['block'],'supports':{'block':'table'},'max_iterations':3,'max_evaluations':480})
     assert report['after_loss']<report['before_loss']*.6,report
     assert all(a['loss']<=b['loss']+.05 for a,b in zip(report['after'],report['before']))
     assert result['cameras'][1]==truth['cameras'][1]
@@ -394,3 +394,14 @@ def test_passive_probe_rejects_final_penetration_even_with_zero_velocity(tmp_pat
     report=physics_probe(p,scene,p.root/'scratch/probe',steps=1)
     assert not report['mujoco']['settled']
     assert report['mujoco']['final_penetrations']and any('Final inter-object penetration'in r for r in report['needs'])
+
+
+def test_fit_evaluation_budget_is_global_across_iterations(tmp_path):
+    from real2sim_builder.calibration.hybrid import fit_scene
+    p,_,scene=rendered_fixture(tmp_path)
+    result,report=fit_scene(p,scene,p.root/'scratch/global-budget',
+        {'objects':['block'],'cameras':[],'max_iterations':5,'max_evaluations':3,'patience':10})
+    assert report['evaluations']<=3
+    assert report['stop_reason']=='max_evaluations' and not report['converged']
+    assert report['after_loss']<=report['before_loss']
+    assert read(report['best_scene'])==result

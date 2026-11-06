@@ -6,6 +6,44 @@ from PIL import Image,ImageOps
 import cv2
 
 
+def camera_quality(images,criteria=None):
+    """Check explicit per-view criteria; never infer calibration from average RGB."""
+    criteria=criteria or {};groups={};missing=[];failures=[]
+    for role in ('wrist','side','external'):
+        rows=[r for r in images if r.get('camera_type')==role]
+        groups[role]={'count':len(rows),'images':[r['image_id']for r in rows]}
+        groups[role]['metrics']={key:{'mean':float(np.mean([r[key]for r in rows if key in r])),
+                                      'min':float(min(r[key]for r in rows if key in r)),
+                                      'max':float(max(r[key]for r in rows if key in r))}
+            for key in ('mae','rmse','edge_iou')if any(key in r for r in rows)}
+        if role=='external':continue
+        if not rows:missing.append(role+': observations missing')
+        rule=criteria.get(role,{})
+        if not rule.get('evidence')or not rule.get('metrics'):
+            missing.append(role+': explicit tolerances and evidence required');continue
+        for row in rows:
+            for metric,bounds in rule['metrics'].items():
+                if not bounds or set(bounds)-{'min','max'}:raise ValueError('Quality bounds require min/max')
+                if any(isinstance(v,bool)or not isinstance(v,(int,float))or not np.isfinite(v)for v in bounds.values()):
+                    raise ValueError('Finite numeric quality bounds required')
+                actual=row.get(metric)
+                if not isinstance(actual,(int,float))or not np.isfinite(actual):
+                    missing.append(row['image_id']+': metric unavailable '+metric);continue
+                if ('min'in bounds and actual<bounds['min'])or('max'in bounds and actual>bounds['max']):
+                    failures.append({'image_id':row['image_id'],'camera_type':role,'metric':metric,'value':actual,'bounds':bounds})
+    poses=[]
+    for row in images:
+        if row.get('camera_type')!='wrist':continue
+        q=row.get('q_measured')
+        if not isinstance(q,list)or not q or not all(isinstance(v,(int,float))and not isinstance(v,bool)and np.isfinite(v)for v in q):
+            missing.append(row['image_id']+': measured q missing');continue
+        if tuple(q)not in poses:poses.append(tuple(q))
+    if len(poses)<2:missing.append('Multiple distinct measured Wrist poses required; pose diversity is not calibration observability')
+    return {'status':'NOT_MET'if failures else'NOT_VERIFIED'if missing else'CRITERIA_MET_UNVERIFIED',
+            'cameras':groups,'distinct_wrist_q':len(poses),'needs':missing,'violations':failures,
+            'criteria':criteria,'physical_verified':False,'scope':'Declared image criteria only; geometry, contact and calibration need separate verification'}
+
+
 def compare(real,sim,folder,*,save_inputs=True):
     real=np.asarray(real,dtype=np.uint8);sim=np.asarray(sim,dtype=np.uint8)
     if real.shape!=sim.shape or real.ndim!=3 or real.shape[2]!=3:raise ValueError('Real/sim RGB resolution mismatch')

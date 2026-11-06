@@ -88,10 +88,12 @@ def test_append_records_new_producer_code_without_relabeling_old_closed_segments
 def test_recorded_source_can_use_its_original_initial_without_placement_override(tmp_path):
     import yaml
     from robot_learning_workbench.recipe import read_recipe
-    spec={'schema_version':1,'stage':'source','engine':'mujoco','inputs':{'scene':'scene.json','source_dataset':'original'},'execution':{'num_episodes':2,'seed':7},'output':{'directory':'new'}}
+    spec={'schema_version':1,'stage':'source','engine':'mujoco','inputs':{'scene':'scene.json','source_dataset':'original'},'execution':{'num_episodes':2},'output':{'directory':'new'}}
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec));assert not read_recipe(path).spec.objects
     spec['inputs'].pop('source_dataset');spec['inputs']['device_profile']='leader.json';path.write_text(yaml.safe_dump(spec))
-    with pytest.raises(ValueError):read_recipe(path)
+    assert not read_recipe(path).spec.objects  # Live input may keep the Scene's default layout.
+    spec['inputs']['source_dataset']='original';path.write_text(yaml.safe_dump(spec))
+    with pytest.raises(ValueError,match='cannot be combined'):read_recipe(path)
 
 
 def test_append_does_not_ignore_changed_control_kinematics_or_state_code(tmp_path):

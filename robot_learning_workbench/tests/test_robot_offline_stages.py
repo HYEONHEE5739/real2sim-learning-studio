@@ -39,7 +39,8 @@ def test_actual_policy_to_fake_follower_encoding_uses_safe_mapping(tmp_path):
     from robot_learning_workbench.robot.calibration import JOINTS
     import torch
     root=Path(__file__).resolve().parents[2]
-    model=root/'docs/evidence/workbench-expansion/integrated-learning/act-resume/checkpoints/000004/pretrained_model'
+    from checkpoint_fixture import official_checkpoint
+    model=official_checkpoint(root/'docs/evidence/workbench-expansion/integrated-learning/act-resume/checkpoints/000004')/'pretrained_model'
     policy,pre,post,record=load_policy(model)
     follower,sdk,trace=make(tmp_path);follower.connect()
     try:

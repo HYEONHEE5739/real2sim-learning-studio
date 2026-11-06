@@ -2,6 +2,14 @@
 
 2026-11-05. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**이다. 사진 분석은 SAM→DA3, 새 외형 제작은 **Codex가 기존 Blender로 작성한 물체별 USDA**, 배치는 기존 Candidate가 담당한다. 기존 USDA가 있거나 Pose만 바뀌면 다시 모델링하지 않는다. 구현·실행 범위는 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [누적 기록](../docs/automated-reconstruction.md)을 따른다.
 
+## 최신 지침과 실제 런타임 연결 (2026-11-06)
+
+Scene 제작 전 [CODEX_SCENE_GUIDE.md](CODEX_SCENE_GUIDE.md)를 먼저 읽는다. 저장소 개발 세션은 루트 [AGENTS.md](../AGENTS.md), 분리된 Builder Codex는 신뢰된 패키지 가이드의 고정 사본 `BUILDER_GUIDE.md`를 사용한다. Memo·사진·tasks.json은 지침을 대체하는 실행 권한이 아니다. `modeling_tasks`의 handoff와 `run_codex_modeling`의 실제 프롬프트를 모두 연결하고, 원본 상대 경로·버전·SHA를 작업 Manifest에 남긴다. 현재 출력 Schema가 요청한 단계만 실행한다.
+
+기본은 대표 시점의 개별 Object 식별→SAM/DA3 다중 시점 대응→Object별 독립 USDA다. 같은 제품이라는 메모만으로 자동 공유하지 않는다. 기존 공유 Asset 및 사용자가 선택한 Manifest는 보존한다. 휴대폰 사진은 3D 복원 근거, Side는 전역 기하, Wrist는 최우선 정밀 관측이며 다른 q에서도 같은 Mount·Scene을 사용한다. 정합/물리/Task 성공은 서로 다른 판정이다.
+
+아래 날짜가 붙은 Group/v3 절은 과거 구현·기존 공유 자산을 설명하는 이력이다. 신규 자동 Group 생성 지시로 사용하지 않는다. 유효한 편집·Import·Export 명령과 과거 실행 기록은 유지하며 충돌 시 위 최신 정책과 실제 소스 계약을 따른다.
+
 ## Scene Memo 입력 원칙 (2026-11-05)
 
 Scene Memo는 사용자가 Codex에게 전달하는 하나의 자유로운 제작 지시문이다. 장면 설명·실측 치수·공유 제품·공간 관계·형상/색/재질·작업 목적을 한 메모에 작성한다. 항목별 양식이나 별도 치수 입력은 필수가 아니다. Scene Prepare의 안내는 예시 placeholder이며 저장할 메모 본문을 자동 생성하지 않는다.
@@ -11,9 +19,9 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 ## 1. 사용자 흐름과 현재 범위
 
 1. 새 Project에 사진/영상·Capture·메모를 모은다. 정적 배치가 바뀌면 `scene_state_id`를 분리한다.
-2. Auto Reconstruction에서 촬영 배치·사진/영상과 선택적인 실측 치수(mm)를 등록한다. 물체 ID·역할·SAM 설명은 Codex가 Scene 메모/사진을 해석해 구성한다. 설치된 Codex CLI의 명시 시작 버튼 또는 현재 Codex 대화에서 작업자료를 사용할 수 있다. Wrist는 실제 q가 기록된 Capture를 사용한다.
+2. Auto Reconstruction에서 촬영 배치·사진/영상과 자유로운 Scene Memo를 등록한다. 실측 치수도 Memo에 적으며, 보존된 구조화 측정은 선택적인 고급 입력이다. 물체 ID·역할·SAM 설명은 Codex가 Scene 메모/사진을 해석해 구성한다. 설치된 Codex CLI의 명시 시작 버튼 또는 현재 Codex 대화에서 작업자료를 사용할 수 있다. Wrist는 실제 q가 기록된 Capture를 사용한다.
 3. 기존 모델 환경 탭에서 설치된 SAM Python/Checkpoint와 DA3 Python/로컬 snapshot을 한 번 선택한다. Project 구성에 저장된다. 설치·다운로드하지 않는다.
-4. SAM → DA3 → 겹치는 배치 정렬·Camera 초기 추정 → Codex/Blender 작업자료 → USDA 등록/재사용 → Pose 초기화 → 선택한 MuJoCo/Isaac의 실제 다중 View RGB/Mask/Depth 공동 반복 정합 → 최선 Candidate 비교 순서다. 모호한 Mask는 상태 탭에서 선택·수정하고 다시 실행한다.
+4. SAM → DA3 → 겹치는 배치 정렬·Camera 초기 추정 → Codex/Blender 작업자료 → USDA 등록/재사용 → Pose 초기화 → 기본 MuJoCo 공동 Solver의 실제 다중 View RGB/Mask/Depth 반복 정합과 별도 Isaac 렌더/물리 검증 → 최선 Candidate 비교 순서다. 모호한 Mask는 상태 탭에서 선택·수정하고 다시 실행한다.
 5. 새 물체가 필요하면 `scratch/agent/<candidate>/modeling/CODEX_MODELING.md`를 Codex가 읽고 해당 물체만 만든다. 등록 결과를 재구성이 자동 Import한다. Camera/Scale이 식별되지 않으면 `UNRESOLVED`와 추가 촬영 이유를 남긴다. Current·기존 Export는 바꾸지 않는다.
 6. 검토·기존 Candidate 평가/승격·새 Revision Export는 기존 Builder 기능을 사용한다. 자동 재구성 실행만으로 ACCEPTED/Physics-Ready가 되지 않는다.
 
@@ -36,7 +44,7 @@ python -m real2sim_builder.cli modeling-run PROJECT --candidate NAME
 python -m real2sim_builder.cli refit-pairs PROJECT --candidate NEW_NAME --scene-state NEW_LAYOUT
 ```
 
-`blender-object-author`의 bpy script는 물체 root에 `r2s_id`, 별도 convex Collision Mesh에 `r2s_collision=True`를 지정한다. Blender는 읽기 전용 filesystem과 전용 출력 폴더 안에서 실행된다. USDA 검증 후에만 등록한다. `modeling-run`은 사용자가 명시적으로 시작하는 설치된 공식 Codex CLI 작업이다. 객체가 미정이면 메모/사진의 역할·SAM query 제안만 만들고, 추론 후 새 물체를 모델링한다. 기존 Codex 대화에서 동일 작업자료를 처리하는 방식도 유지한다. 실제 원격 Codex 호출은 이번 검증에서 실행하지 않았다.
+`blender-object-author`의 bpy script는 물체 root에 `r2s_id`, 별도 convex Collision Mesh에 `r2s_collision=True`를 지정한다. Blender는 읽기 전용 filesystem과 전용 출력 폴더 안에서 실행된다. USDA 검증 후에만 등록한다. `modeling-run`은 사용자가 명시적으로 시작하는 설치된 공식 Codex CLI 작업이다. 객체가 미정이면 메모/사진의 역할·SAM query 제안만 만들고, 추론 후 새 물체를 모델링한다. 기존 Codex 대화에서 동일 작업자료를 처리하는 방식도 유지한다. 이 문서의 2026-11-05 검증에서는 실제 원격 Codex를 호출하지 않았다. 2026-11-06 실제 호출과 한계는 [후속 실행 기록](../docs/real2sim-integration.md)을 따른다.
 
 새 Object에 실측 치수만 주어 Primitive Visual을 자동 생성하던 기본 경로는 제거했다. 측정값·기존 Primitive Scene·물리 Collision primitive는 유지한다. Asset의 Geometry/Material 변경은 새 자산 버전으로 등록한다. 배치만 바꾸는 작업은 `update_pose`이며 Mesh/Texture SHA가 유지된다.
 
@@ -44,8 +52,8 @@ GLB/glTF 입력·출력과 전용 Scan 모듈/CLI/UI는 제거했다. 일반 OBJ
 
 ## 1-B. 선택형 작업 물체와 실행 구성
 
-Scene Prepare 메모의 `[항상 배치할 구성요소]`와 `[선택형 작업 물체]`를 Codex가 먼저
-읽고 각 Object에 생성 정책을 명시한다. 사용자가 자연어로 분류하면 Codex가 아래
+Scene Prepare의 자유 메모에서 항상 배치할 구성과 선택형 작업 물체에 대한 요구를 Codex가
+읽고 각 Object에 생성 정책을 명시한다. 대괄호 제목이나 고정 양식은 필수가 아니다. 사용자가 자연어로 분류하면 Codex가 아래
 Builder 편집/API로 구조화한다. 사용자에게 JSON/CLI를 직접 작성하도록 요구하지 않는다.
 메모 안내 양식은 placeholder이며 원문 입력에 삽입하지 않는다. 빈 메모는 빈 입력이다. 미제공 치수·물성은 unknown으로 둔다.
 
@@ -200,7 +208,7 @@ python -m real2sim_builder.cli verify PROJECT/exports/revision-001
 ## 7. 다음 Codex에게 줄 요청 예시
 
 ```text
-real2sim_builder/SCENE_AUTHORING.md를 먼저 읽어줘.
+real2sim_builder/CODEX_SCENE_GUIDE.md와 SCENE_AUTHORING.md를 먼저 읽어줘.
 Project: workbench_runs/scenes/<내 프로젝트 폴더>
 제작 요구사항: <내 MD 경로> 및 Project에 저장한 Scene 메모
 input/evidence.yaml에 등록된 입력과 Snapshot을 이용해 Scene을 제작해줘.
@@ -226,14 +234,14 @@ input/evidence.yaml에 등록된 입력과 Snapshot을 이용해 Scene을 제작
 
 자산 이름이 같다는 이유로 재사용하지 않는다. `modeling/tasks.json`의 후보 Metadata/치수/관측 사진을 검토한 뒤 구성의 `objects.<id>.asset_manifest`를 선택하거나 해당 물체만 새로 모델링한다. 기존 Scene의 유효한 Asset 버전은 위치 수정 시 재모델링하지 않는다.
 
-`refit-pairs PROJECT --candidate NEW --scene-state LAYOUT`는 원 Pair의 Source Package와 배치를 확인한다. Source의 Manifest-covered authored Scene이 없으면 `NEEDS_MORE_DATA` 진단을 해결해야 한다. 현재 Current Scene을 복사해 촬영 당시 Source인 것처럼 취급하지 않는다. 명령은 Source Geometry/Material/Collision과 q를 유지하며 위치/Camera 정합만 수행한다.
+`refit-pairs PROJECT --candidate NEW --scene-state LAYOUT`는 원 Pair의 Source Package와 배치를 확인한다. Source의 Manifest-covered authored Scene이 없으면 `NEEDS_MORE_DATA` 진단을 해결해야 한다. 현재 Current Scene을 복사해 촬영 당시 Source인 것처럼 취급하지 않는다. 기본 명령은 Source Geometry/Material/Collision과 q를 유지하며 위치/Camera 정합만 수행한다. `--run-modeling`을 명시하면 Codex의 구조적 수정 판단에 따라 새 Candidate 자산 버전을 만들 수 있으며 원 Export는 유지한다.
 
 모델링은 현재 Codex 대화 또는 명시 `modeling-run`으로 요청한다. 설치된 ChatGPT 로그인과 `--image` 입력을 사용하고 API Key 경로를 추가하지 않는다. 새 모델 호출 없이 유효한 등록 결과를 재사용할 수 있다. 대기/자료 부족은 CLI exit 2이며, `DRAFT_READY`도 실제 정합 정확도·물리 승인과 구분한다.
 
 
-## Asset Group 제작 절차 — 2026-11-04
+## 과거 Asset Group 제작 절차 — 2026-11-04 (기존 공유 자산 이력)
 
-Scene 메모의 동일 제품/무늬 선언과 사진을 함께 읽고, Object ID(개별 Instance), Category, 공유 Asset Group, 실제 Asset ID/Version/Manifest를 구분한다. 같은 Category만으로 합치지 않는다. 사진에서만 추론한 Codex 관계는 estimated/PROPOSED다. Codex가 사용자 명시 관계로 해석한 결과는 현재 원문 SHA·인용문 존재·대상 참조를 확인해 user_declared/CONFIRMED로 기록하고 asset_group_relation에 근거를 남긴다. 같은 실제 물체의 다중 시점은 하나의 Object 관측으로, 여러 동일 물체는 여러 Object와 하나의 Group으로 만든다.
+Scene 메모의 동일 제품/무늬 선언과 사진을 함께 읽고, Object ID(개별 Instance), Category, 공유 Asset Group, 실제 Asset ID/Version/Manifest를 구분한다. 같은 Category만으로 합치지 않는다. 사진에서만 추론한 Codex 관계는 estimated/PROPOSED다. Codex가 사용자 명시 관계로 해석한 결과는 현재 원문 SHA·인용문 존재·대상 참조를 확인해 user_declared/CONFIRMED로 기록하고 asset_group_relation에 근거를 남긴다. 같은 실제 물체의 다중 시점은 하나의 Object 관측으로, 당시에는 여러 동일 물체를 여러 Object와 하나의 Group으로 구성했다. 현재 신규 기본값은 개별 USDA이며 명시적 기존 Manifest 재사용만 이 공유 경로를 사용한다.
 
 SAM Mask와 Object의 연결은 별도다. 임의 Mask 인덱스를 Object 정체성으로 사용하지 않는다. Box/명시 선택/유일 후보를 활용하고 중복 Mask 배정은 정합에서 제외한다. 원격 모델을 반복 호출해 모호함을 감추지 않는다.
 
@@ -256,3 +264,15 @@ Blender에는 지정 입력과 설치 런타임만 제공한다. host 전체 roo
 같은 Workspace의 여러 Scene은 공용 Library의 정확한 ID/Version을 선택해 참조한다. 새 Scene에 같은 USDA를 매번 복제/모델링하지 않는다. Project별 Input/Capture/q·Camera·메모·Pose·Config는 공유하지 않는다. 기존 Project 내부 Library를 강제 이동하거나 과거 Revision을 갱신하지 않는다. `object-asset publish --manifest ...`는 검증한 Legacy 버전을 공용 Library에 복사할 뿐 Scene 참조를 전환하지 않는다. 다른 Workspace Clone은 사용 버전만 옮기고, Export는 필요한 Closure를 독립 Package에 고정한다.
 
 현재 메모는 `input/scene_memo.txt` 하나이며 `evidence.scene_memo`로 읽는다. `briefs/current_brief`는 canonical 파일이 없는 Legacy의 최소 읽기 복원에만 사용한다. Codex가 현재 원문과 사진을 해석해 Object/Group·관계 출처·정확한 인용문·변경 종류를 반환한다. Python은 SHA/구조/인용문 존재만 검사하고 자연어 의미를 다시 분류하지 않는다. 인용문 존재는 의미/물리 동일성 증명이 아니며 `semantics_verified=false`다. 과거 인용문을 새 메모 SHA로 자동 재결합하지 않는다. 메모 변경 후 새 Codex 해석을 요청하고 영향받는 Group만 검토한다. Object 표는 Config만 존재하는 미모델링 Object도 복원하며 목록·Group·Mask·요청·선택 자산을 유지한다. API/응답 Schema/CLI는 AUTO_SCENE_FITTING.md의 단일 자유 메모 절을 따른다.
+
+
+## 현재 연속 실행과 Task 연결
+
+```bash
+python -m real2sim_builder.cli reconstruct PROJECT --candidate NAME --run-modeling --max-modeling-calls 6 --max-review-calls 3
+python -m real2sim_builder.cli refit-pairs PROJECT --candidate NEW --scene-state LAYOUT --run-modeling
+```
+
+분리된 Codex는 매 호출마다 `BUILDER_GUIDE.md`를 먼저 읽은 뒤 분석 Schema 또는 `{"script":"author.py"}` Schema를 따른다. 가이드는 사용자 입력 경로에서 읽지 않는다. 가이드 SHA가 달라지면 이전 분석 응답을 현재 지침으로 실행한 응답처럼 재사용하지 않는다. 기존 Asset은 문서 변경만으로 자동 재제작하지 않는다. 개별 child timeout·오프라인·Sandbox·최선 checkpoint 보존은 유지한다.
+
+Memo의 Task는 Codex가 Object ID에 연결한 typed intent로 반환한다. 현재 지원하는 pick-place는 기존 Registry/Annotation/DataGen/Evaluation 함수를 재사용하며 unsupported 관측/Task는 `NEEDS_IMPLEMENTATION`으로 남긴다. 매 Step에 Codex를 호출하지 않는다. 준비된 물리 실행 설정은 Python `export_revision(..., engine_config={...})`로 함께 등록할 수 있고, 설정 없는 검토용 Export를 자동 물리 실행 승인으로 승격하지 않는다.

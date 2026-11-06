@@ -43,7 +43,7 @@ def test_live_policy_batch_preserves_rgb_order_and_pre_state():
 
 def test_evaluation_success_is_placement_independent_of_grasp():
     from robot_learning_workbench.engines.mujoco.evaluation import evaluation_result
-    assert evaluation_result(placed=True,grasp=False,steps=1,limit=10)['category']=='placement_success'
+    assert evaluation_result(placed=True,grasp=False,steps=1,limit=10)['category']=='task_success'
     assert evaluation_result(placed=False,grasp=True,steps=10,limit=10)['category']=='max_steps'
 
 
@@ -86,6 +86,8 @@ def prepared_evaluation(tmp_path):
     root=Path(__file__).resolve().parents[2]
     spec=yaml.safe_load((root/'docs/evidence/p01-rollout/mujoco-first.yaml').read_text());spec['output']['directory']=str(tmp_path/'out')
     spec['execution']['timeout_s']=.1
+    from checkpoint_fixture import official_checkpoint
+    spec['inputs']['policy']=str(official_checkpoint(Path(spec['inputs']['policy'])))
     p=tmp_path/'evaluation.yaml';p.write_text(yaml.safe_dump(spec,sort_keys=False))
     return prepare_recipe(read_recipe(p),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
 

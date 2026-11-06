@@ -101,12 +101,13 @@ def run(plan,*,events,commands):
     from ...run import StageResult
     from ...generation.mimic import bind_kinematics
     from .source import resolved_model_config,execution_contract,reset_placements
-    from .model import build_model,JOINTS,_execution_urdf
+    from .model import build_model
+    from ...robot.calibration import JOINTS,execution_urdf
     from .state import restore_episode
     verify_prepared_inputs(plan);cfg=resolved_model_config(plan)
     if tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Evaluation creation order differs from explicit engine configuration')
     model,b=build_model(plan.scene,cfg);data=mujoco.MjData(model);bundle=policy_inputs(plan,b.urdf_sha256)
-    kin=bind_kinematics(_execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS)
+    kin=bind_kinematics(execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS)
     execution=evaluation_execution(plan,execution_contract(plan,b,cfg),bundle[3]);previous=plan.resolved_inputs.get('resume_dataset')
     owner=resume_to(previous['path'],plan.output_path,execution) if previous else NativeRun(plan.output_path,execution)
     summary={};cancelled=False
@@ -138,10 +139,10 @@ def rollout_parallel(plan,owner,model,b,kin,bundle,execution,*,events,commands):
     from robot_learning_workbench.engines.mujoco.source import reset_placements
     from .state import restore_episode
     from ...generation.mimic import bind_kinematics
-    from .model import _execution_urdf,JOINTS
+    from ...robot.calibration import execution_urdf,JOINTS
     from ...run import StageResult
     n=plan.effective_settings['execution']['num_envs'];states=[mujoco.MjData(model) for _ in range(n)]
-    bundles=[copy.deepcopy(bundle) for _ in range(n)];kinematics=[bind_kinematics(_execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS) for _ in range(n)]
+    bundles=[copy.deepcopy(bundle) for _ in range(n)];kinematics=[bind_kinematics(execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS) for _ in range(n)]
     polls,send=command_channels(commands,events,n);number=max((a['attempt'] for a in history(owner.root)),default=0);available=list(range(n));pending={};cancelled=False;fatal=None;summary={}
     def evaluate(i,segment,claim):
         started=time.perf_counter()

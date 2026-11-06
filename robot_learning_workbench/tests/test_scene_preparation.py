@@ -22,3 +22,27 @@ def test_optional_images_and_unknown_measurements_are_archived_not_invented_geom
     assert all(row['path'].startswith('input/')for row in result['inputs'])
     image.unlink();measurement.unlink();assert len(scene_details(p['project'])['inputs'])==2
     assert not(Path(p['project'])/'working/current_scene.yaml').exists()
+
+
+def test_saved_phone_batch_is_reconstruction_input_without_camera_or_dimensions(tmp_path):
+    from robot_learning_workbench.scene_preparation import create_scene,save_inputs
+    from real2sim_builder.project import Project
+    from real2sim_builder.observations import input_images
+    from PIL import Image
+    root=create_scene(tmp_path/'workspace','photos')['project']
+    paths=[]
+    for index in range(2):
+        path=tmp_path/f'phone{index}.jpg';Image.new('RGB',(30,20),(index,50,0)).save(path);paths.append(path)
+    save_inputs(root,paths,'컵 높이는 100mm야')
+    rows,state,needs=input_images(Project(root))
+    assert len(rows)==2 and not needs and state
+    assert all(r['camera_type']=='external' and r['split']=='train' and r['q_measured']is None for r in rows)
+    assert all(r['registration_status']=='UNREGISTERED' and not r['eligible'] for r in rows)
+    assert len({r['camera'] for r in rows})==2
+    original=Project(root).evidence
+    save_inputs(root,paths,'updated memo')
+    assert Project(root).evidence==original
+    third=tmp_path/'later.jpg';Image.new('RGB',(30,20),'blue').save(third)
+    save_inputs(root,[third],'later capture')
+    assert input_images(Project(root))[0]==[]  # Distinct uploads never imply the same layout.
+    assert len(input_images(Project(root),state)[0])==2

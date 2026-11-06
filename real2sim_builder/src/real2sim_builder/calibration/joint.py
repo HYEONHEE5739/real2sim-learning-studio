@@ -7,6 +7,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 from ..capture import observation_scene
+from ..cameras import optical_rays
 from ..editing import preserve
 from ..files import sha
 from ..observations import annotation_evidence, registered_images,camera_type
@@ -84,6 +85,13 @@ def parameter_blocks(scene,observations,options):
         if name not in{r['object_id']for r in train}or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['value']is None or obj['pose']['provenance']in('measured','calibrated'):continue
         support=_support(scene,obj,options.get('supports',{}).get(name))
         add('object_support'if support else'object',name,(world_pose(scene,obj),support),3 if support else 6,[translation]*2+[angle]if support else[translation]*3+[angle]*3)
+    if options.get('optimize_dimensions',False):
+        from .geometry import dimension_axes
+        radius=float(options.get('dimension_log_bound',.2))
+        if not np.isfinite(radius) or not 0<radius<=.5:raise ValueError('dimension_log_bound must be in (0, .5]')
+        for name in sorted({r['object_id']for r in train}):
+            obj=nodes[name];axes=dimension_axes(obj)
+            if axes:add('dimensions',name,(np.asarray(obj['dimensions']['value']),axes),len(axes),[radius]*len(axes))
     if options.get('optimize_depth_scale',False):
         for key in sorted({r.get('depth_batch',r['image_id'])for r in train}):add('scale',key,0.,1,[.25])
     if options.get('optimize_appearance',False):
@@ -115,6 +123,7 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
     if stage not in('geometry','appearance'):raise ValueError('Unknown fitting stage')
     requested={**options}
     for key in('optimize_intrinsics','optimize_depth_scale','robot_base'):requested.setdefault(key,True)
+    requested.setdefault('optimize_dimensions',True)
     rows=[r for r in observations if r['split']=='train']
     blocks,radius=parameter_blocks(scene,rows,requested)
     nodes={o['id']:o for o in scene['objects']};cameras={c['id']:c for c in scene['cameras']}
@@ -178,6 +187,11 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
             related=[r for r in rows if r.get('depth_batch',r['image_id'])==name]
             metric=any(nodes[r['object_id']]['dimensions']['provenance']in('measured','calibrated')for r in related)
             if not metric or len(diverse(related))<2 or not all(r.get('has_raw_depth')for r in related):reason='insufficient_metric_scale_constraints'
+        elif kind=='dimensions':
+            related=[r for r in rows if r['object_id']==name]
+            if len(diverse(related))<2 or not any(r.get('cloud_rank',0)==3 for r in related) or not all(r.get('has_raw_depth') for r in related):
+                reason='insufficient_dimension_geometry'
+            elif not all(r['image_id']in anchored_images for r in related):reason='insufficient_dimension_geometry'
         elif kind.startswith('object'):
             obj=nodes[name];related=[r for r in rows if r['object_id']==name]
             if not any(r.get('cloud_rank',0)>=2 and(r.get('has_raw_depth')or
@@ -200,6 +214,7 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
                 'insufficient_object_geometry':'유효한 depth 또는 같은 물체를 보는 서로 다른 시점을 추가하세요.',
                 'albedo_lighting_ambiguity':'색이 고정된 물체 관측이 없으므로 현재 조명을 유지하고 물체 외관만 조정합니다.'}
             actions['raw_camera_rays_required']='Camera를 변경하려면 원 pixel ray/depth 관측을 복구하세요. World 점군만으로 Camera를 재정합하지 않습니다.'
+            actions['insufficient_dimension_geometry']='물체 크기는 World 기준과 raw metric depth가 있는 서로 다른 시점·입체 관측으로 정합합니다.'
             frozen.append({'kind':kind,'id':name,'coordinates':list(range(count)),'reason':reason,'action':actions[reason]})
             if required:needs.append(name+': '+actions[reason])
             continue
@@ -215,6 +230,11 @@ def apply_parameters(scene,blocks,x):
     for kind,name,seed,start,count in blocks:
         delta=x[start:start+count]
         if kind=='scale':scales[name]=float(np.exp(delta[0]));continue
+        if kind=='dimensions':
+            obj=next(o for o in result['objects']if o['id']==name);dims=seed[0].copy()
+            for axes,change in zip(seed[1],delta):dims[list(axes)]*=np.exp(change)
+            obj['dimensions']={**obj['dimensions'],**value(dims.tolist(),'optimized',['native multiview dimension fit; not measured'])}
+            continue
         if kind in('color','roughness','metallic','ambient','light_energy'):
             if kind=='light_energy':
                 target=next(l for l in result['lights']['sources']if l['id']==name);field='energy';updated=float(seed*np.exp(delta[0]))
@@ -235,6 +255,12 @@ def apply_parameters(scene,blocks,x):
         elif kind=='camera':next(c for c in result['cameras']if c['id']==name)['pose']=value(pose.tolist(),'optimized',['joint image/depth fit'])
         elif kind=='base':result['frames'][name]['transform']=value(pose.tolist(),'optimized',['joint image/depth fit'])
         elif kind=='view':result['view_registrations'][name].update(T_world_camera=pose.tolist(),state='OPTIMIZED')
+    for kind,name,seed,_,_ in blocks:
+        if kind=='object_support':
+            obj=next(o for o in result['objects']if o['id']==name)
+            old=next(o for o in scene['objects']if o['id']==name)
+            pose=world_pose(result,obj).copy();pose[2,3]+= (obj['dimensions']['value'][2]-old['dimensions']['value'][2])/2
+            result=assign_pose(result,name,pose)
     if result.get('geometry_constraints'):
         from ..initialization import apply_geometry_constraints
         result,_=apply_geometry_constraints(result,result['geometry_constraints'])
@@ -284,7 +310,7 @@ def fit_depth_bundle(project,scene,options=None):
         posed=observation_scene(trial,image,project.root,complete=False)if image else trial
         cam=next(c for c in posed['cameras']if c['id']==camera);optical=raw['points_camera_relative']
         if 'uv_original'in raw:
-            uv=raw['uv_original'];rays=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[uv,np.ones(len(uv))].T).T
+            uv=raw['uv_original'];rays=optical_rays(cam,uv)
             optical=rays*raw['depth_relative'][:,None]
         scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',row['image_id']),1.)
         pose=world_pose(posed,cam);world=(optical*scale)@pose[:3,:3].T+pose[:3,3]

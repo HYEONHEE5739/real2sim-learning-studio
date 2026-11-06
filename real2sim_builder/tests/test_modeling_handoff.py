@@ -58,6 +58,9 @@ obj.data.materials.append(mat)
 bpy.ops.mesh.primitive_cube_add(size=.03)
 col=bpy.context.object;col.name="collision";col["r2s_collision"]=True;col.parent=obj;col.hide_render=True
 ''')
+    from real2sim_builder.files import write
+    write(tmp_path/'tasks.json',{'object_id':'block'})
+    script.write_text('import json\nfrom pathlib import Path\nassert json.loads((Path(__file__).parent/"tasks.json").read_text())["object_id"]=="block"\n'+script.read_text())
     original=sha(c.root/'candidate_scene.yaml')
     result=author_object_assets(c,script,['block'])
     record=result['assets'][0];entry=p.root/record['manifest'];entry=entry.parent/record['entry']
@@ -327,11 +330,12 @@ def test_group_models_once_and_cache_requires_content_fingerprint(tmp_path):
     config={'objects':{'cup1':{'prompt':'paper cup','category':'cup','role':'receptacle','asset_group':'cups'},
                        'cup2':{'prompt':'paper cup','category':'cup','role':'receptacle','asset_group':'cups'},
                        'mug':{'prompt':'mug','category':'cup','role':'receptacle'}}}
-    inferred={'segments':[]};result=modeling_tasks(c,config,inferred);task=read(c.root/'modeling/tasks.json')
-    cups=next(t for t in task['objects']if t['asset_group']=='cups')
-    assert len(task['objects'])==2 and cups['members']==['cup1','cup2']
+    inferred={'segments':[]};modeling_tasks(c,config,inferred);task=read(c.root/'modeling/tasks.json')
+    assert len(task['objects'])==3
+    assert all(len(t['members'])==1 for t in task['objects'])
     record=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cups')
-    record_modeling_results(c,[record]);applied=attach_modeled_assets(c,config,inferred)
+    for name in ('cup1','cup2'):config['objects'][name]['asset_manifest']=record['manifest']
+    applied=attach_modeled_assets(c,config,inferred)
     assert applied['attached']==['cup1','cup2']
     assert c.scene['objects'][0]['object_asset']==c.scene['objects'][1]['object_asset']
     original={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
@@ -344,7 +348,7 @@ def test_group_models_once_and_cache_requires_content_fingerprint(tmp_path):
     changed=copy.deepcopy(config);changed['measurements']=[{'id':'cup1','kind':'cylinder','dimensions_m':[.1,.1,.2],'evidence':['new measurement']}]
     assert not attach_modeled_assets(c,changed,inferred)['attached']
     result=modeling_tasks(c,changed,inferred);job=read(c.root/'modeling/tasks.json')
-    assert next(t for t in job['objects']if t['asset_group']=='cups')['asset_match_status']=='ASSET_DIMENSION_CONFLICT'
+    assert next(t for t in job['objects']if t['asset_group']=='cup1')['asset_match_status']=='ASSET_DIMENSION_CONFLICT'
     assert original=={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
     assert len(list_object_assets(p))==1
 
@@ -365,7 +369,7 @@ def test_legacy_results_do_not_silently_attach_by_object_id(tmp_path):
     assert attach_modeled_assets(c,config,{'segments':[]})['attached']==['cup']
 
 
-def test_semantic_groups_and_two_cup_instances_use_one_real_blender_asset(tmp_path,monkeypatch):
+def test_same_product_instances_use_independent_real_blender_assets(tmp_path,monkeypatch):
     from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,attach_modeled_assets
     from real2sim_builder.object_assets import list_object_assets
     from real2sim_builder.rendering import Renderer
@@ -397,25 +401,26 @@ def test_semantic_groups_and_two_cup_instances_use_one_real_blender_asset(tmp_pa
         'segments':[{'object_id':name,'image_id':'side','masks':masks,'status':'AMBIGUOUS'}for name in config['objects']]}
     associated=associate_instances(inferred,config['objects']);assert [s['association']['mask_index']for s in associated['segments']]==[0,1]
     modeling_tasks(c,config,inferred)
-    script=open_cup_script().replace('root["r2s_id"]="cup"','root["r2s_id"]="paper_cup_A"')
+    script=open_cup_script().replace('root["r2s_id"]="cup"','root["r2s_id"]="cup1"')
     # Image texture loading is inside the new filesystem allowlist too.
     script+='\nvisual=bpy.data.objects["Visual"];bpy.ops.object.select_all(action="DESELECT");visual.select_set(True);bpy.context.view_layer.objects.active=visual\nbpy.ops.object.mode_set(mode="EDIT");bpy.ops.mesh.select_all(action="SELECT");bpy.ops.uv.smart_project();bpy.ops.object.mode_set(mode="OBJECT")\nfrom pathlib import Path\nimage=bpy.data.images.load(str(next((Path(__file__).parent/"inputs").glob("*.png"))))\nmat=bpy.data.materials["white"];node=mat.node_tree.nodes.new("ShaderNodeTexImage");node.image=image\nmat.node_tree.links.new(node.outputs["Color"],mat.node_tree.nodes.get("Principled BSDF").inputs["Base Color"])\n'
     script=script.replace('next((Path(__file__).parent/"inputs").glob("*.png"))', 'Path(__file__).parent/"inputs"/'+repr(sha(rgb)+'.png'))
-    executable=tmp_path/'fake_codex';executable.write_text('#!'+sys.executable+'\nimport sys,json\nfrom pathlib import Path\na=sys.argv;r=Path(a[a.index("--cd")+1]);t=json.loads((r/"tasks.json").read_text());assert len(t["objects"])==1;assert t["objects"][0]["members"]==["cup1","cup2"]\n(r/"author.py").write_text('+repr(script)+')\nPath(a[a.index("--output-last-message")+1]).write_text(json.dumps({"script":"author.py"}))\n');executable.chmod(0o700)
-    result=run_codex_modeling(c,executable=executable);assert len(result['assets'])==1
-    assert len(list_object_assets(p))==1
+    script+='\nroot2=root.copy();bpy.context.collection.objects.link(root2);root2["r2s_id"]="cup2"\nfor child in list(root.children):\n    copied=child.copy();copied.data=child.data.copy();bpy.context.collection.objects.link(copied);copied.parent=root2\n'
+    executable=tmp_path/'fake_codex';executable.write_text('#!'+sys.executable+'\nimport sys,json\nfrom pathlib import Path\na=sys.argv;r=Path(a[a.index("--cd")+1]);t=json.loads((r/"tasks.json").read_text());assert len(t["objects"])==2;assert [o["members"]for o in t["objects"]]==[["cup1"],["cup2"]]\n(r/"author.py").write_text('+repr(script)+')\nPath(a[a.index("--output-last-message")+1]).write_text(json.dumps({"script":"author.py"}))\n');executable.chmod(0o700)
+    result=run_codex_modeling(c,executable=executable);assert len(result['assets'])==2
+    assert len(list_object_assets(p))==2
     attach_modeled_assets(c,config,inferred)
     for name,x in [('cup1',-.15),('cup2',.15)]:
         pose=np.eye(4);pose[:3,3]=[x,0,.05];c.edit([{'op':'update_pose','id':name,'value':pose.tolist()}])
     cups=[o for o in c.scene['objects']if o['id'].startswith('cup')]
-    assert cups[0]['object_asset']==cups[1]['object_asset']and cups[0]['pose']!=cups[1]['pose']
+    assert cups[0]['object_asset']!=cups[1]['object_asset']and cups[0]['pose']!=cups[1]['pose']
     with Renderer(c.scene,p.root,c.root/'renders/grouped')as renderer:render=renderer.rgb('side')
     assert render.shape==(480,640,3)
     Image.fromarray(render).save(c.root/'renders/grouped/side.png')
     write(c.root/'renders/grouped/render_scene.yaml',c.scene)
     before={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
     c.edit([{'op':'remove_object','id':'cup2'}])
-    assert len(list_object_assets(p))==1 and before=={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
+    assert len(list_object_assets(p))==2 and before=={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
 
 
 def test_semantic_analysis_preserves_groups_provenance_and_multiview_ids(tmp_path):
@@ -469,21 +474,22 @@ def test_group_split_and_material_variants_preserve_the_original_asset(tmp_path)
     config={'objects':{'cup1':{'prompt':'cup','asset_group':'cups'},'cup2':{'prompt':'cup','asset_group':'cups'}}}
     modeling_tasks(c,config,{})
     source=asset_fixture(tmp_path/'asset');asset=register_object_asset(p,source,asset_id='cups')
-    record_modeling_results(c,[asset]);attach_modeled_assets(c,config,{})
+    for spec in config['objects'].values():spec['asset_manifest']=asset['manifest']
+    attach_modeled_assets(c,config,{})
     original={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()}
-    changed=copy.deepcopy(config);changed['objects']['cup2']['asset_group']='other_cup'
+    changed=copy.deepcopy(config);changed['objects']['cup2']['modeling_action']='new'
     modeling_tasks(c,changed,{});tasks=read(c.root/'modeling/tasks.json')['objects']
-    assert len(tasks)==1 and tasks[0]['members']==['cup2']and tasks[0]['requires_review']
+    assert len(tasks)==1 and tasks[0]['members']==['cup2']and not tasks[0]['requires_review']
     changed['objects']['cup2']['modeling_action']='new';modeling_tasks(c,changed,{})
     assert read(c.root/'modeling/tasks.json')['objects'][0]['requires_review']is False
-    new=register_object_asset(p,source,asset_id='other_cup',generation_id=read(c.root/'modeling/tasks.json')['groups']['other_cup']['request_id']);record_modeling_results(c,[new])
+    new=register_object_asset(p,source,asset_id='cup2',generation_id=read(c.root/'modeling/tasks.json')['groups']['cup2']['request_id']);record_modeling_results(c,[new])
     attach_modeled_assets(c,changed,{})
     assert c.scene['objects'][0]['object_asset']['asset_id']=='cups'
-    assert c.scene['objects'][1]['object_asset']['asset_id']=='other_cup'
+    assert c.scene['objects'][1]['object_asset']['asset_id']=='cup2'
     assert original=={f:sha(f)for f in original}
     variants=copy.deepcopy(config);variants['objects']['cup1']['material_variant']='red';variants['objects']['cup2']['material_variant']='blue'
     groups,_=modeling_groups(c,variants,{})
-    assert set(groups)=={'cups__red','cups__blue'}
+    assert set(groups)=={'cup1__red','cup2__blue'}
 
 
 def test_ambiguous_group_needs_review_and_input_symlinks_are_rejected(tmp_path,monkeypatch):
@@ -494,7 +500,8 @@ def test_ambiguous_group_needs_review_and_input_symlinks_are_rejected(tmp_path,m
     config={'objects':{'cup1':{'prompt':'cup','asset_group':'cups','asset_group_relation':{'status':'UNRESOLVED','provenance':'estimated','evidence':[]}}}}
     modeling_tasks(c,config,{})
     executable=tmp_path/'not_called';executable.write_text('#!'+sys.executable+'\nraise AssertionError("must not invoke")\n');executable.chmod(0o700)
-    assert run_codex_modeling(c,executable=executable)['status']=='ASSET_REUSE_REVIEW_REQUIRED'
+    job=read(c.root/'modeling/tasks.json')
+    assert job['objects'][0]['object_id']=='cup1' and not job['objects'][0]['requires_review']
     private=tmp_path/'test-secret.txt';private.write_text('fake secret')
     folder=tmp_path/'author';folder.mkdir();(folder/'inputs').mkdir();(folder/'inputs/link').symlink_to(private)
     script=folder/'author.py';script.write_text('raise AssertionError("must not run")')
@@ -527,19 +534,19 @@ def test_new_request_beats_same_fingerprint_and_completes_once(tmp_path):
     from test_object_assets import asset_fixture
     import copy
     p=Project.create(tmp_path/'projects','new priority');c=Candidate.create(p,'one')
-    config={'objects':{'cup':{'prompt':'cup','asset_group':'cups'}}}
-    modeling_tasks(c,config,{});source=asset_fixture(tmp_path/'asset');old=register_object_asset(p,source,asset_id='cups')
+    config={'objects':{'cup':{'prompt':'cup','asset_group':'cup'}}}
+    modeling_tasks(c,config,{});source=asset_fixture(tmp_path/'asset');old=register_object_asset(p,source,asset_id='cup')
     record_modeling_results(c,[old]);attach_modeled_assets(c,config,{})
     old_sha=sha(p.root/old['manifest']);new=copy.deepcopy(config);new['objects']['cup']['modeling_action']='new'
-    report=modeling_tasks(c,new,{});task=read(c.root/'modeling/tasks.json');assert report['pending']==['cups']
-    request=task['groups']['cups']['request_id'];assert request
-    assert modeling_tasks(c,new,{})['pending']==['cups']
-    assert read(c.root/'modeling/tasks.json')['groups']['cups']['request_id']==request
-    created=register_object_asset(p,source,asset_id='cups',generation_id=request)
+    report=modeling_tasks(c,new,{});task=read(c.root/'modeling/tasks.json');assert report['pending']==['cup']
+    request=task['groups']['cup']['request_id'];assert request
+    assert modeling_tasks(c,new,{})['pending']==['cup']
+    assert read(c.root/'modeling/tasks.json')['groups']['cup']['request_id']==request
+    created=register_object_asset(p,source,asset_id='cup',generation_id=request)
     assert created['version']!=old['version']
     record_modeling_results(c,[created]);assert attach_modeled_assets(c,new,{})['attached']==['cup']
     assert modeling_tasks(c,new,{})['pending']==[]
-    assert read(c.root/'modeling/results.json')['groups']['cups']['request_status']=='REGISTERED'
+    assert read(c.root/'modeling/results.json')['groups']['cup']['request_status']=='REGISTERED'
     assert sha(p.root/old['manifest'])==old_sha
 
 
@@ -551,11 +558,12 @@ def test_explicit_asset_resolves_only_relation_uncertainty_not_geometry_conflict
     asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cups')
     config={'objects':{name:{'prompt':'cup','asset_group':'cups','asset_manifest':asset['manifest'],
         'asset_group_relation':{'status':'UNRESOLVED','provenance':'estimated','evidence':[]}}for name in('cup1','cup2')}}
-    group=modeling_groups(c,config,{})[0]['cups']
+    group=modeling_groups(c,config,{})[0]['cup1']
     assert group_asset(c,group,{})[0]['manifest']==asset['manifest']
     config['measurements']=[{'id':'cup1','kind':'box','dimensions_m':[.1]*3,'evidence':['caliper']},
                             {'id':'cup2','kind':'box','dimensions_m':[.2]*3,'evidence':['caliper']}]
-    group=modeling_groups(c,config,{})[0]['cups'];assert group_asset(c,group,{})[0]is None
+    groups=modeling_groups(c,config,{})[0]
+    assert all(group_asset(c,g,{})[0]is None for g in groups.values())
 
 
 def test_new_observations_reuse_identity_but_keep_generation_fingerprint(tmp_path):
@@ -565,22 +573,24 @@ def test_new_observations_reuse_identity_but_keep_generation_fingerprint(tmp_pat
     from PIL import Image
     import copy
     p=Project.create(tmp_path/'projects','moving cups');c=Candidate.create(p,'one')
-    config={'objects':{'cup1':{'prompt':'paper cup','category':'paper_cup','asset_group':'cups'},'cup2':{'prompt':'paper cup','category':'paper_cup','asset_group':'cups'}}}
-    modeling_tasks(c,config,{});asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cups');record_modeling_results(c,[asset]);attach_modeled_assets(c,config,{})
-    original=read(c.root/'modeling/results.json')['groups']['cups'];before=sha(p.root/asset['manifest'])
+    config={'objects':{'cup1':{'prompt':'paper cup','category':'paper_cup'}}}
+    modeling_tasks(c,config,{});asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cup1');record_modeling_results(c,[asset]);attach_modeled_assets(c,config,{})
+    original=read(c.root/'modeling/results.json')['groups']['cup1'];before=sha(p.root/asset['manifest'])
     rgb=p.root/'input/new_side.png';Image.new('RGB',(40,30),'white').save(rgb)
     # New views/background, independent raw observation identity. No new shape claim.
     inferred={'images':[{'id':'new_side','path':'input/new_side.png','sha256':sha(rgb),'resolution':[40,30],'split':'train'}],
         'segments':[{'image_id':'new_side','object_id':'cup1','status':'NOT_FOUND','masks':[]}]}
     assert modeling_tasks(c,config,inferred)['pending']==[]
     attach_modeled_assets(c,config,inferred)
-    current=read(c.root/'modeling/results.json')['groups']['cups']
+    current=read(c.root/'modeling/results.json')['groups']['cup1']
     assert current['fingerprint']==original['fingerprint']and current['fingerprint_inputs']==original['fingerprint_inputs']
     assert current['reuse_observations'][0]['fingerprint']!=original['fingerprint']
     config['objects']['cup3']={'prompt':'cup','category':'paper_cup','asset_group':'cups'}
+    assert attach_modeled_assets(c,config,inferred)['attached']==[]
+    config['objects']['cup3']['asset_manifest']=asset['manifest']
     assert attach_modeled_assets(c,config,inferred)['attached']==['cup3']
     changed=copy.deepcopy(config);changed['objects']['cup1']['shape_constraints']={'rim':'new geometry'}
-    assert 'cups'in modeling_tasks(c,changed,inferred)['pending']
+    assert 'cup1'in modeling_tasks(c,changed,inferred)['pending']
     assert sha(p.root/asset['manifest'])==before
 
 
@@ -608,14 +618,14 @@ def test_new_request_runs_real_blender_once_and_preserves_other_group(tmp_path,m
     import copy,os,sys
     monkeypatch.setenv('REAL2SIM_BLENDER',os.environ['REAL2SIM_BLENDER'])
     p=Project.create(tmp_path/'projects','request integration');c=Candidate.create(p,'one')
-    config={'objects':{'cup':{'prompt':'cup','asset_group':'cups'},'block':{'prompt':'block'}}}
+    config={'objects':{'cup':{'prompt':'cup','asset_group':'cup'},'block':{'prompt':'block'}}}
     modeling_tasks(c,config,{})
-    source=asset_fixture(tmp_path/'asset');old=register_object_asset(p,source,asset_id='cups');block=register_object_asset(p,source,asset_id='block')
+    source=asset_fixture(tmp_path/'asset');old=register_object_asset(p,source,asset_id='cup');block=register_object_asset(p,source,asset_id='block')
     record_modeling_results(c,[old,block]);attach_modeled_assets(c,config,{})
     original={str(f):sha(f)for f in (p.workspace/'object_assets').rglob('*')if f.is_file()};untouched=c.scene['objects'][1]
     changed=copy.deepcopy(config);changed['objects']['cup']['modeling_action']='new';modeling_tasks(c,changed,{})
     counter=tmp_path/'calls.txt';executable=tmp_path/'fake_codex'
-    script='import bpy\nbpy.ops.mesh.primitive_cube_add(size=.03)\nobj=bpy.context.object;obj["r2s_id"]="cups"\nbpy.ops.mesh.primitive_cube_add(size=.03)\ncol=bpy.context.object;col.parent=obj;col["r2s_collision"]=True\n'
+    script='import bpy\nbpy.ops.mesh.primitive_cube_add(size=.03)\nobj=bpy.context.object;obj["r2s_id"]="cup"\nbpy.ops.mesh.primitive_cube_add(size=.03)\ncol=bpy.context.object;col.parent=obj;col["r2s_collision"]=True\n'
     executable.write_text('#!'+sys.executable+'\nimport sys,json\nfrom pathlib import Path\na=sys.argv;r=Path(a[a.index("--cd")+1]);p=Path('+repr(str(counter))+');p.write_text(p.read_text()+"x"if p.exists()else"x")\n(r/"author.py").write_text('+repr(script)+')\nPath(a[a.index("--output-last-message")+1]).write_text(json.dumps({"script":"author.py"}))\n');executable.chmod(0o700)
     result=run_codex_modeling(c,executable=executable)
     assert result['assets'][0]['manifest']!=old['manifest']
@@ -642,14 +652,14 @@ def test_semantic_memo_facts_and_count_conflicts_stay_separate(tmp_path):
     executable=tmp_path/'fake_codex';executable.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\nPath(sys.argv[sys.argv.index("--output-last-message")+1]).write_text('+repr(json.dumps(semantic_reply(proposals,note.read_text())))+')\n');executable.chmod(0o700)
     result=run_codex_modeling(c,executable=executable);config=read(p.root/'input/reconstruction.yaml')
     assert all(s['asset_group_relation']['provenance']=='user_declared'for s in config['objects'].values())
-    assert len(modeling_groups(c,config,{})[0])==1
+    assert len(modeling_groups(c,config,{})[0])==2
     rgb=p.root/'input/photo.png';Image.new('RGB',(40,30),'white').save(rgb)
     mask=p.root/'input/mask.png';Image.new('L',(40,30),255).save(mask)
     inferred={'images':[{'id':'view','path':'input/photo.png','sha256':sha(rgb),'resolution':[40,30],'split':'train'}],
         'segments':[{'object_id':name,'image_id':'view','status':'UNIQUE_ESTIMATED','masks':[{'path':str(mask),'sha256':sha(mask)}]}for name in members]}
     asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cups')
     for s in config['objects'].values():s['asset_manifest']=asset['manifest']
-    group=modeling_groups(c,config,inferred)[0]['cups']
+    group=modeling_groups(c,config,inferred)[0]['cup1']
     assert not group['blocked']
     assert group_asset(c,group,{})[0]['version']==asset['version']
     assert all(r['association']['status']=='AMBIGUOUS'for r in group['references'])
@@ -662,12 +672,12 @@ def test_only_codex_structured_shape_changes_review_the_affected_group(tmp_path)
     from real2sim_builder.evidence import save_scene_memo,scene_memo
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','memo changes');c=Candidate.create(p,'two')
-    config={'objects':{'cup':{'prompt':'paper cup','category':'paper_cup','asset_group':'cups'},'block':{'prompt':'red cube','category':'cube'}}}
+    config={'objects':{'cup':{'prompt':'paper cup','category':'paper_cup','asset_group':'cup'},'block':{'prompt':'red cube','category':'cube'}}}
     modeling_tasks(c,config,{})
-    source=asset_fixture(tmp_path/'asset');assets=[register_object_asset(p,source,asset_id=n)for n in('cups','block')]
+    source=asset_fixture(tmp_path/'asset');assets=[register_object_asset(p,source,asset_id=n)for n in('cup','block')]
     record_modeling_results(c,assets);attach_modeled_assets(c,config,{})
     before={str(f):sha(f)for f in(p.workspace/'object_assets').rglob('*')if f.is_file()}
-    for text,change,pending in [('位置を変えて撮り直した。','none',[]),('Change the cup geometry.','geometry',['cups'])]:
+    for text,change,pending in [('位置を変えて撮り直した。','none',[]),('Change the cup geometry.','geometry',['cup'])]:
         save_scene_memo(p,text);memo=scene_memo(p)
         reply=semantic_reply([{'id':n,'role':'manipulable_object',**spec}for n,spec in config['objects'].items()],text)
         reply['asset_groups'][0]['change_kind']=change
@@ -808,11 +818,11 @@ def test_scene_memos_are_independent_and_require_new_codex_interpretation(tmp_pa
     with pytest.raises(ValueError,match='stale'):parse_scene_analysis(reply,scene_memo(b))
     save_scene_memo(a,scene_memo(a)['text']+'\n블록 위치 이동.')
     groups,_=modeling_groups(c,config,{})
-    assert groups['cups']['memo_relation_stale']and not groups['block'].get('memo_relation_stale')
+    assert groups['cup1']['memo_relation_stale']and not groups['block'].get('memo_relation_stale')
     reply=semantic_reply([{'id':n,'role':'receptacle','prompt':'cup','asset_group':'cups'}for n in('cup1','cup2')],scene_memo(a)['text'])
     reply['asset_groups'][0].update(relation_source='user_memo',evidence_quote='두 컵은 같은 종이컵이야.')
     config['objects'].update(parse_scene_analysis(reply,scene_memo(a)))
-    assert not modeling_groups(c,config,{})[0]['cups'].get('memo_relation_stale')
+    assert not modeling_groups(c,config,{})[0]['cup1'].get('memo_relation_stale')
 
 
 def test_free_memo_expressions_are_not_classified_again_by_python():
@@ -827,3 +837,19 @@ def test_free_memo_expressions_are_not_classified_again_by_python():
         parsed=parse_scene_analysis(answer,memo)
         assert all(s['asset_group_relation']['provenance']=='user_declared'for s in parsed.values())
         assert all(s['asset_group_relation']['semantics_verified']is False for s in parsed.values())
+
+
+def test_captured_robot_is_not_reinitialized_as_an_image_object():
+    from real2sim_builder.authoring import geometry_specs
+    scene={'objects':[],'robot_model':{'path':'captured.urdf'}}
+    config={'objects':{'robot':{'role':'reference_robot','geometry':{'kind':'box','dimensions_m':[.2,.2,.2],'provenance':'estimated','evidence':['image']}}}}
+    assert geometry_specs(config,scene)==[]
+
+
+def test_saved_measurement_semantics_survive_asset_attachment():
+    from real2sim_builder.authoring import geometry_specs
+    from real2sim_builder.scene import value
+    config={'objects':{'cup':{'role':'receptacle'}},'measurements':[{'id':'cup','kind':'container','dimensions_m':[.07,.07,.065],'evidence':['caliper']}]}
+    before=geometry_specs(config,{'objects':[]})
+    scene={'objects':[{'id':'cup','role':'receptacle','dimensions':value([.07,.07,.065],'measured',['caliper']),'collision':{'type':'compound'}}]}
+    assert geometry_specs(config,scene)==before

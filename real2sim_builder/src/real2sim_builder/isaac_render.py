@@ -48,8 +48,24 @@ class IsaacRenderer:
             if not attribute:raise ValueError('Native USD attribute missing: '+path+'/'+name)
             attribute.Set(val)
         for obj in scene['objects']:
-            if any(obj[k]!=old[obj['id']][k]for k in('visual','collision','dimensions')):
+            previous=old[obj['id']]
+            if any(obj[k]!=previous[k]for k in('visual','collision')):
                 raise ValueError('Renderer geometry changed; recompile explicitly')
+            from .calibration.geometry import dimension_axes,parts
+            axes={i for group in dimension_axes(previous) for i in group}
+            if obj['dimensions']['value']!=previous['dimensions']['value'] and (not axes or
+                    any(obj['dimensions']['value'][i]!=previous['dimensions']['value'][i] for i in range(3) if i not in axes)):
+                raise ValueError('Renderer dimensions are protected or require a new Asset Version')
+            if axes:
+                for field in ('visual','collision'):
+                    for index,part in enumerate(parts(obj,field)):
+                        path=obj['id']+'/'+field+'_'+str(index);dims=part['dimensions'];kind=part['type']
+                        if kind=='box':
+                            transform=part['pose'].copy();transform[:3,:3]=transform[:3,:3]@np.diag(dims/2)
+                            set_attr(path,'xformOp:transform',Gf.Matrix4d(*transform.T.ravel().tolist()))
+                        else:
+                            set_attr(path,'radius',float(dims[0]/2))
+                            if kind=='cylinder':set_attr(path,'height',float(dims[2]))
             set_attr(obj['id'],'xformOp:transform',Gf.Matrix4d(*world_pose(scene,obj).T.ravel().tolist()))
             if not obj.get('object_asset'):
                 shader='material_'+obj['id']+'/Surface'
@@ -72,6 +88,7 @@ class IsaacRenderer:
             set_attr(name,'xformOp:transform',Gf.Matrix4d(*np.asarray(light['pose']['value']).T.ravel().tolist()))
             set_attr(name,'inputs:intensity',float(light['energy']['value']))
             set_attr(name,'inputs:color',Gf.Vec3f(*light['color']['value']))
+        self.camera_views={c['id']:c for c in scene['cameras']}
         self.frames.clear()
         # Rendering only: no physics step and no articulation command.
         for _ in range(3):self.sim.render()
@@ -83,13 +100,18 @@ class IsaacRenderer:
                 copy.deepcopy(data.info[0].get('semantic_segmentation')))
         return self.frames[camera]
 
-    def rgb(self,camera):return self._frame(camera)[0]['rgb'][...,:3]
-    def depth(self,camera):return self._frame(camera)[0]['distance_to_image_plane'][...,0]
+    def rgb(self,camera):
+        from .cameras import distort_render
+        return distort_render(self.camera_views[camera],self._frame(camera)[0]['rgb'][...,:3])
+    def depth(self,camera):
+        from .cameras import distort_render
+        return distort_render(self.camera_views[camera],self._frame(camera)[0]['distance_to_image_plane'][...,0],nearest=True)
     def mask(self,camera,obj):
         if obj not in{o['id']for o in self.scene['objects']}:raise ValueError('Unknown silhouette object')
         data,info=self._frame(camera);labels=(info or{}).get('idToLabels',{})
         ids=[int(key)for key,row in labels.items()if obj in str(row.get('class','')).split(',')]
-        return np.isin(data['semantic_segmentation'][...,0],ids)
+        from .cameras import distort_render
+        return distort_render(self.camera_views[camera],np.isin(data['semantic_segmentation'][...,0],ids),nearest=True)
     def render(self,scene):
         self.update_scene(scene);return {name:self.rgb(name)for name in self.cameras}
     def close(self):

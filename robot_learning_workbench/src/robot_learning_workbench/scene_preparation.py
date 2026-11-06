@@ -34,7 +34,7 @@ def scene_details(path):
     return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':memo['text'],'notes_saved':memo['saved'],'scene_memo':{k:v for k,v in memo.items()if k!='text'},'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
 
 
-def save_inputs(path,files,notes):
+def save_inputs(path,files,notes,*,scene_state=None):
     """No input is required. Store context first; geometry import is explicit later."""
     from real2sim_builder.evidence import add_image,add_video,copy_input,save_scene_memo
     project=Project(path);project.require_writable()
@@ -43,10 +43,22 @@ def save_inputs(path,files,notes):
     for file in files:
         if not file.is_file():raise FileNotFoundError(file)
         if file.suffix.lower() in ('.glb','.gltf'):raise ValueError('LEGACY_UNSUPPORTED: GLB/glTF 입력은 제거되었습니다. 실측 치수와 RGB 또는 OBJ/STL을 사용하세요.')
+    # A single upload declares one static layout. Later uploads remain separate
+    # unless the caller explicitly selects the same layout; Capture is never relabelled.
+    from uuid import uuid4
+    from real2sim_builder.observations import register_image
+    from real2sim_builder.scene import identifier
+    state=identifier(scene_state)if scene_state else 'photos_'+uuid4().hex[:12]
     for file in files:
         with exclusive(project):
             suffix=file.suffix.lower()
-            if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):add_image(project,file,camera='reference',context_only=True)
+            if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):
+                digest=sha(file)
+                existing=next((i for i in project.evidence['images']if i.get('sha256')==digest and i.get('scene_state_id')),None)
+                if existing:
+                    if scene_state and existing['scene_state_id']!=scene_state:raise ValueError('Existing RGB belongs to another static layout')
+                else:
+                    register_image(project,file,camera='phone_'+digest[:16],camera_type='external',scene_state=state)
             elif suffix in('.mp4','.mov','.avi'):add_video(project,file,camera='reference')
             else:
                 if suffix in('.urdf','.obj','.usd','.usda','.usdc'):

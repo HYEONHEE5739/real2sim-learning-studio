@@ -2,6 +2,15 @@
 from pathlib import Path
 
 
+def scene_task(path,modules,stage,engine):
+    from scene_contract.package import load_scene
+    from ..tasks.registry import read_module_names,load_registry
+    from ..tasks.scene import exported_task,task_recipe
+    scene=load_scene(Path(path))
+    return task_recipe(scene,exported_task(scene),load_registry(read_module_names(Path(modules))),
+                       stage,'isaac' if engine=='isaaclab' else engine)
+
+
 def scenes(workspace):
     from ..scene_preparation import list_scenes
     from real2sim_builder.project import Project

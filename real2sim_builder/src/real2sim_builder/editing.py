@@ -78,7 +78,11 @@ def apply(scene, operations, root):
                 result['assets'][key]=copy.deepcopy(row)
             for field in('visual','collision','object_asset'):obj[field]=copy.deepcopy(operation[field])
             dims=operation['dimension_record']
-            if obj['dimensions']['value']is not None and not np.allclose(obj['dimensions']['value'],dims['value'],rtol=.02,atol=1e-5):raise ValueError('Asset dimensions disagree with existing measured geometry')
+            protected=obj['dimensions']if obj['dimensions']['provenance']in PROTECTED else obj['dimensions'].get('constraints',{})
+            if protected.get('provenance')in PROTECTED:
+                for axis,known in enumerate(protected['value']):
+                    if known is not None and not np.isclose(known,dims['value'][axis],rtol=.02,atol=1e-5):
+                        raise ValueError('Asset dimensions disagree with existing measured geometry')
             if obj['dimensions']['provenance']not in PROTECTED:obj['dimensions']=copy.deepcopy(dims)
             preserve(old,obj,name)
         elif op == 'add_object':

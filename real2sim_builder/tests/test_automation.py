@@ -107,6 +107,14 @@ def test_pair_refit_uses_manifest_source_instead_of_current_and_rejects_mixed_re
     assert sha(p.root/'working/current_scene.yaml')==before
     again=automation.refit_pairs(p,candidate='refit',scene_state='layout',config={})
     assert again['source_revision']==result['source_revision']
+    seen=[]
+    def connected(project,**kwargs):
+        seen.append(kwargs);return {'status':'NEEDS_MORE_DATA','needs':[]}
+    monkeypatch.setattr(automation,'reconstruct',connected)
+    automation.refit_pairs(p,candidate='refit',scene_state='layout',config={},run_modeling=True)
+    assert seen[0]['run_modeling'] and seen[0]['refit_only']
+    assert seen[0]['config']['image_ids']==['real1']
+    assert sha(p.root/'working/current_scene.yaml')==before
     import json
     archived=p.root/'input/pair.json';write(archived,{'scene_identity':asdict(identity),'joint_mapping':{}})
     legacy=copy.deepcopy(pair);legacy['runtime_baseline'].pop('scene_identity')
@@ -155,3 +163,14 @@ def test_changed_memo_hands_off_to_codex_before_any_model_or_fitting(tmp_path,mo
     c=Candidate(p,'fresh');task=read(c.root/'modeling/tasks.json')
     assert task['scene_memo']['text']=='配置だけ変更。 Different cups now.'
     assert 'inference'not in result['stages']and not(c.root/'inference').exists()
+
+
+def test_pair_refit_disables_dimension_changes_even_when_requested(tmp_path):
+    from real2sim_builder.automation import _reconstruct
+    from test_builder_export import legacy_scene
+    p=Project.create(tmp_path,'pair geometry');p.save_scene(legacy_scene())
+    before=sha(p.root/'working/current_scene.yaml')
+    _reconstruct(p,candidate='pair',config={'fitting':{'optimize_dimensions':True}},refit_only=True)
+    frozen=read(p.root/'scratch/agent/pair/reconstruction-config.yaml')
+    assert frozen['fitting']['optimize_dimensions'] is False
+    assert sha(p.root/'working/current_scene.yaml')==before

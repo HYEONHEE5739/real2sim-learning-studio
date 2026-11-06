@@ -28,6 +28,19 @@ def test_mujoco_datagen_runner_exists_before_engine_connection():
     assert callable(datagen.run)
 
 
+def test_historical_annotation_with_different_compiled_model_is_rejected(tmp_path):
+    import yaml
+    from robot_learning_workbench.engines.mujoco import datagen
+    from robot_learning_workbench.recipe import read_recipe,prepare_recipe
+    from robot_learning_workbench.tasks.registry import load_registry
+    template=yaml.safe_load((ROOT/'docs/evidence/simulation-workflows/mujoco-first.yaml').read_text())
+    template['output']['directory']=str(tmp_path/'rejected')
+    path=tmp_path/'recipe.yaml';path.write_text(yaml.safe_dump(template))
+    plan=prepare_recipe(read_recipe(path),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
+    with pytest.raises(ValueError,match='Annotation model identity differs'):datagen.run(plan,events=lambda _:None,commands=lambda:())
+    assert not plan.output_path.exists()
+
+
 def test_mujoco_real_generation_cancel_and_invalid_ik_never_publish(tmp_path,monkeypatch):
     import yaml
     from robot_learning_workbench.engines.mujoco import datagen
@@ -38,6 +51,8 @@ def test_mujoco_real_generation_cancel_and_invalid_ik_never_publish(tmp_path,mon
     template=yaml.safe_load((ROOT/'docs/evidence/simulation-workflows/mujoco-first.yaml').read_text())
     registry=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement'))
     path=tmp_path/'r.yaml';template['output']['directory']=str(tmp_path/'cancelled');template['execution']['max_attempts']=1
+    from mujoco_fixture import current_recordings
+    template['inputs']['dataset']=str(current_recordings()[1])
     path.write_text(yaml.safe_dump(template,sort_keys=False));events=[]
     result=datagen.run(prepare_recipe(read_recipe(path),tasks=registry),events=events.append,commands=lambda:({'command_id':'stop','kind':'cancel'},) if events[-1]['payload']['tick']==2 else ())
     assert result.status=='cancelled' and not load_catalog(tmp_path/'cancelled').episodes
@@ -67,6 +82,8 @@ def test_float32_gripper_request_saturates_and_retains_physical_task_failure(tmp
     from robot_learning_workbench.tasks.registry import load_registry
     from robot_learning_workbench.data.native import history,load_catalog
     spec=yaml.safe_load((ROOT/'docs/evidence/simulation-workflows/mujoco-first.yaml').read_text());spec['output']['directory']=str(tmp_path/'rejected');spec['execution']['max_attempts']=1
+    from mujoco_fixture import current_recordings
+    spec['inputs']['dataset']=str(current_recordings()[1])
     path=tmp_path/'r.yaml';path.write_text(yaml.safe_dump(spec,sort_keys=False));plan=prepare_recipe(read_recipe(path),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
     catalog,pool,cfg,kin=datagen.load_inputs(plan);upper=float(np.nextafter(np.float32(kin.limits[5,1]),np.float32(np.inf)))
     assert 0<upper-kin.limits[5,1]<1e-7  # First float32 input above the actual pinned model bound.

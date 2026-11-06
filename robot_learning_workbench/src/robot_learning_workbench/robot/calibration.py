@@ -476,3 +476,29 @@ def review_revision(source: Path|str, output: Path|str, *, references: dict|None
     PrecisionMapper(profile);atomic_json(output,profile,exclusive=True)
     return {'path':str(output),'parent_sha256':profile['parent_sha256'],'physical_verified':False,'new_reference_input':references is not None,'new_independent_reference':False,
         'comparison':{n:{'slope_delta':joints[n]['rad_per_count']-previous['joints'][n]['rad_per_count'],'reference_angle_delta_rad':joints[n]['reference_angle_rad']-previous['joints'][n]['reference_angle_rad'],'max_fit_error_deg':joints[n]['review']['max_error_deg']}for n in joints}}
+
+
+def package_asset(package, path):
+    """Resolve a Manifest-owned robot input without loading a physics backend."""
+    root=Path(package.root).resolve();candidate=Path(path)
+    if candidate.is_absolute() or '..' in candidate.parts or '\\' in str(path):raise ValueError('Package-relative asset path required')
+    target=(root/candidate).resolve()
+    if not target.is_relative_to(root) or not target.is_file():raise ValueError('Missing/escaping package Asset: '+str(path))
+    entry=next((f for f in package.files if f.path==candidate.as_posix()),None)
+    if entry is None or hashlib.sha256(target.read_bytes()).hexdigest()!=entry.sha256:raise ValueError('Unregistered/changed package Asset: '+str(path))
+    return target
+
+
+def execution_urdf(package):
+    records=[record for record in package.calibration['records'].values() if record['kind']=='robot_residual' and record['application']['mode']=='baked']
+    if not records:
+        path=package.scene['robot'].get('asset_path')
+        if not path or Path(path).suffix.lower()!='.urdf':raise ValueError('Scene must declare a six-axis execution URDF in robot.asset_path or a baked Calibration binding')
+        return package_asset(package,path)
+    if len(records)!=1:raise ValueError('Ambiguous baked execution robot bindings')
+    record=records[0]
+    paths=[p for p in record['application']['asset_paths'] if str(p).endswith('.urdf')]
+    if len(paths)!=1:raise ValueError('One calibrated URDF Asset required')
+    path=package_asset(package,paths[0])
+    if hashlib.sha256(path.read_bytes()).hexdigest()!=record['execution_model_sha256']:raise ValueError('Execution model identity mismatch')
+    return path

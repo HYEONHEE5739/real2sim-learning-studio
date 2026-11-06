@@ -53,7 +53,7 @@ for ready in(False,True,False,True):
  p.update_progress({'session_state':'OBSERVING','capture_ready':ready,'capture_request_allowed':True,'capture_pending':False,'device_source':'hardware'})
  assert p.capture_button.isEnabled()
 p.update_progress({'session_state':'CAPTURING','capture_request_allowed':False,'capture_pending':True})
-assert not p.capture_button.isEnabled()and '처리'in p.capture_button.text()
+assert not p.capture_button.isEnabled()and '캡처 중'in p.capture_button.text()
 p.update_progress({'session_state':'DISCONNECTING','capture_request_allowed':False,'capture_pending':False})
 assert not p.capture_button.isEnabled()
 p.client.running=False;w.close()

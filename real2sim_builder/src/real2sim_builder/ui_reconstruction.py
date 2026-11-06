@@ -36,7 +36,7 @@ class ReconstructionDialog(QDialog):
         self.images=QComboBox();layout.addWidget(self.images)
         advanced=QWidget();layout=QVBoxLayout(advanced);self.tabs.addTab(advanced,'고급 · 분석 물체/자산')
         layout.addWidget(QLabel('Codex 분석 결과와 자산 선택 · 치수는 Scene Memo에 자유롭게 적으세요. 미입력 치수는 실측으로 취급하지 않습니다.'))
-        self.objects=QTableWidget(0,7);self.objects.setHorizontalHeaderLabels(['Object ID','역할','Support ID','SAM 설명','USDA 자산','물체 종류','공유 Asset Group'])
+        self.objects=QTableWidget(0,6);self.objects.setHorizontalHeaderLabels(['Object ID','역할','Support ID','SAM 설명','USDA 자산','물체 종류'])
         self.objects.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch);layout.addWidget(self.objects,1)
         add=QPushButton('물체 행 추가');add.clicked.connect(lambda:self.add_object({}));layout.addWidget(add)
         remove=QPushButton('선택 물체 삭제');remove.clicked.connect(self.remove_objects);layout.addWidget(remove)
@@ -55,8 +55,8 @@ class ReconstructionDialog(QDialog):
         register=QPushButton('기존 USDA 자산 등록');register.clicked.connect(lambda:self.guard(self.register_asset));assets.addWidget(register)
         publish=QPushButton('선택 Legacy 자산을 공용 Library에 등록');publish.clicked.connect(lambda:self.guard(self.publish_asset));assets.addWidget(publish)
         handoff=QPushButton('Codex 모델링 작업자료 열기');handoff.clicked.connect(lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project.root/'scratch/agent'/self.candidate.text()/'modeling'))));assets.addWidget(handoff)
-        codegen=QPushButton('Codex CLI · 메모 분석 / 새 물체 모델링 시작');codegen.clicked.connect(lambda:self.start_cli(['modeling-run',str(self.project.root),'--candidate',self.candidate.text().strip()]));assets.addWidget(codegen)
-        assets.addWidget(QLabel('사진 분석 후 새 물체의 작업자료를 생성합니다. Codex가 기존 Blender로 제작하면 다음 실행에서 등록 결과를 읽고 계속합니다.\n기존 자산과 배치 변경에는 재모델링하지 않습니다. Camera K·행렬 입력은 필요하지 않습니다.'));assets.addStretch()
+        codegen=QPushButton('Codex 분석·제작·정합 이어서 실행');codegen.clicked.connect(lambda:self.guard(lambda:self.run(run_modeling=True)));assets.addWidget(codegen)
+        assets.addWidget(QLabel('연속 실행은 Codex 분석·Blender 제작 후 등록 결과를 읽어 정합을 이어갑니다. 기본 분석·모델링 최대 6회, 비교 검토 최대 3회입니다.\n비교 검토가 형상 수정을 요청하면 새 자산 버전을 제작합니다. Camera K·행렬 입력은 필요하지 않습니다.'));assets.addStretch()
         review=QWidget();r=QVBoxLayout(review);self.tabs.addTab(review,'Mask·상태')
         self.mask_object=QComboBox();r.addWidget(self.mask_object)
         self.mask_index=QComboBox();r.addWidget(self.mask_index);self.mask_index.currentIndexChanged.connect(self.show_mask)
@@ -105,26 +105,16 @@ class ReconstructionDialog(QDialog):
         query=self.saved.get('objects',{}).get(name,{})
         values=[name,spec.get('role','manipulable_object'),self.saved.get('fitting',{}).get('supports',{}).get(name,''),query.get('prompt','')]
         for col,value in enumerate(values):self.objects.setItem(row,col,QTableWidgetItem(str(value)))
-        choice=QComboBox();choice.addItem('자동 판정 / 기존 유지','');choice.addItem('검토 후 새 모델링','__new_model__');self.objects.setCellWidget(row,4,choice)
+        choice=QComboBox();choice.addItem('독립 모델링 / 기존 유지','');choice.addItem('검토 후 새 모델링','__new_model__');self.objects.setCellWidget(row,4,choice)
         choice.setProperty('saved_manifest',query.get('asset_manifest')or('__new_model__'if query.get('modeling_action')=='new'else''))
         choice.setProperty('request_id',query.get('modeling_request_id',''))
-        choice.activated.connect(lambda _index,c=choice:self.group_asset_choice(c))
+        choice.activated.connect(lambda _index,c=choice:self.object_asset_choice(c))
         self.objects.setItem(row,5,QTableWidgetItem(query.get('category','')))
-        self.objects.setItem(row,6,QTableWidgetItem(query.get('asset_group','')))
         self.mask_object.addItem(name,name)
 
-    def group_asset_choice(self,choice):
-        selection=choice.currentData()
-        request='request_'+__import__('uuid').uuid4().hex if selection=='__new_model__'else''
-        def key(row):
-            name=self.objects.item(row,0).text().strip()
-            group=self.objects.item(row,6).text().strip()or name
-            return group,self.saved.get('objects',{}).get(name,{}).get('material_variant')
-        target=next(row for row in range(self.objects.rowCount())if self.objects.cellWidget(row,4)is choice)
-        for row in range(self.objects.rowCount()):
-            if key(row)==key(target):
-                combo=self.objects.cellWidget(row,4);combo.setProperty('request_id',request)
-                combo.setCurrentIndex(max(0,combo.findData(selection)))
+    def object_asset_choice(self,choice):
+        # Editing one instance never edits another, including an existing shared asset.
+        choice.setProperty('request_id','request_'+__import__('uuid').uuid4().hex if choice.currentData()=='__new_model__'else'')
 
     def configuration(self):
         if self.restore_conflicts:raise ValueError('\n'.join(self.restore_conflicts))
@@ -137,16 +127,11 @@ class ReconstructionDialog(QDialog):
             query=result['objects'].setdefault(name,{})
             query['role']=role
             query['category']=self.objects.item(row,5).text().strip()
-            group=self.objects.item(row,6).text().strip()
-            if group and group!=query.get('asset_group'):
-                query['asset_group']=group;query['asset_group_relation']={'provenance':'user_declared','status':'CONFIRMED','evidence':['Scene Prepare group selection']}
-            elif not group:
-                query.pop('asset_group',None);query.pop('asset_group_relation',None)
             asset=self.objects.cellWidget(row,4).currentData()
             if asset=='__new_model__':
                 query['modeling_action']='new';query.pop('asset_manifest',None)
                 choice=self.objects.cellWidget(row,4)
-                key=(group or name,query.get('material_variant'))
+                key=name
                 request=requests.setdefault(key,choice.property('request_id')or('request_'+__import__('uuid').uuid4().hex))
                 choice.setProperty('request_id',request);query['modeling_request_id']=request
             elif asset:
@@ -218,12 +203,13 @@ class ReconstructionDialog(QDialog):
         if paths:self.start_cli(['register-rgb',str(self.project.root),*paths,'--camera',self.camera.text().strip(),'--type',self.camera_type.currentText(),
                                  '--scene-state',self.state.currentText().strip(),'--split',self.split.currentText()])
 
-    def run(self):
+    def run(self,*,run_modeling=False):
         if self.temporary:self.temporary.cleanup()
         self.temporary=tempfile.TemporaryDirectory(prefix='real2sim-reconstruct-')
         config=Path(self.temporary.name)/'configuration.yaml';self.saved=self.configuration();write(config,self.saved)
         args=['refit-pairs'if self.refit else'reconstruct',str(self.project.root),'--candidate',self.candidate.text().strip(),'--config',str(config)]
         if self.refit:args+=['--scene-state',self.state.currentText().strip()]
+        if run_modeling:args+=['--run-modeling']
         self.start_cli(args)
         self.tabs.setCurrentIndex(3);self.summary.setPlainText('자동 재구성 실행 중…')
 

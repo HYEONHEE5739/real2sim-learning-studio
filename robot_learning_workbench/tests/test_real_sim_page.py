@@ -1,7 +1,7 @@
 from test_ui_restoration import qt
 
 
-def test_real_sim_has_scene_engine_and_observe_capture_stop_without_authoring_or_teleop(tmp_path):
+def test_real_sim_has_scene_engine_and_combined_teleop_capture_stop_without_authoring(tmp_path):
     qt('''
 from pathlib import Path
 import sys
@@ -10,7 +10,7 @@ from robot_learning_workbench.ui.app import Window
 app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace');w.tabs.setCurrentIndex(1);w.show();app.processEvents();p=w.sessions['real_sim']
 assert set(p.previews)=={'side','wrist','sim_side','sim_wrist'}
 assert p.engine.count()==2 and p.scene_combo.isVisible()
-assert p.connect_button.text()=='Real/Sim 연결'and p.capture_button.text()=='Capture'and p.stop_button.text()=='중단'
+assert p.connect_button.text()=='Real/Sim 연결 · Teleop'and p.capture_button.text()=='Capture'and p.stop_button.text()=='중단'
 assert not hasattr(p,'candidate_combo')and not hasattr(p,'materials')and not hasattr(p,'settings')and not hasattr(p,'start_teleop_button')
 texts=[b.text()for b in p.findChildren(QPushButton)]
 assert not any('Teleoperation'in text or 'Input Data'in text or 'Scene 자료'in text for text in texts)

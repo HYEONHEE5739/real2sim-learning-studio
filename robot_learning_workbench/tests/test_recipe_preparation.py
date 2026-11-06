@@ -175,15 +175,16 @@ FUNCTIONS={"extra.metrics":FunctionSpec(kind="metrics",stages={"source"},engines
     with pytest.raises(r.RecipeError):r.verify_prepared_inputs(plan)
 
 
-def test_excluded_minivla_policy_is_rejected_before_official_loader(tmp_path):
-    data=tmp_path/'official/meta';data.mkdir(parents=True);(data/'info.json').write_text('{}');(tmp_path/'train.json').write_text('{"policy":{"type":"minivla"}}')
-    path=tmp_path/'train.yaml';path.write_text('''schema_version: 1
-stage: train
-inputs: {dataset: official, training_config: train.json}
-execution: {mode: scratch}
-output: {directory: model}
-''')
-    with pytest.raises(r.RecipeError):r.prepare_recipe(r.read_recipe(path),scene=None,tasks=None,inputs={})
+def test_unregistered_policy_is_rejected_by_official_training_before_output(tmp_path):
+    from test_official_training import config
+    from robot_learning_workbench.learning.train import training_command
+    cfg=config(tmp_path/'model');cfg['policy']['type']='unknown_fixture_policy'
+    (tmp_path/'train.json').write_text(json.dumps(cfg))
+    path=tmp_path/'train.yaml';path.write_text(__import__('yaml').safe_dump(dict(schema_version=1,stage='train',
+        inputs={'dataset':cfg['dataset']['root'],'training_config':'train.json'},execution={'mode':'scratch'},output={'directory':'model'})))
+    plan=r.prepare_recipe(r.read_recipe(path))
+    with pytest.raises(ValueError)as error:training_command(plan)
+    assert error.value.code=='POLICY_UNSUPPORTED' and not (tmp_path/'model').exists()
 
 
 def test_official_train_config_cannot_override_saved_output(tmp_path):

@@ -46,6 +46,8 @@ class PipelineSettings(QWidget):
         hint=QLabel('실행 값·출력 위치는 YAML에서 수정합니다. Script 저장 위치: scripts/'+stage);hint.setWordWrap(True);box.addWidget(hint)
         self.editor.changed.connect(self.edited);self.engine.currentTextChanged.connect(self.engine_changed)
         self.query=BackendJob(python,self);self.query.finished.connect(self.received)
+        self.task_query=BackendJob(python,self);self.task_query.finished.connect(self.task_received)
+        self.task_version=None;self.task_pending=False;self.task_modules=getattr(parent,'modules',None)
 
     def edited(self):
         self.version+=1;self.refresh_labels();self.changed.emit()
@@ -105,7 +107,7 @@ class PipelineSettings(QWidget):
         values={'scene':row['scene']}
         config=row.get('engine_config',{}).get(key)
         if config:values['engine_config']=config
-        try:self.set_inputs(values)
+        try:self.set_inputs(values);self.request_task()
         except Exception as error:self.error.emit('YAML을 먼저 수정하세요: '+str(error))
 
     def choose_scene(self):
@@ -118,7 +120,7 @@ class PipelineSettings(QWidget):
         if matches:
             index=self.scene.findData(matches[-1]);self.scene.setCurrentIndex(index);self.select_scene();return
         if (root/'scene.json').is_file():
-            try:self.set_inputs({'scene':str(root/'scene.json')})
+            try:self.set_inputs({'scene':str(root/'scene.json')});self.request_task()
             except Exception as error:self.error.emit('YAML을 먼저 수정하세요: '+str(error))
             return
         self.error.emit('등록된 실행 Scene 또는 scene.json이 있는 Export 폴더를 선택하세요.')
@@ -153,6 +155,42 @@ class PipelineSettings(QWidget):
             self.scene.blockSignals(False);self.refresh_labels();return
         if self.query_version!=self.version:return
         self.update(lambda doc:(doc.__setitem__('engine',data['engine']),doc.setdefault('inputs',{}).update(data['inputs'])))
+        self.request_task()
+
+    def request_task(self):
+        if self.stage not in ('annotation','datagen','simulation_evaluation'):return
+        if not self.task_modules:return
+        if self.task_query.process.state()!=QProcess.ProcessState.NotRunning:
+            self.task_pending=True;return
+        try:data=self.editor.data();path=data.get('inputs',{}).get('scene')
+        except (ValueError,yaml.YAMLError):return
+        if not path:return
+        self.task_pending=False;self.task_version=self.version
+        self.task_query.start('pipeline_task',path=str((self.base()/path).resolve()),
+            modules=self.task_modules,stage=self.stage,engine=data['engine'])
+
+    def task_received(self,response):
+        if self.task_pending:
+            self.task_pending=False;self.request_task();return
+        if self.task_version!=self.version:return
+        if not response.get('ok'):
+            self.error.emit(response.get('error',{}).get('message','Scene 작업 설정 조회 실패'));return
+        result=response['result']
+        if result['status']=='NO_TASK':return
+        if result['status']!='CONFIGURED':
+            self.error.emit('Scene 작업에 추가 구현이 필요합니다: '+'; '.join(result['needs']));return
+        data=self.editor.data();role='success' if self.stage=='simulation_evaluation' else 'acceptance'
+        current=data.get('functions',{});params=current.get(role,{}).get('params',{})
+        default_name={'annotation':'pick_place.annotation','datagen':'pick_place.v8_datagen',
+                      'simulation_evaluation':'pick_place.v8_evaluation'}[self.stage]
+        blank=not current or (set(current)=={role} and current[role].get('function')==default_name
+                              and params=={'object':'','target':''})
+        if not blank:return
+        def edit(doc):
+            doc['functions']=result['functions']
+            if self.stage=='simulation_evaluation' and not doc.setdefault('execution',{}).get('task_instruction'):
+                doc['execution']['task_instruction']=result['instruction']
+        self.update(edit)
 
     def choose_script(self):
         self.directory.mkdir(parents=True,exist_ok=True)

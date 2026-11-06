@@ -14,11 +14,11 @@ def main(argv=None):
     p=sub.add_parser('clone');p.add_argument('source');p.add_argument('destination')
     sub.add_parser('capabilities')
     p=sub.add_parser('register-rgb');p.add_argument('project');p.add_argument('paths',nargs='+');p.add_argument('--camera',required=True);p.add_argument('--type',choices=['side','wrist','external'],required=True);p.add_argument('--scene-state',required=True);p.add_argument('--split',choices=['train','validation'],default='train');p.add_argument('--joints')
-    p=sub.add_parser('reconstruct');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--config');p.add_argument('--scene-state')
+    p=sub.add_parser('reconstruct');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--config');p.add_argument('--scene-state');p.add_argument('--run-modeling',action='store_true');p.add_argument('--max-modeling-calls',type=int,default=6);p.add_argument('--max-review-calls',type=int,default=3)
     p=sub.add_parser('object-asset');p.add_argument('project');p.add_argument('action',choices=['list','register','publish','instantiate']);p.add_argument('--id');p.add_argument('--path');p.add_argument('--dimensions');p.add_argument('--blend');p.add_argument('--manifest');p.add_argument('--candidate');p.add_argument('--object');p.add_argument('--pose');p.add_argument('--role',default='manipulable_object')
     p=sub.add_parser('blender-object-author');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--script',required=True);p.add_argument('--objects',nargs='+',required=True)
     p=sub.add_parser('modeling-run');p.add_argument('project');p.add_argument('--candidate',required=True)
-    p=sub.add_parser('refit-pairs');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--dataset');p.add_argument('--scene-state',required=True);p.add_argument('--config');p.add_argument('--include-flagged-reason')
+    p=sub.add_parser('refit-pairs');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--dataset');p.add_argument('--scene-state',required=True);p.add_argument('--config');p.add_argument('--include-flagged-reason');p.add_argument('--run-modeling',action='store_true');p.add_argument('--max-modeling-calls',type=int,default=6);p.add_argument('--max-review-calls',type=int,default=3)
     p=sub.add_parser('register-views');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--anchors');p.add_argument('--scene-state')
     p=sub.add_parser('physics-check');p.add_argument('project');p.add_argument('--candidate',required=True);p.add_argument('--steps',type=int,default=500);p.add_argument('--engine',choices=['mujoco','isaac'],default='mujoco');p.add_argument('--native-worker',action='store_true',help=argparse.SUPPRESS)
     for name in ('diagnose','coverage','analyze-objects'):
@@ -93,8 +93,9 @@ def main(argv=None):
     if args.command=='refit-pairs':
         from .automation import refit_pairs
         result=refit_pairs(project,candidate=args.candidate,dataset=args.dataset,scene_state=args.scene_state,
-            config=read(args.config)if args.config else None,include_flagged_reason=args.include_flagged_reason)
-        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
+            config=read(args.config)if args.config else None,include_flagged_reason=args.include_flagged_reason,run_modeling=args.run_modeling,
+            max_modeling_calls=args.max_modeling_calls,max_review_calls=args.max_review_calls)
+        print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED')else 2
     if args.command=='register-rgb':
         from .observations import register_sources
         rows=register_sources(project,args.paths,camera=args.camera,camera_type=args.type,scene_state=args.scene_state,split=args.split,
@@ -104,13 +105,13 @@ def main(argv=None):
         from .automation import reconstruct
         from .authoring import save_configuration
         config=save_configuration(project,read(args.config))if args.config else None
-        result=reconstruct(project,candidate=args.candidate,config=config,scene_state=args.scene_state)
-        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
+        result=reconstruct(project,candidate=args.candidate,config=config,scene_state=args.scene_state,run_modeling=args.run_modeling,max_modeling_calls=args.max_modeling_calls,max_review_calls=args.max_review_calls)
+        print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED')else 2
     if args.command=='register-views':
         from .candidate import Candidate
         from .observations import register_views
         result=register_views(Candidate(project,args.candidate),read(args.anchors)if args.anchors else None,scene_state=args.scene_state)
-        print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2
+        print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED')else 2
     if args.command=='physics-check':
         from .candidate import Candidate,exclusive
         from .validation import physics_probe

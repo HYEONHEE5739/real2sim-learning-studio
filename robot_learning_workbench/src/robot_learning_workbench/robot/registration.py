@@ -25,9 +25,8 @@ def mapping_coordinates_equal(a,b):
     """Connection port is local metadata; all measured coordinate/motor parameters stay exact."""
     from .calibration import mapper_from_metadata
     mapper_from_metadata(a);mapper_from_metadata(b)
-    a=copy.deepcopy(a);b=copy.deepcopy(b)
-    for m in(a,b):m.pop('sha256');m['profile']['identity'].pop('port',None)
-    return a==b
+    from real2sim_builder.capture import mapping_coordinates_equal as coordinates_equal
+    return coordinates_equal(a,b)
 
 
 def save_configuration(workspace,name,recipe):

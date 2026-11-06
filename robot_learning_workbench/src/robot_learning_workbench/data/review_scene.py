@@ -60,7 +60,7 @@ class RobotVisual:
 class ReviewScene:
     def __init__(self,catalog,workspace):
         from scene_contract.package import load_scene,SceneIdentity
-        from ..engines.mujoco.model import _execution_urdf
+        from ..robot.calibration import execution_urdf
         from .native import file_sha256
         from real2sim_builder.files import read
         identity=catalog.execution.get('scene_identity');self.package=None
@@ -73,7 +73,7 @@ class ReviewScene:
                     self.package=load_scene(project.parent/record['path']/'scene.json',expected=SceneIdentity(**identity));break
             if self.package is not None:break
         if self.package is None:raise ValueError('기록된 Scene Revision을 찾지 못했습니다. 영상/기록 수치는 그대로 검토할 수 있습니다.')
-        path=_execution_urdf(self.package)
+        path=execution_urdf(self.package)
         if file_sha256(path)!=catalog.execution.get('urdf_sha256'):raise ValueError('기록된 실행 URDF와 Preview 모델이 다릅니다.')
         self.robot=RobotVisual(path);self.joints=catalog.execution['recording']['joint_order'];self.objects={}
         for name,obj in self.package.scene['objects'].items():

@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest,yaml
 from robot_learning_workbench.recipe import read_recipe,prepare_recipe,verify_prepared_inputs
 ROOT=Path(__file__).resolve().parents[2]
-MODEL=ROOT/'docs/evidence/architecture-completion/final-workspace/policy/act-resume/checkpoints/000004'
+from checkpoint_fixture import official_checkpoint
+MODEL=official_checkpoint(ROOT/'docs/evidence/architecture-completion/final-workspace/policy/act-resume/checkpoints/000004')
 VAL=ROOT/'docs/evidence/architecture-completion/final-workspace/dataset/val'
 
 
@@ -90,7 +91,7 @@ def test_owned_metadata_and_processor_tampering_are_pinned(tmp_path,leaf):
 def test_external_model_inside_checkpoint_does_not_select_parent_policy(tmp_path):
     from robot_learning_workbench.learning.policy import load_policy
     root=tmp_path/'owned';shutil.copytree(MODEL,root,copy_function=os.link)
-    source=ROOT/'docs/evidence/architecture-completion/phase3-learning/diffusion-resume/checkpoints/000002/pretrained_model'
+    source=official_checkpoint(ROOT/'docs/evidence/architecture-completion/phase3-learning/diffusion-resume/checkpoints/000002')/'pretrained_model'
     external=root/'downloaded_diffusion';external.mkdir()
     for p in source.iterdir():
         if p.is_file():(external/p.name).symlink_to(p)

@@ -18,8 +18,15 @@ write(p.root/'input/reconstruction.yaml',{'scene_state_id':'layout','anchors':{'
  'fitting':{'max_evaluations':20},'da3':{'process_res':280}})
 d=ReconstructionDialog(p.root,sys.executable)
 config=d.configuration()
-assert d.objects.columnCount()==7
-assert all('mm'not in d.objects.horizontalHeaderItem(i).text()for i in range(7))
+commands=[]
+d.start_cli=lambda args:commands.append(args)
+d.run(run_modeling=True)
+assert '--run-modeling' in commands[-1] and commands[-1][0]=='reconstruct'
+d.refit=True;d.run(run_modeling=True)
+assert '--run-modeling' in commands[-1] and commands[-1][0]=='refit-pairs'
+d.refit=False
+assert d.objects.columnCount()==6
+assert all('mm'not in d.objects.horizontalHeaderItem(i).text()for i in range(6))
 assert 'Scene Memo'in d.tabs.tabText(0)
 assert config['anchors']=={'photo':{'evidence':['board']}}
 assert config['objects']['cube']['images']['photo']['box_xyxy']==[1,2,30,40]
@@ -30,11 +37,14 @@ assert d.configuration()['objects']['cube']['modeling_action']=='new'
 request=d.configuration()['objects']['cube']['modeling_request_id']
 assert d.configuration()['objects']['cube']['modeling_request_id']==request
 d.add_object({'id':'cube2','kind':'box','role':'manipulable_object'})
-d.objects.item(1,6).setText('blocks')
-d.group_asset_choice(d.objects.cellWidget(0,4))
-config=d.configuration();assert config['objects']['cube']['modeling_request_id']==config['objects']['cube2']['modeling_request_id']
-d.objects.cellWidget(1,4).setCurrentIndex(0);d.group_asset_choice(d.objects.cellWidget(1,4))
-assert all('modeling_action'not in q for q in d.configuration()['objects'].values())
+config=d.configuration()
+assert config['objects']['cube']['modeling_request_id']==request
+assert 'modeling_action'not in config['objects']['cube2']
+d.objects.cellWidget(1,4).setCurrentIndex(d.objects.cellWidget(1,4).findData('__new_model__'))
+assert d.configuration()['objects']['cube2']['modeling_request_id']!=request
+d.objects.cellWidget(1,4).setCurrentIndex(0)
+assert d.configuration()['objects']['cube']['modeling_request_id']==request
+assert 'modeling_action'not in d.configuration()['objects']['cube2']
 assert config['measurements'][0]['dimensions_m']==[.03]*3
 assert config['da3']['process_res']==280 and d.objects.rowCount()==2
 assert not any(name.split('.')[0]in('mujoco','torch','pxr','isaaclab')for name in sys.modules)

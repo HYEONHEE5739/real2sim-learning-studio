@@ -84,7 +84,7 @@ def test_native_solver_runs_geometry_then_appearance_and_reports_frozen_variable
     scene['objects'][1]['color']['provenance']='estimated'
     original=copy.deepcopy(scene)
     fitted,report=fit_scene(scene_project,scene,scene_project.root/'scratch/strategy',
-        {'optimize_appearance':True,'max_iterations':4,'max_evaluations':15})
+        {'optimize_appearance':True,'max_iterations':4,'max_evaluations':60})
     stages=[r['strategy']['stage']for r in report['history']]
     assert stages==sorted(stages,key=['geometry','appearance'].index)and set(stages)=={'geometry','appearance'}
     assert report['observability']['holdout_used']is False

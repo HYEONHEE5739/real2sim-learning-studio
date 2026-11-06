@@ -46,3 +46,68 @@ def camera_pixels(camera,image):
         if not np.isclose(iw/rw,ih/rh,rtol=.005):raise ValueError('Unknown crop or lens orientation: supply original upright RGB or its crop transform')
         matrix=np.diag([iw/rw,ih/rh,1.])
     return matrix@affines[quarter],rotations[quarter]
+
+
+def optical_rays(camera,pixels):
+    """Observed OpenCV pinhole pixels -> undistorted optical rays, z=1.
+
+    EXIF rotates optical axes, not the original lens coefficients. The runtime
+    observation carries that rotation while the stored Calibration stays intact.
+    https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
+    """
+    import cv2
+    pixels=np.asarray(pixels,float).reshape(-1,2)
+    if not np.isfinite(pixels).all():raise ValueError('Finite pixel coordinates required')
+    k=np.asarray(camera['K']['value'],float);d=np.asarray(camera['distortion']['value'],float)
+    rays=np.linalg.solve(k,np.c_[pixels,np.ones(len(pixels))].T).T
+    if not d.any():return rays
+    rotation=np.asarray(camera.get('distortion_rotation',np.eye(3)),float)
+    sensor=rays@rotation;sensor=sensor[:,:2]/sensor[:,2:]
+    clean=cv2.undistortPointsIter(sensor.reshape(-1,1,2),np.eye(3),d,None,None,
+        (cv2.TERM_CRITERIA_COUNT|cv2.TERM_CRITERIA_EPS,40,1e-12)).reshape(-1,2)
+    result=np.c_[clean,np.ones(len(clean))]@rotation.T
+    if not np.isfinite(result).all():raise ValueError('Lens inversion produced invalid rays')
+    return result/result[:,2:]
+
+
+def project_pixels(camera,points):
+    """Optical points -> original observed pixels, retaining lens distortion."""
+    import cv2
+    points=np.asarray(points,float).reshape(-1,3);k=np.asarray(camera['K']['value'],float)
+    d=np.asarray(camera['distortion']['value'],float)
+    if not d.any():pixels=points@k.T;return pixels[:,:2]/pixels[:,2:]
+    rotation=np.asarray(camera.get('distortion_rotation',np.eye(3)),float)
+    pixels,_=cv2.projectPoints(points@rotation,np.zeros(3),np.zeros(3),np.eye(3),d)
+    projected=np.c_[pixels.reshape(-1,2),np.ones(len(points))]@rotation.T@k.T
+    return projected[:,:2]/projected[:,2:]
+
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=8)
+def _distortion_map(width,height,k,distortion,rotation):
+    camera={'K':{'value':np.asarray(k).reshape(3,3)},'distortion':{'value':distortion},
+            'distortion_rotation':np.asarray(rotation).reshape(3,3)}
+    y,x=np.indices((height,width));rays=optical_rays(camera,np.c_[x.ravel(),y.ravel()])
+    pinhole=rays@np.asarray(k).reshape(3,3).T
+    pixels=(pinhole[:,:2]/pinhole[:,2:]).reshape(height,width,2).astype(np.float32)
+    return pixels[:,:,0],pixels[:,:,1]
+
+
+def distort_render(camera,pixels,*,nearest=False):
+    """Resample a pinhole render onto the observed lens grid; no second render.
+
+    Labels and optical-Z depth use nearest neighbours to avoid mixing surfaces.
+    Outside the native field of view is zero/invalid, never extrapolated geometry.
+    """
+    import cv2
+    d=camera['distortion']['value']
+    if not any(d):return pixels
+    w,h=camera['resolution']
+    maps=_distortion_map(w,h,tuple(np.asarray(camera['K']['value']).ravel()),tuple(d),
+        tuple(np.asarray(camera.get('distortion_rotation',np.eye(3))).ravel()))
+    boolean=pixels.dtype==bool
+    result=cv2.remap(pixels.astype(np.uint8)if boolean else pixels,*maps,
+        interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT,borderValue=0)
+    return result.astype(bool)if boolean else result

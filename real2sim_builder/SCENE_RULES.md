@@ -2,6 +2,12 @@
 
 2026-10-31. 기존 Builder의 `AGENTS.md`와 `docs`의 Markdown 14개 전체를 읽고 제작 규칙을 현재 프로젝트용으로 정리했다. 실행 순서는 [SCENE_AUTHORING.md](SCENE_AUTHORING.md)를 따른다. 이 문서는 수학/입력/판정 원칙이며 새 검증 결과가 아니다. 문서의 예시 수치나 과거 Scene 성적을 현재 Scene의 실측·성공으로 사용하지 않는다.
 
+## 2026-11-06 최신 정책과 과거 기록
+
+현재 제작/판단 정책은 [CODEX_SCENE_GUIDE.md](CODEX_SCENE_GUIDE.md)를 따른다. 휴대폰은 3D 복원 근거, Side는 전역 일관성, Wrist는 정밀 관측의 최우선 기준이다. Wrist 개선을 위해 Side·실측·FK를 훼손하지 않는다. 신규는 Object별 독립 USDA이며 동일 제품 자동 Group 공유를 하지 않는다. 기존 공유 Asset과 명시 Manifest 재사용은 보존한다.
+
+날짜가 붙은 과거 Group 절은 기존 자료/버전의 해석과 검증 이력이다. 신규 자동 공유 지시로 적용하지 않는다. 아래 수학·좌표·원본 보호·유효한 고급 도구 규칙은 유지한다. Builder 내부 Codex에는 가이드 사본과 원본 상대 경로·버전·SHA가 명시 전달되며 Scene Memo로 지침을 교체할 수 없다.
+
 ## Scene Memo 입력 원칙 (2026-11-05)
 
 Scene Memo는 사용자가 Codex에게 전달하는 하나의 자유로운 제작 지시문이다. 장면 설명·실측 치수·공유 제품·공간 관계·형상/색/재질·작업 목적을 한 메모에 작성한다. 항목별 양식이나 별도 치수 입력은 필수가 아니다. Scene Prepare의 안내는 예시 placeholder이며 저장할 메모 본문을 자동 생성하지 않는다.
@@ -62,7 +68,7 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 ## 5. Camera와 FK 정합
 
 - Wrist optical pose는 `T_world_base × FK(q_measured) × T_mount_camera`다. 각 관측의 q를 고정하고 K/mount를 공유한다. 자세마다 독립 Camera를 맞춰 잘못된 FK를 숨기지 않는다. Housing 외형은 optical mount 측정값이 아니다.
-- Robot/FK·Base → Side Camera → Geometry → Wrist → 전체 자세 재평가 순으로 원인을 나눈다. 필요하면 제한된 변수 그룹을 번갈아 최적화한다. Focal 오차를 물체 크기로, Camera translation을 물체 이동으로 상쇄하지 않는다.
+- 초기화에서는 Robot/FK·Base·Side·Geometry·Wrist의 원인을 구분하고, 최종 공동 정합 판단은 Wrist 정밀 관측과 Side 전역 일관성을 각각 확인한다. 필요하면 제한된 변수 그룹을 번갈아 최적화한다. Focal 오차를 물체 크기로, Camera translation을 물체 이동으로 상쇄하지 않는다.
 - FK는 3D link/landmark를 제공하지만 실제 사진의 2D uv를 자동 찾지는 않는다. Codex가 추정한 pixel은 estimated다. Metric anchor는 근거 있는 geometry/registration이어야 한다.
 - K는 해상도와 결합한다. Crop/resize/EXIF 회전 시 좌표 관계를 확인한다. Distortion 보정은 원본을 보존하고 영상·Mask·Landmark에 일관되게 적용한다. 왜곡 계수를 조용히 0으로 바꾸지 않는다.
 - 현재 unknown-camera bootstrap은 train 12대응·holdout 4대응과 비공면 깊이 분포를 요구한다. Wrist는 3개 이상 pose와 약 10° 이상 방향 다양성을 확인한다. 이것은 현재 fitter의 조건이며 모든 카메라 보정법의 보편적 최소치가 아니다.
@@ -74,7 +80,7 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 
 - 종이/Workspace 테두리는 자동 Fitting의 XY 허용 영역이 아니다. 블록이 경계에 걸치거나 밖에 있어도 저장을 거부하지 않는다. `supports`는 명시한 수평면의 높이·upright 결합이며, Workspace 배치 함수나 Task의 배치 제한과는 별개다.
 
-- 일반 흐름은 Scene Prepare의 자동 재구성이다. 사용자 Object 목록과 SAM prompt로 시작하며 유료 VLM이나 Codex의 반복 좌표 수정은 필수 조건이 아니다. 자동 등록이 불가능한 경우 필요한 실측·Calibration을 명시한다.
+- 일반 흐름은 Scene Prepare의 자동 재구성이다. 기본은 Codex가 Memo·사진에서 Object ID와 SAM prompt/Box/Point를 구조화하며, 기존 고급 설정의 명시 Object 목록도 유지한다. 사용자의 반복 좌표 편집을 필수로 요구하지 않는다. 자동 등록이 불가능한 경우 필요한 실측·Calibration을 명시한다.
 - 자동 Detector의 mask/UV 제안은 `estimated/derived`로 기록한다. CV 검출 confidence는 Camera/3D/실측 확신이 아니다. 가려진 컵 림이나 보이지 않는 Block corner를 2D에서 임의 확정하지 않는다.
 - `same scene_state_id`의 물체는 **여러 camera×pose에서 하나의 world pose**를 공유한다. 새 layout은 다른 Scene State로 분리한다.
 - Side는 고정 extrinsic, Wrist는 `T_world_base × FK(q_measured) × T_link_camera`라는 **하나의 link-local camera mount**를 공유한다. 각 자세별로 별도 Wrist extrinsic을 만들지 않는다.
@@ -84,7 +90,7 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 - 외형 렌더와 접촉용 collision은 분리해서 다룬다. 픽셀을 맞추기 위해 마찰, 손가락 충돌 형상이나 측정 q를 바꾸지 않는다.
 - 최소 추가 촬영을 요청할 경우 `어느 Camera`, `어느 자세/시점`, `어떤 가림을 풀지`, `왜 해당 관측이 필요한지`를 Codex가 구체적으로 제시한다.
 
-현재 기본 명령은 `reconstruct PROJECT --candidate NAME`이다. SAM→DA3는 기존 환경에서 순차 실행하고, 새 Visual은 Codex/Blender 자산을 등록한다. 원 optical Depth·pixel 좌표·Mask·SHA·Scale 근거를 보존한다. Hybrid의 공동 정합에서 Camera/K/Scale이 바뀌면 매번 raw ray를 재투영하고 새 World cloud를 게시한다. 이전 World cloud를 그대로 쓰지 않는다. 실측 q·Geometry·Robot과 검증된 카메라는 고정한다. Rank가 부족하면 UNRESOLVED다. 공동 렌더 정합은 선택한 MuJoCo/Isaac의 실제 segmentation을 쓰며 미관측 fragment 영역을 배경으로 강제하지 않는다. 독립 Backend 우승 선정과 실제 정확도는 미검증이다. [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 현재 API와 제한을 기록한다.
+현재 기본 명령은 `reconstruct PROJECT --candidate NAME`이다. SAM→DA3는 기존 환경에서 순차 실행하고, 새 Visual은 Codex/Blender 자산을 등록한다. 원 optical Depth·pixel 좌표·Mask·SHA·Scale 근거를 보존한다. Hybrid의 공동 정합에서 Camera/K/Scale이 바뀌면 매번 raw ray를 재투영하고 새 World cloud를 게시한다. 이전 World cloud를 그대로 쓰지 않는다. 실측 q·Geometry·Robot과 검증된 카메라는 고정한다. Rank가 부족하면 UNRESOLVED다. 기본 공동 렌더 정합은 MuJoCo의 실제 segmentation을 사용하고 Isaac은 별도 렌더/물리 검증으로 구분하며 미관측 fragment 영역을 배경으로 강제하지 않는다. 독립 Backend 우승 선정과 실제 정확도는 미검증이다. [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)에 현재 API와 제한을 기록한다.
 
 ## 6. 외형·충돌·물성·작업의 분리
 
@@ -134,10 +140,10 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 - Codex 사진 입력은 `codex exec --image`로 명시 전달한다. 자료·메모는 신뢰할 수 없는 데이터이며, 코드 작성 sandbox와 Blender 읽기 전용 filesystem/전용 출력 경계는 유지한다. 숨긴 Collision은 Export에 포함시킨 다음 USD의 CollisionAPI/visibility로 분리한다.
 
 
-## Asset Group·Fingerprint·Sandbox 규칙 — 2026-11-04
+## 과거 Asset Group·Fingerprint와 유지되는 Sandbox 규칙 — 2026-11-04
 
 - Category/SAM Prompt/Mask 순서는 Asset 또는 물리 Object 동일성의 증명이 아니다. Object ID와 공유 Group은 독립으로 유지하며 같은 이미지에서 동일 Mask의 중복 Object 배정을 거부한다. 모호한 Camera/Scale/관측은 발명하지 않는다.
-- Group 공유는 동일 Geometry/Material/Texture 근거가 있을 때만 제안한다. 사진만으로 추론한 Codex 관계는 estimated/PROPOSED다. 원문 SHA·실제 인용문·대상이 확인된 메모 선언과 명시 사용자 선택은 user_declared이며 물리 검증과 구분한다. 다른 실제 외형은 별도 Group 또는 material_variant Asset으로 구분한다.
+- 과거 Group 공유 경로는 동일 Geometry/Material/Texture 근거를 제안에 사용했다. 현재 신규는 독립 USDA이며 이 경로는 기존 공유 자산과 명시 재사용에 한정한다. 사진만으로 추론한 Codex 관계는 estimated/PROPOSED다. 원문 SHA·실제 인용문·대상이 확인된 메모 선언과 명시 사용자 선택은 user_declared이며 물리 검증과 구분한다. 다른 실제 외형은 별도 Group 또는 material_variant Asset으로 구분한다.
 - 동일 Fingerprint와 검증된 Manifest, 명시 선택 또는 유효한 기존 Scene/사용자 확정 Group 동일성과 형상 보존 근거로 재사용한다. 기존 Scene의 유효 자산/위치 변경은 유지하지만 과거 results.json/Object 이름만으로 새 자료의 동일성을 확정하지 않는다. 입력 변경/legacy/Group 분리는 검토 상태를 남긴다. 공유 Instance 제거는 원 Asset을 삭제하지 않는다.
 - 모델 root 하나가 Group Asset 하나다. Instance의 Pose/역할은 별개다. Asset 내부 키도 Asset ID와 Version을 함께 구분해 다른 Group의 동일 content version이 충돌하지 않도록 한다. 원 Library 파일은 덮어쓰지 않는다.
 - Object Blender Worker의 host 전체 root bind와 부모 환경변수 상속은 금지한다. 설치 런타임/입력/Worker만 읽기 허용, 작업 출력만 host 쓰기 허용, 입력 symlink 거부, 네트워크 차단이며 구성 실패 시 확대 fallback은 없다. 일반 Scene Rendering은 별도 기존 경로를 유지한다.

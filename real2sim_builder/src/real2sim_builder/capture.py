@@ -55,6 +55,19 @@ def register_unbound(project, destination, manifest, samples):
     write(project.root/'working/capture_import.json',report);return report
 
 
+def mapping_coordinates_equal(a,b):
+    """Portable coordinate identity; a local connection port is not calibration."""
+    import copy,hashlib,json
+    normalized=[]
+    for mapping in (a,b):
+        if not isinstance(mapping,dict):return False
+        data=copy.deepcopy(mapping);digest=data.pop('sha256',None)
+        if hashlib.sha256(json.dumps(data,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()!=digest:return False
+        data.get('profile',{}).get('identity',{}).pop('port',None)
+        normalized.append(data)
+    return normalized[0]==normalized[1]
+
+
 def mapping_contract(manifest):
     """Validate portable mapping evidence without importing SO-101 or motor SDKs."""
     import hashlib, json
@@ -313,6 +326,7 @@ def observation_scene(scene, image, root, complete=True):
             camera=next(c for c in result['cameras']if c['id']==image['camera'])
             camera['K']=value((np.asarray(registration['pixel_from_camera'])@np.asarray(camera['K']['value'])@np.asarray(registration.get('optical_from_camera',np.eye(3))).T).tolist(),camera['K']['provenance'],camera['K'].get('evidence',[]))
             camera['resolution']=image['resolution']
+            camera['distortion_rotation']=registration.get('optical_from_camera',np.eye(3).tolist())
             if registration.get('T_world_camera')is None and registration.get('optical_from_camera')is not None:
                 pose=np.asarray(camera['pose']['value']);pose[:3,:3]=pose[:3,:3]@np.asarray(registration['optical_from_camera']).T;camera['pose']=value(pose.tolist(),camera['pose']['provenance'],camera['pose'].get('evidence',[]))
         if registration.get('T_world_camera')is not None:

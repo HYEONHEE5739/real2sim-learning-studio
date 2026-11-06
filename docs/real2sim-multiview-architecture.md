@@ -161,3 +161,31 @@ Geometry와 Appearance는 같은 solver 안에서 순서대로 실행한다. 외
 원본 보존 대상 **2,389개 SHA 변화 0 / 누락 0**을 재확인했다(`preservation-after.json`). 전체 SDK/corpus 전수 검사는 아니다. Commit/Push/Merge와 설치·하드웨어 연결은 수행하지 않았다. 증거·실행 자료는 기존 Git 제외 경로에만 보존한다.
 
 실제 사진의 부족한 Camera/metric 근거, 독립 validation 사진 부재, 공용 Asset의 자동 외관 Variant와 기존 전체 baseline 실패는 이번 범위에서 해결했다고 보고하지 않는다. 이번에 실제 Isaac·SAM/DA3·하드웨어를 다시 실행하지 않았으며 합성 MuJoCo 시험과 이전 엔진 검증을 구분한다.
+
+## H. 기존 전체 테스트 실패 정리
+
+2026-11-06. 리뷰 체크포인트 `6c90f776b7e2bd3a0aca19dcad41c016fda76015`에서 별도 `fix/baseline-tests-20261106` 브랜치로 후속 정리했다. 앞 절의 66 failed / 28 errors는 당시 기록이며, 이번 전체 회귀는 **1,441 passed / failed 0 / errors 0 / skipped 0**, 385.71초, torchvision 경고 4개다.
+
+최초 원인은 누락 Scene USD 74건, 삭제된 checkpoint fixture 10건, 구형 테스트 계약 9건, Isaac→MuJoCo import 1건이었다. 동일 SHA의 시험 자산 복구·임시 공식 Policy fixture·현재 MuJoCo에서 새로 기록한 Source/Annotation을 사용했다. URDF/Manifest 검사는 공통 Calibration 모듈로 이동했고 기존 모델 불일치 거부는 유지한다. 기존 실패 92개는 통과했고, 폐기된 배치 제한 함수의 시험 2개는 제거했다. 현재 난수/배치 충돌 회귀는 유지하며 skip/xfail을 추가하지 않았다.
+
+원본 보존 대상 2,389개 SHA는 변화 0이다. 전체 실제 사진 Scene 제작 완료·실물 검증을 이 결과로 승격하지 않는다. 원인별 수정·로컬 시험 자료 복구법·전체 대조는 [테스트 정리 보고서](test-baseline-cleanup.md)에 있다. 코드/시험/문서는 새 fix 브랜치의 미커밋 변경으로 남기며 기존 리뷰 Commit과 원격 브랜치는 변경하지 않았다.
+
+
+## 2026-11-06 후속: 비교 판단과 수정 실행 연결
+
+연속 실행은 정합 후 Codex에 원본/렌더/overlay/difference를 전달하고, 구조화 판단에 따라 수치 재정합 또는 선택 Object의 새 자산 제작→재정합을 이어간다. 기존 `run_codex_modeling` 실행 경계를 재사용한다. `reconstruct`와 `refit-pairs`의 `--run-modeling` 및 기존 UI 연속 실행 버튼에 연결했다. 호출 상한·중단·오류와 시각적 완료를 구분한다.
+
+검증용 View는 수정 판단/모델링 feedback에서 제외한다. 기본 분석·모델링 최대6회, 비교 최대3회다. 시각 판단 완료는 `VISUAL_DRAFT_REVIEWED`이며 숫자 정확도·물리 준비·Task 성공과 별개다. 상세 계약과 남은 범위는 [통합 기록](real2sim-integration.md)의 마지막 절에 기록했다.
+
+
+### 후속: 반복 간 최선 checkpoint
+
+연속 실행에서 비교 가능한 train View별 지표가 악화되지 않은 개선 결과를 보존하고, 모델 재제작 후 악화·중단·예외·예산 소진 시 선택한 Scene과 Candidate 참조 파일·설정·비교 결과를 함께 복원하도록 연결했다. 원본/자산 버전은 변경하지 않는다. 동률/트레이드오프는 이전 결과 유지이며 전체 시각 품질의 최적해 보장은 아니다. 자세한 선택·복원 계약과 검증은 `real2sim-integration.md` 마지막 절을 따른다.
+
+### 후속 실제 실행 결과
+
+실제 Codex 응답→SAM/DA3→Codex bpy→Blender 자산8개 등록과 실제 비교 이미지 검토를 실행했다. 기존 authored Scene을 새 Package로 게시한 후 Workbench/Qt 선택·native MuJoCo20step·Memory Pair 저장→Source Revision 확인→재정합 진입도 확인했다. 새 자동 복원 Scene 자체는 Camera/metric scale 미확보로 `NEEDS_MORE_DATA`이며 전체 승인 완료가 아니다. 발견한 도구 handoff·Point batch·측정 계승·Pair 옵션/포트 비교·실행 설정 등록 수정과 정확한 범위는 `real2sim-integration.md`의 실제 실행 절에 기록한다.
+
+### 최신 지침과 분리된 Codex 실행
+
+2026-11-06 첨부 AGENTS/`CODEX_SCENE_GUIDE.md`를 소스 및 기존 제작/규칙 문서와 대조해 반영했다. 내부 임시 Codex 작업 폴더에는 신뢰된 원본의 `BUILDER_GUIDE.md`를 명시 복사하고, 분석·모델링·검토 전에 읽으라고 실제 CLI 프롬프트에 전달한다. 가이드 SHA/개정판과 출력 Schema를 기존 작업 기록에 남긴다. 실제 Codex 분석/모델링 양쪽의 문서 읽기→현재 Schema 응답→실제 Blender 등록, 이후 재개까지 확인했다. Camera/scale 미확보는 별도 미완료로 유지한다. 세부 검증과 문서 충돌 정리는 `real2sim-integration.md`의 최신 지침 절을 따른다.

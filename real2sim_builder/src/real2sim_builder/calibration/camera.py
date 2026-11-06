@@ -25,7 +25,8 @@ def point_world(scene,row):
 
 def project_point(scene,camera,row):
     p=(np.linalg.inv(world_pose(scene,camera))@np.r_[point_world(scene,row),1])[:3]
-    uv,_=cv2.projectPoints(p.reshape(1,3),np.zeros(3),np.zeros(3),np.asarray(camera['K']['value'],float),np.asarray(camera['distortion']['value'],float))
+    from ..cameras import project_pixels
+    uv=project_pixels(camera,p.reshape(1,3))
     return uv.ravel(),p[2]
 
 

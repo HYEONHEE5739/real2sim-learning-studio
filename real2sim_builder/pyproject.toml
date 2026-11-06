@@ -20,3 +20,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# One canonical guide in source; wheels install these same bytes as package-owned data.
+[tool.setuptools.data-files]
+"share/real2sim_builder" = ["CODEX_SCENE_GUIDE.md"]

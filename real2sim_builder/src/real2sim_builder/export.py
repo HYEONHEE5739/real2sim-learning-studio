@@ -297,7 +297,7 @@ def verify_package(path):
 
 
 def export_revision(project,*,destination,candidate=None,calibration=None,required_files=(),engine_sources=None,
-                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,mujoco_robot_asset=None,asset_resolutions=None):
+                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,mujoco_robot_asset=None,asset_resolutions=None,engine_config=None):
     """Publish a new revision only after file/closure checks; never replace originals.
 
     Inputs are project-owned edit data or explicit read-only source files. Calibration
@@ -308,6 +308,11 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
     destination=Path(destination).resolve();scene_id=scene_id or project.info['id'];revision=revision or destination.name
     if engine_sources:raise ExportError('ENGINE_SOURCE_UNSUPPORTED','engine_sources','replacement native assets require separately verified bindings; use the authored Scene exporter')
     if destination.exists():raise ExportError('OUTPUT_EXISTS',str(destination),'new Revision destination required')
+    if engine_config is not None:
+        if not isinstance(engine_config,dict)or not engine_config or set(engine_config)-{'mujoco','isaac'}:raise ValueError('Explicit engine settings mapping required')
+        for relative in engine_config.values():
+            path=local_path(project.root,relative)
+            if not path.is_relative_to(project.root)or not path.is_file()or not isinstance(read(path),dict):raise ValueError('Owned engine settings file required')
     if (project.read_only and destination.is_relative_to(project.root)) or project.root.is_relative_to(destination) or destination==project.root:raise ExportError('OUTPUT_CONFLICT',str(destination),'must not contain/replace input project')
     if candidate is not None:
         selected=Candidate(project,candidate);scene=selected.scene;report_path=selected.root/'metrics.json'
@@ -431,7 +436,7 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
             raise ExportError('EXPORT_STATE_UNKNOWN',str(destination),'published package exists; directory durability was not confirmed; inspect this destination before retrying',effect='unknown') from error
         if not project.read_only:
             from .registration import register_export
-            register_export(project,destination)
+            register_export(project,destination,engine_config=engine_config)
         return package.identity
     finally:
         if lock is not None:lock.close();lock_path.unlink(missing_ok=True)

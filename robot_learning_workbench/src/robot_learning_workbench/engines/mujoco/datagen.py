@@ -9,7 +9,7 @@ from ...generation import mimic
 from ...data.native import load_catalog,open_native,file_sha256
 from .rendering import camera_rgb
 from robot_learning_workbench.data.recording import validate_recording,datagen_settings
-from .model import JOINTS,_execution_urdf
+from ...robot.calibration import JOINTS,execution_urdf
 from ...data.recording import record_metrics
 
 
@@ -32,7 +32,7 @@ def load_inputs(plan):
         try:records.append((row.episode_id,h.load_episode(row.key,'cpu')))
         finally:h.close()
     pool=mimic.source_pool(records,conf)
-    path=_execution_urdf(plan.scene)
+    path=execution_urdf(plan.scene)
     kin=mimic.bind_kinematics(path,model_sha256=file_sha256(path),joint_order=JOINTS)
     return catalog,pool,cfg,kin
 
@@ -190,7 +190,7 @@ def run_parallel(plan,owner,model,b,pool,catalog,kin,opts,*,events,commands):
     from ...data.native import history
     from ...run import StageResult
     n=opts['num_envs'];states=[mujoco.MjData(model) for _ in range(n)]
-    kinematics=[mimic.bind_kinematics(_execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS) for _ in range(n)]
+    kinematics=[mimic.bind_kinematics(execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS) for _ in range(n)]
     def generate(i,segment,claim):
         started=time.perf_counter();data=states[i];placements=None
         try:

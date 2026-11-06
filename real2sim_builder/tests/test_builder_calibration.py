@@ -51,11 +51,24 @@ def test_collinear_metric_landmarks_rejected(scene):
     with pytest.raises(ValueError,match='collinear'):fit_cameras(scene,rows)
 
 
-def test_camera_algorithm_function_bodies_match_existing_source():
+def test_unchanged_camera_solvers_match_existing_source():
     import real2sim_builder.calibration.camera as new
     old=ast.parse((B/'calibration/camera.py').read_text());actual=ast.parse(Path(new.__file__).read_text())
-    funcs=lambda tree:{n.name:ast.dump(n,include_attributes=False) for n in tree.body if isinstance(n,ast.FunctionDef)}
+    # Projection now shares the EXIF-aware lens model with RGB/depth rendering.
+    # Keep the historical solver comparison; test changed projection numerically.
+    funcs=lambda tree:{n.name:ast.dump(n,include_attributes=False) for n in tree.body if isinstance(n,ast.FunctionDef) and n.name!='project_point'}
     assert funcs(actual)==funcs(old)
+
+
+def test_landmark_projection_matches_opencv_with_known_distortion(scene):
+    import cv2
+    camera=scene['cameras'][0];camera['distortion']['value']=[.1,-.02,.003,-.004,.001]
+    point=np.array([.1,-.03,.05]);pose=np.asarray(camera['pose']['value'])
+    optical=(point-pose[:3,3])@pose[:3,:3]
+    expected,_=cv2.projectPoints(optical[None],np.zeros(3),np.zeros(3),np.asarray(camera['K']['value']),np.asarray(camera['distortion']['value']))
+    uv,z=project_point(scene,camera,{'point_m':point.tolist()})
+    np.testing.assert_allclose(uv,expected.ravel(),atol=1e-10)
+    assert z==pytest.approx(optical[2])
 
 
 def test_reference_robot_fk_named_joint_and_rotation_order(tmp_path):

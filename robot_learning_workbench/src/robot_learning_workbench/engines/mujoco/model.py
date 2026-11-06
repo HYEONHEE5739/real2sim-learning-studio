@@ -5,6 +5,7 @@ Native position servos: https://mujoco.readthedocs.io/en/3.3.7/XMLreference.html
 No engine wrapper, SDK, IK, task runner or original repository runtime access.
 """
 from pathlib import Path
+from ...robot.calibration import execution_urdf,package_asset
 from dataclasses import dataclass
 from collections.abc import Mapping
 import copy,hashlib,json,xml.etree.ElementTree as ET
@@ -194,44 +195,19 @@ class ModelBindings:
     collision_sources: Mapping
 
 
-def _local(package, path):
-    root=Path(package.root).resolve();candidate=Path(path)
-    if candidate.is_absolute() or '..' in candidate.parts or '\\' in str(path):raise ValueError('Package-relative asset path required')
-    target=(root/candidate).resolve()
-    if not target.is_relative_to(root) or not target.is_file():raise ValueError('Missing/escaping package Asset: '+str(path))
-    entry=next((f for f in package.files if f.path==candidate.as_posix()),None)
-    if entry is None or hashlib.sha256(target.read_bytes()).hexdigest()!=entry.sha256:raise ValueError('Unregistered/changed package Asset: '+str(path))
-    return target
-
-
 def _collision_inputs(package):
     binding=package.scene['robot'].get('collision');result={}
     if not binding:return {'finger_convex_parts':None,'contact_pads':{'schema':'so101.usd-contact-pads/1','pads':[]}}
     for kind,schema in [('finger_convex_parts','so101.finger-convex-parts/1'),('contact_pads','so101.usd-contact-pads/1')]:
-        declaration=binding[kind];payload=json.loads(_local(package,declaration['asset_path']).read_text())
+        declaration=binding[kind];payload=json.loads(package_asset(package,declaration['asset_path']).read_text())
         if payload.get('schema')!=schema:raise ValueError('Unknown Collision schema')
         identities={row['mesh']:row['source_sha256'] for row in payload['meshes']} if kind=='finger_convex_parts' else payload['source_sha256']
         if set(identities)!=set(declaration['sources']):raise ValueError('Collision source identity set mismatch')
         for name,digest in identities.items():
             source=declaration['sources'][name]
-            if source['sha256']!=digest or hashlib.sha256(_local(package,source['asset_path']).read_bytes()).hexdigest()!=digest:raise ValueError('Collision source hash mismatch')
+            if source['sha256']!=digest or hashlib.sha256(package_asset(package,source['asset_path']).read_bytes()).hexdigest()!=digest:raise ValueError('Collision source hash mismatch')
         result[kind]=payload
     return result
-
-
-def _execution_urdf(package):
-    records=[record for record in package.calibration['records'].values() if record['kind']=='robot_residual' and record['application']['mode']=='baked']
-    if not records:
-        path=package.scene['robot'].get('asset_path')
-        if not path or Path(path).suffix.lower()!='.urdf':raise ValueError('Scene must declare a six-axis execution URDF in robot.asset_path or a baked Calibration binding')
-        return _local(package,path)
-    if len(records)!=1:raise ValueError('Ambiguous baked execution robot bindings')
-    record=records[0]
-    paths=[p for p in record['application']['asset_paths'] if str(p).endswith('.urdf')]
-    if len(paths)!=1:raise ValueError('One calibrated URDF Asset required')
-    path=_local(package,paths[0])
-    if hashlib.sha256(path.read_bytes()).hexdigest()!=record['execution_model_sha256']:raise ValueError('Execution model identity mismatch')
-    return path
 
 
 def build_model(scene, prepared):
@@ -256,14 +232,14 @@ def build_model(scene, prepared):
         if cfg.visual_color_gamma != 1.0:
             raise ValueError('visual_color_gamma requires Builder-authored geometry; precompiled MJCF must declare its own materials')
         return build_native_model(scene,cfg)
-    canonical=json.loads(_local(scene,'authored_scene.json').read_text())if (scene.root/'authored_scene.json').is_file()else json.loads(_local(scene,'provenance.json').read_text())['original_scene']
+    canonical=json.loads(package_asset(scene,'authored_scene.json').read_text())if (scene.root/'authored_scene.json').is_file()else json.loads(package_asset(scene,'provenance.json').read_text())['original_scene']
     objects={obj['id']:obj for obj in canonical['objects']};frames=scene.scene['frames']
     base=resolve_transform(frames,source='robot_base',target='world')
-    urdf=_execution_urdf(scene);collision=_collision_inputs(scene)
+    urdf=execution_urdf(scene);collision=_collision_inputs(scene)
     robot,limits,hashes=robot_xml(urdf,base,collision['finger_convex_parts'],collision['contact_pads'])
     limits=np.asarray(limits)
     if np.any(initial<limits[:,0]) or np.any(initial>limits[:,1]):raise ValueError('Initial joints outside model limits')
-    native_path=_local(scene,scene.scene['engines']['mujoco']['asset_path']);authored=ET.parse(native_path).getroot()
+    native_path=package_asset(scene,scene.scene['engines']['mujoco']['asset_path']);authored=ET.parse(native_path).getroot()
     output=ET.Element('mujoco',model='so101_workbench')
     ET.SubElement(output,'compiler',angle='radian',autolimits='true',inertiafromgeom='false')
     option=ET.SubElement(output,'option',timestep=str(cfg.physics_timestep_s),integrator='implicitfast',gravity='0 0 -9.81',cone='elliptic',iterations='100',tolerance='1e-10',impratio='10',noslip_iterations='10')
@@ -275,7 +251,7 @@ def build_model(scene, prepared):
         asset=copy.deepcopy(original);asset.set('name',renames[asset.get('name')])
         for key in ('mesh','material','texture'):
             if asset.get(key) in renames:asset.set(key,renames[asset.get(key)])
-        if asset.get('file'):asset.set('file',str(_local(scene,(native_path.parent/asset.get('file')).relative_to(scene.root).as_posix())))
+        if asset.get('file'):asset.set('file',str(package_asset(scene,(native_path.parent/asset.get('file')).relative_to(scene.root).as_posix())))
         assets.append(asset)
     output.append(assets);world=robot.find('worldbody');output.append(world);output.append(robot.find('actuator'))
     ET.SubElement(world,'light',pos='0 0 1',dir='-.3 -.4 -1',directional='true',castshadow='false',ambient='.25 .25 .25',diffuse='.5 .5 .5',specular='.05 .05 .05')
@@ -361,7 +337,7 @@ def build_model(scene, prepared):
 def build_native_model(package,cfg):
     """Bind a declared articulated MJCF directly; no v8 geometry reconstruction."""
     import mujoco
-    binding=package.scene['robot']['bindings']['mujoco'];path=_local(package,binding['asset_path'])
+    binding=package.scene['robot']['bindings']['mujoco'];path=package_asset(package,binding['asset_path'])
     from scene_contract.objects import present_objects
     present=set(present_objects(package.scene,cfg.active_object_ids))
     excluded=set(package.scene['objects'])-present
@@ -401,7 +377,7 @@ def build_native_model(package,cfg):
     if np.any(limits[:,0]>limits[:,1])or np.any(initial<limits[:,0])or np.any(initial>limits[:,1]):raise ValueError('Initial state/actuator control ranges have no valid model intersection')
     fingers=tuple(required(mujoco.mjtObj.mjOBJ_BODY,n)for n in binding.get('finger_bodies',cfg.finger_bodies))
     cameras={n:required(mujoco.mjtObj.mjOBJ_CAMERA,n)for n in('side','wrist')}
-    base=resolve_transform(package.scene['frames'],source='robot_base',target='world');urdf=_execution_urdf(package)
+    base=resolve_transform(package.scene['frames'],source='robot_base',target='world');urdf=execution_urdf(package)
     reference=mujoco.MjData(model);reference.qpos[[int(model.jnt_qposadr[i])for i in joints]]=initial;mujoco.mj_forward(model,reference)
     base_id=required(mujoco.mjtObj.mjOBJ_BODY,binding.get('base_body',cfg.robot_base_body));actual=np.eye(4);actual[:3,3]=reference.xpos[base_id];actual[:3,:3]=reference.xmat[base_id].reshape(3,3)
     if not np.allclose(actual,base,rtol=0,atol=1e-6):raise ValueError('Native MJCF robot base differs from declared Scene robot_base frame')

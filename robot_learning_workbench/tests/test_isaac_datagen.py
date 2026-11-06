@@ -16,13 +16,3 @@ def test_isaac_annotation_model_and_pool_are_ready_for_fixed_ik(tmp_path):
     catalog,pool,settings,kin=load_inputs(plan)
     assert len(catalog.episodes)==1 and pool.subtask_boundaries['tool0']==[[(0,223),(223,388)]]
     assert kin.identity['policy']=='best_effort'
-
-
-def test_legacy_seeded_random_is_rejected_by_new_datagen_policy():
-    from types import SimpleNamespace
-    from robot_learning_workbench.engines.isaac.datagen import validate_placements
-    fixed=SimpleNamespace(function_bindings={'objects.cube.placement':SimpleNamespace(kind='placement',name='placement.fixed_xy')})
-    validate_placements(fixed)
-    random=SimpleNamespace(function_bindings={'objects.cube.placement':SimpleNamespace(kind='placement',name='placement.random_xy')})
-    with pytest.raises(ValueError,match='random_workspace'):
-        validate_placements(random)

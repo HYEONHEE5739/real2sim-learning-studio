@@ -152,3 +152,25 @@ assert p.ready is None and not p.start_button.isEnabled()
 p.editor.text.setPlainText('inputs: [broken');assert p.editor.dirty and not p.start_button.isEnabled()
 p.timer.stop();p.close()
 ''',tmp_path)
+
+
+def test_scene_task_populates_blank_script_but_preserves_user_functions_and_stale_replies(tmp_path):
+    qt('''
+import sys
+from pathlib import Path
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);p=WorkflowPage('simulation_evaluation','/no/worker','modules');s=p.settings
+s.set_inputs({'scene':'/chosen/scene.json'})
+result={'status':'CONFIGURED','instruction':'Put red in cup.','functions':{'success':{'function':'pick_place.v8_evaluation','params':{'object':'red','target':'cup'}}}}
+s.task_version=s.version;s.task_received({'ok':True,'result':result})
+assert s.editor.data()['functions']==result['functions']
+assert s.editor.data()['execution']['task_instruction']==result['instruction']
+s.update(lambda doc:doc['functions']['success']['params'].update(target='my_cup'))
+before=s.editor.text.toPlainText();s.task_version=s.version
+s.task_received({'ok':True,'result':result});assert s.editor.text.toPlainText()==before
+s.task_version=s.version-1
+s.task_received({'ok':True,'result':result});assert s.editor.text.toPlainText()==before
+assert not any(n in sys.modules for n in ('mujoco','isaaclab','torch','serial','real2sim_builder.authoring'))
+p.timer.stop();p.close()
+''',tmp_path)

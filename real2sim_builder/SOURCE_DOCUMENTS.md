@@ -40,3 +40,9 @@ Codex가 그 내용을 Builder Object와 새 Export에 반영한다.
 ## 2026-11-03 자동 재구성 개편
 
 사용자 제공 Automated Real2Sim Reconstruction 구현 지시서가 현재 목표다. Codex 수동 좌표 편집 중심의 과거 흐름을 기본 UI에서 교체했다. GLB/Scan 전용 코드는 제거하고 실측·Camera 등록·SAM/DA3·ICP/Mask 및 기존 Candidate/Revision을 사용한다. 과거 문서의 GLB 명령은 현재 API가 아니다. 구현/검증/미완료는 [단계별 기록](../docs/automated-reconstruction.md)을 따른다.
+
+## 2026-11-06 최신 Codex 지침 통합
+
+사용자 첨부 `real2sim_codex_guidance_20261106.zip`의 `AGENTS.md`와 `CODEX_SCENE_GUIDE.md`를 현 소스와 대조했다. 루트 AGENTS는 저장소 개발 세션용이고, 내부 Codex의 표준 가이드는 `CODEX_SCENE_GUIDE.md`다. `SCENE_AUTHORING.md`의 별도 치수 기본 UI·자동 제품 공유·과거 미호출 상태와 `SCENE_RULES.md`의 과거 Group 규칙을 현재 독립 USDA·자유 메모·시점 역할·단계별 실제 구현 범위에 맞춰 정리했다. 유효한 CLI/수학 규칙과 날짜별 과거 성적은 유지한다.
+
+기존 `authoring.modeling_tasks/run_codex_modeling` 경로에서 가이드를 `BUILDER_GUIDE.md`로 전달하고 SHA·버전·현재 Schema를 실행 기록에 남긴다. 별도 정책 파일/Agent Runner를 중복 생성하지 않는다. 가이드의 개발자 통합 절을 런타임 Codex가 추가 구현하라는 지시로 사용하지 않는다. 실제 분석·모델링 문서 읽기와 출력 수용·Blender 등록 결과는 `docs/real2sim-integration.md`의 최신 검증 절을 따른다.

@@ -28,7 +28,7 @@ def test_four_actual_independent_states_render_contexts_and_single_native_publis
         def collect(i):
             threads.add(threading.get_ident());barrier.wait(timeout=10)
             target=states[i].qpos[list(b.q_indices)].copy();target[0]+=.005
-            result=collect_episode(model,states[i],b,segments[i],episode_id='e'+str(i),env_index=i,seed=7+i,frames=2,read_target=lambda:target,events=events.append,commands=lambda:())
+            result=collect_episode(model,states[i],b,segments[i],episode_id='e'+str(i),env_index=i,frames=2,read_target=lambda:target,events=events.append,commands=lambda:())
             return i,result
         with ThreadPoolExecutor(max_workers=4) as pool:
             for future in as_completed([pool.submit(collect,i) for i in range(4)]):
@@ -63,7 +63,7 @@ def test_random_evaluation_reuses_workspace_contract_and_placement_gate(tmp_path
     plan=prepare_recipe(read_recipe(path),tasks=load_registry(('robot_learning_workbench.tasks.pick_place','robot_learning_workbench.tasks.placement')))
     record={'step':4,'files':{}}
     value=evaluation_execution(plan,{'recording':{}},record)
-    assert value['rng_policy']=='entropy_workspace_poses_no_rng_resume_v1'
+    assert value['rng_policy']=='evaluation_seed_entropy_placement_v1'
     assert plan.function_bindings['success'].name=='pick_place.v8_evaluation'
 
 

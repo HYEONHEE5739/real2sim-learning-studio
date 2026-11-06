@@ -59,7 +59,8 @@ def test_checkpoint_seal_requires_valid_finite_safetensors(tmp_path):
 def test_external_official_act_checkpoint_does_not_require_project_manifest(tmp_path):
     from pathlib import Path
     from robot_learning_workbench.learning.policy import load_policy
-    root=Path(__file__).resolve().parents[2]/'docs/evidence/learning-bundle/runs/act-second/checkpoints/000002/pretrained_model'
+    from checkpoint_fixture import official_checkpoint
+    root=official_checkpoint(Path(__file__).resolve().parents[2]/'docs/evidence/learning-bundle/runs/act-second/checkpoints/000002')/'pretrained_model'
     for p in root.iterdir():
         if p.is_file():(tmp_path/p.name).symlink_to(p)
     policy,pre,post,record=load_policy(tmp_path)
