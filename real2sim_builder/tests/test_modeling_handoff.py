@@ -7,7 +7,7 @@ def semantic_reply(rows,memo=''):
     objects=[];groups={}
     for row in rows:
         obj={k:copy.deepcopy(row.get(k,''))for k in('id','prompt','role','category','asset_group','material_variant','modeling_notes')}
-        obj['observations']=copy.deepcopy(row.get('observations',[]));objects.append(obj)
+        obj['observations']=copy.deepcopy(row.get('observations',[]));obj['geometry']=copy.deepcopy(row.get('geometry'));objects.append(obj)
         if obj['asset_group']:
             group=groups.setdefault(obj['asset_group'],{'id':obj['asset_group'],'members':[],'relation_source':'visual_inference','evidence_quote':'','change_kind':'none','evidence':['controlled Codex interpretation']})
             group['members'].append(obj['id'])
@@ -17,7 +17,7 @@ def semantic_reply(rows,memo=''):
 
 
 def test_modeling_handoff_contains_notes_references_measurements_and_keeps_other_objects(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets,record_modeling_results
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets,record_modeling_results
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     from test_builder_export import legacy_scene
@@ -81,7 +81,7 @@ def test_object_authoring_cannot_write_other_project_files(tmp_path,monkeypatch)
 
 
 def test_opt_in_codegen_uses_nonrepo_sandbox_and_imports_validated_result(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     from pathlib import Path
     import os,sys
     monkeypatch.setenv('REAL2SIM_BLENDER',os.environ['REAL2SIM_BLENDER'])
@@ -104,7 +104,7 @@ Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'script
 
 
 def test_empty_object_list_has_a_semantic_analysis_handoff_and_no_fake_dimensions(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     import sys
     p=Project.create(tmp_path/'projects','notes');c=Candidate.create(p,'analysis')
     result=modeling_tasks(c,{}, {'segments':[],'depth_batches':[]})
@@ -170,7 +170,7 @@ def test_open_cup_keeps_visual_and_convex_collision_separate_and_block_reaches_b
 
 
 def test_same_asset_name_is_an_unresolved_match_until_explicitly_selected(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','different cup');c=Candidate.create(p,'new_photo')
@@ -195,7 +195,7 @@ def test_same_asset_name_is_an_unresolved_match_until_explicitly_selected(tmp_pa
 
 
 def test_codegen_attaches_visual_images_and_preserves_depth_camera_correspondence(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     from PIL import Image
     import sys,json,numpy as np
     p=Project.create(tmp_path/'projects','visual input');c=Candidate.create(p,'model')
@@ -205,6 +205,10 @@ def test_codegen_attaches_visual_images_and_preserves_depth_camera_correspondenc
     inferred={'images':[{'id':'photo','path':'input/photo.png','sha256':sha(image),'resolution':[32,24],'split':'train'}],
         'segments':[{'image_id':'photo','object_id':'cube','status':'UNIQUE_ESTIMATED','masks':[{'path':str(mask),'sha256':sha(mask)}]}],
         'depth_batches':[{'path':str(depth),'image_ids':['photo'],'metadata':{'sha256':sha(depth)}}]}
+    cloud=p.root/'input/visible.npz';points=np.array([[.1,.2,.3],[.11,.2,.3],[.1,.21,.3]])
+    np.savez(cloud,points_world_m=points)
+    scene=c.scene;scene['reconstruction_observations']={'clouds':[{'object_id':'cube','image_id':'photo','split':'train',
+        'path':'input/visible.npz','sha256':sha(cloud)}]};c.save(scene)
     modeling_tasks(c,{'objects':{'cube':{'prompt':'red cube'}}},inferred)
     task=read(c.root/'modeling/tasks.json');task['camera_predictions']={'status':'UNRESOLVED','units':'relative'};write(c.root/'modeling/tasks.json',task)
     executable=tmp_path/'fake_codex';executable.write_text('#!'+sys.executable+'\n'+'''import sys,json
@@ -215,7 +219,13 @@ assert task['camera_predictions']['status']=='UNRESOLVED'
 ref=task['objects'][0]['references'][0]
 assert (root/ref['original']).is_file()and(root/ref['crops'][0]['path']).is_file()
 assert(root/ref['depth_batches'][0]['path']).is_file()
-assert task['measurements_provenance']=='Only explicitly supplied measurements are measured'
+geometry=task['objects'][0]['geometry_observations'][0]
+assert geometry['object_id']=='cube'and geometry['image_ids']==['photo']and not geometry['hidden_surface_generated']
+import numpy as np
+with np.load(root/geometry['path'],allow_pickle=False)as data:
+ assert np.allclose(data['points_centered_m']+data['center_world_m'],data['points_world_m'])
+ assert len(data['points_world_m'])==3
+assert 'Scene Memo user dimensions'in task['measurements_provenance']and 'hypotheses remain estimated'in task['measurements_provenance']
 Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'script':'../outside.py'}))
 ''');executable.chmod(0o700)
     import pytest
@@ -224,7 +234,7 @@ Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'script
 
 
 def test_codex_failures_retain_candidate_tasks_and_do_not_publish_assets(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     import sys,pytest
     p=Project.create(tmp_path/'projects','failure handling');c=Candidate.create(p,'retry')
     modeling_tasks(c,{'objects':{'new':{'prompt':'new object'}}},{'segments':[]})
@@ -240,7 +250,7 @@ def test_codex_failures_retain_candidate_tasks_and_do_not_publish_assets(tmp_pat
 
 
 def test_codegen_timeout_stop_and_reuse_do_not_repeat_remote_work(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling,record_modeling_results
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,record_modeling_results
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     import sys,pytest
@@ -308,7 +318,7 @@ col=bpy.context.object;col.parent=obj;col['r2s_collision']=True;col.hide_render=
 
 
 def test_group_models_once_and_cache_requires_content_fingerprint(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets,record_modeling_results
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets,record_modeling_results
     from real2sim_builder.object_assets import register_object_asset,list_object_assets
     from test_object_assets import asset_fixture
     import copy
@@ -340,7 +350,7 @@ def test_group_models_once_and_cache_requires_content_fingerprint(tmp_path):
 
 
 def test_legacy_results_do_not_silently_attach_by_object_id(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','legacy');c=Candidate.create(p,'review')
@@ -356,7 +366,7 @@ def test_legacy_results_do_not_silently_attach_by_object_id(tmp_path):
 
 
 def test_semantic_groups_and_two_cup_instances_use_one_real_blender_asset(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,attach_modeled_assets
     from real2sim_builder.object_assets import list_object_assets
     from real2sim_builder.rendering import Renderer
     from real2sim_builder.inference import associate_instances
@@ -373,7 +383,7 @@ def test_semantic_groups_and_two_cup_instances_use_one_real_blender_asset(tmp_pa
     config={'objects':{name:{'prompt':'paper cup','category':'paper_cup','role':'receptacle','asset_group':'paper_cup_A',
         'asset_group_relation':{'status':'PROPOSED','provenance':'estimated','evidence':['Scene memo declares same product']},
         'images':{'side':{'box_xyxy':box}}}for name,box in [('cup1',[0,0,300,480]),('cup2',[320,0,640,480])]}}
-    from real2sim_builder.automation import parse_scene_analysis
+    from real2sim_builder.authoring import parse_scene_analysis
     from real2sim_builder.evidence import scene_memo
     reply=semantic_reply([{'id':n,**spec}for n,spec in config['objects'].items()],note.read_text())
     reply['asset_groups'][0].update(relation_source='user_memo',evidence_quote=note.read_text())
@@ -409,7 +419,7 @@ def test_semantic_groups_and_two_cup_instances_use_one_real_blender_asset(tmp_pa
 
 
 def test_semantic_analysis_preserves_groups_provenance_and_multiview_ids(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     from real2sim_builder.observations import register_image
     from PIL import Image
     import sys,json
@@ -429,7 +439,7 @@ def test_semantic_analysis_preserves_groups_provenance_and_multiview_ids(tmp_pat
 
 
 def test_rgb_mask_and_notes_change_group_fingerprints_without_path_or_pose_dependence(tmp_path):
-    from real2sim_builder.automation import modeling_groups
+    from real2sim_builder.authoring import modeling_groups
     from PIL import Image
     import copy
     p=Project.create(tmp_path/'projects','fingerprints');c=Candidate.create(p,'shape')
@@ -451,7 +461,7 @@ def test_rgb_mask_and_notes_change_group_fingerprints_without_path_or_pose_depen
 
 
 def test_group_split_and_material_variants_preserve_the_original_asset(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets,record_modeling_results,modeling_groups
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets,record_modeling_results,modeling_groups
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     import copy
@@ -477,7 +487,7 @@ def test_group_split_and_material_variants_preserve_the_original_asset(tmp_path)
 
 
 def test_ambiguous_group_needs_review_and_input_symlinks_are_rejected(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     from real2sim_builder.rendering import author_object_assets
     import os,sys,pytest
     p=Project.create(tmp_path/'projects','uncertain');c=Candidate.create(p,'review')
@@ -494,7 +504,7 @@ def test_ambiguous_group_needs_review_and_input_symlinks_are_rejected(tmp_path,m
 
 
 def test_changed_frozen_mask_cannot_reuse_a_matching_but_stale_result(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,run_codex_modeling
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     from PIL import Image
@@ -512,7 +522,7 @@ def test_changed_frozen_mask_cannot_reuse_a_matching_but_stale_result(tmp_path):
 
 
 def test_new_request_beats_same_fingerprint_and_completes_once(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets,group_asset,modeling_groups
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets,group_asset,modeling_groups
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     import copy
@@ -534,7 +544,7 @@ def test_new_request_beats_same_fingerprint_and_completes_once(tmp_path):
 
 
 def test_explicit_asset_resolves_only_relation_uncertainty_not_geometry_conflict(tmp_path):
-    from real2sim_builder.automation import modeling_groups,group_asset
+    from real2sim_builder.authoring import modeling_groups,group_asset
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','manifest priority');c=Candidate.create(p,'one')
@@ -549,7 +559,7 @@ def test_explicit_asset_resolves_only_relation_uncertainty_not_geometry_conflict
 
 
 def test_new_observations_reuse_identity_but_keep_generation_fingerprint(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     from PIL import Image
@@ -575,7 +585,7 @@ def test_new_observations_reuse_identity_but_keep_generation_fingerprint(tmp_pat
 
 
 def test_memo_quotes_authenticate_source_without_reinterpreting_their_meaning(tmp_path):
-    from real2sim_builder.automation import parse_scene_analysis
+    from real2sim_builder.authoring import parse_scene_analysis
     from real2sim_builder.evidence import save_scene_memo,scene_memo
     import copy,pytest
     p=Project.create(tmp_path/'projects','memo proof');save_scene_memo(p,'종이컵 두 개는 동일한 제품이다. 위치와 회전만 다르다.')
@@ -592,7 +602,7 @@ def test_memo_quotes_authenticate_source_without_reinterpreting_their_meaning(tm
 
 
 def test_new_request_runs_real_blender_once_and_preserves_other_group(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets,run_codex_modeling
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     import copy,os,sys
@@ -617,7 +627,7 @@ def test_new_request_runs_real_blender_once_and_preserves_other_group(tmp_path,m
 
 
 def test_semantic_memo_facts_and_count_conflicts_stay_separate(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling,modeling_groups,group_asset
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,modeling_groups,group_asset
     from real2sim_builder.evidence import save_scene_memo
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
@@ -640,13 +650,14 @@ def test_semantic_memo_facts_and_count_conflicts_stay_separate(tmp_path):
     asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='cups')
     for s in config['objects'].values():s['asset_manifest']=asset['manifest']
     group=modeling_groups(c,config,inferred)[0]['cups']
-    assert any('OBSERVED_INSTANCE_COUNT_MISMATCH'in n for n in group['blocked'])
-    assert group_asset(c,group,{})[0]is None
+    assert not group['blocked']
+    assert group_asset(c,group,{})[0]['version']==asset['version']
+    assert all(r['association']['status']=='AMBIGUOUS'for r in group['references'])
     assert all(r['provenance']=='user_declared'for r in group['relations'])
 
 
 def test_only_codex_structured_shape_changes_review_the_affected_group(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets,parse_scene_analysis
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets,parse_scene_analysis
     from real2sim_builder.object_assets import register_object_asset
     from real2sim_builder.evidence import save_scene_memo,scene_memo
     from test_object_assets import asset_fixture
@@ -666,7 +677,7 @@ def test_only_codex_structured_shape_changes_review_the_affected_group(tmp_path)
 
 
 def test_partial_new_request_retries_only_the_unfinished_group(tmp_path,monkeypatch):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets,run_codex_modeling
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     import os,sys,copy,pytest
@@ -701,7 +712,7 @@ Path(a[a.index('--output-last-message')+1]).write_text(json.dumps({'script':'aut
 
 
 def test_valid_scene_binding_precedes_an_unconfirmed_legacy_output(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,attach_modeled_assets
     from real2sim_builder.object_assets import register_object_asset,instance_operation
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','existing Scene');c=Candidate.create(p,'known')
@@ -714,7 +725,7 @@ def test_valid_scene_binding_precedes_an_unconfirmed_legacy_output(tmp_path):
 
 
 def test_scene_asset_selection_precedes_an_older_automatic_cache(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results,attach_modeled_assets
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets
     from real2sim_builder.object_assets import register_object_asset,instance_operation
     from test_object_assets import asset_fixture
     p=Project.create(tmp_path/'projects','Scene selection');c=Candidate.create(p,'one')
@@ -730,7 +741,7 @@ def test_scene_asset_selection_precedes_an_older_automatic_cache(tmp_path):
 
 
 def test_recaptured_crop_does_not_overwrite_original_generation_input(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,record_modeling_results
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     from PIL import Image
@@ -752,7 +763,7 @@ def test_recaptured_crop_does_not_overwrite_original_generation_input(tmp_path):
 
 
 def test_semantic_refresh_preserves_explicit_config_group_without_provenance_field(tmp_path):
-    from real2sim_builder.automation import modeling_tasks,save_configuration,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,save_configuration,run_codex_modeling
     import sys,json
     p=Project.create(tmp_path/'projects','manual Group');c=Candidate.create(p,'one')
     modeling_tasks(c,{}, {})
@@ -768,7 +779,7 @@ def test_semantic_refresh_preserves_explicit_config_group_without_provenance_fie
 
 def test_changed_memo_keeps_prior_execution_snapshot_but_rejects_old_response(tmp_path):
     from real2sim_builder.evidence import save_scene_memo,scene_memo
-    from real2sim_builder.automation import parse_scene_analysis,modeling_tasks
+    from real2sim_builder.authoring import parse_scene_analysis,modeling_tasks
     import pytest
     p=Project.create(tmp_path/'projects','current memo');c=Candidate.create(p,'one')
     save_scene_memo(p,'같은 컵 두 개')
@@ -787,7 +798,7 @@ def test_changed_memo_keeps_prior_execution_snapshot_but_rejects_old_response(tm
 
 def test_scene_memos_are_independent_and_require_new_codex_interpretation(tmp_path):
     from real2sim_builder.evidence import save_scene_memo,scene_memo
-    from real2sim_builder.automation import parse_scene_analysis,modeling_groups
+    from real2sim_builder.authoring import parse_scene_analysis,modeling_groups
     import pytest
     a=Project.create(tmp_path/'scenes','A');b=Project.create(tmp_path/'scenes','B');c=Candidate.create(a,'one')
     save_scene_memo(a,'두 컵은 같은 종이컵이야.');save_scene_memo(b,'파란 상자 하나')
@@ -805,7 +816,7 @@ def test_scene_memos_are_independent_and_require_new_codex_interpretation(tmp_pa
 
 
 def test_free_memo_expressions_are_not_classified_again_by_python():
-    from real2sim_builder.automation import parse_scene_analysis
+    from real2sim_builder.authoring import parse_scene_analysis
     import hashlib
     expressions=['두 컵은 같은 종이컵이야.','두 컵은 동일한 제품이다.','오른쪽 컵 둘은 똑같고 위치만 달라.',
         '두 종이컵의 형상과 무늬는 동일해.','The two paper cups are identical products.','完全に同じカップだよ。']

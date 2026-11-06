@@ -29,7 +29,9 @@ class AuthoredRenderer:
         if view.engine=='mujoco':
             import mujoco
             self.model=mujoco.MjModel.from_xml_path(str(view.package.root/view.package.scene['engines']['mujoco']['asset_path']));self.data=mujoco.MjData(self.model);self.renderer=mujoco.Renderer(self.model,height=480,width=640)
-        elif view.engine=='isaac':self.static=StaticIsaacRenderer(view.authored_scene,view.package.root,directory)
+        elif view.engine=='isaac':
+            from real2sim_builder.isaac_render import IsaacRenderer
+            self.static=IsaacRenderer(view.authored_scene,view.package.root,directory,data_types=('rgb',))
         else:raise ValueError('Unsupported authored Scene engine')
     def render(self,q):
         import time
@@ -63,34 +65,3 @@ class AuthoredRenderer:
         if self.static:self.static.close();self.static=None
     def __enter__(self):return self
     def __exit__(self,*_):self.close()
-
-
-class StaticIsaacRenderer:
-    def __init__(self,scene,root,directory):
-        import isaaclab.sim as sim
-        from isaaclab.sensors import Camera,CameraCfg
-        from real2sim_builder.exporters.usd import export
-        import omni.usd
-        self.sim=sim.SimulationContext(sim.SimulationCfg(dt=1/30,device='cuda:0'));self.cameras={}
-        try:
-            path=directory/'authored.usda';export(scene,root,path);cfg=sim.UsdFileCfg(usd_path=str(path));cfg.func('/World/Authored',cfg);self.stage=omni.usd.get_context().get_stage()
-            for n in('side','wrist'):self.cameras[n]=Camera(CameraCfg(prim_path='/World/Authored/'+n,spawn=None,width=640,height=480,data_types=['rgb'],update_latest_camera_pose=True))
-            self.sim.reset()
-        except BaseException:self.close();raise
-    def render(self,scene):
-        from pxr import Gf
-        from real2sim_builder.cameras import OPTICAL_TO_RENDER
-        for row in scene['objects']+scene['cameras']:
-            pose=world_pose(scene,row)
-            if row in scene['cameras']:pose=pose@OPTICAL_TO_RENDER
-            attr=self.stage.GetPrimAtPath('/World/Authored/'+row['id']).GetAttribute('xformOp:transform')
-            if not attr:raise ValueError('Authored USD transform unavailable: '+row['id'])
-            attr.Set(Gf.Matrix4d(*pose.T.ravel().tolist()))
-        for _ in range(3):self.sim.render()
-        for sensor in self.cameras.values():sensor.update(1/30,force_recompute=True)
-        return {n:s.data.output['rgb'][0,:,:,:3].detach().cpu().numpy().copy()for n,s in self.cameras.items()}
-    def close(self):
-        # Isaac Lab's public build_simulation_context uses this cleanup order.
-        # stop() here invokes its standalone STOP callback's render-until-resume
-        # loop, preventing a headless child from ever returning to app.close().
-        self.cameras.clear();self.sim.clear_all_callbacks();self.sim.clear_instance()

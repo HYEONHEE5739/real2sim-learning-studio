@@ -134,112 +134,224 @@ def fit_clouds(project,scene,options=None):
                   'fit_views':sorted({r['image_id']for r in rows if r['split']=='train'}),'physical_verified':False}
 
 
-def refine_masks(project,scene,folder,options=None):
-    """Refine shared object poses against actual native occlusion-aware masks.
+def fit_scene(project,scene,folder,options=None):
+    """One native Render-to-Real loop over a shared Scene and all usable views.
 
-    Fragment annotations use a one-sided coverage loss: the unobserved part is
-    not treated as background. Complete silhouettes also penalize excess area.
-    All held-out views are measured only after optimization.
+    RGB is in [0,1], silhouette/edge distances in image diagonals, depth in
+    metres/depth_sigma_m. Measured fields and recorded robot q are never fitted.
+    Validation views are reported after the solve, not used to optimize/select.
     """
-    from contextlib import ExitStack
-    from PIL import Image
-    from scipy.ndimage import distance_transform_edt
+    if (options or{}).get('engine','mujoco')=='isaac'and 'renderer_factory'not in(options or{}):
+        from ..isaac_render import run_job
+        return run_job(project,scene,folder,options,'fit')
+    if (options or{}).get('engine','mujoco')not in('mujoco','isaac'):raise ValueError('Fitting engine must be mujoco or isaac')
+    from pathlib import Path
+    from PIL import Image,ImageOps
+    import cv2
     from scipy.optimize import minimize
-    from ..scene import local_path,world_pose,validate
-    from ..observations import registered_images
+    from scipy.ndimage import distance_transform_edt,binary_erosion
+    from .joint import select_parameters,apply_parameters
+    from ..scene import local_path,world_pose,validate,camera_calibration_signature
+    from ..observations import registered_images,camera_type
     from ..capture import observation_scene
     from ..rendering import Renderer
     from ..editing import preserve
-    options=options or{};rows=cloud_inputs(project,scene);result=copy.deepcopy(scene)
-    images,_,needs=registered_images(project,scene=scene);images={i['id']:i for i in images}
-    active=[r for r in rows if r['image_id']in images]
-    if not any(r['split']=='train'for r in active):return scene,{'status':'NEEDS_MORE_DATA','needs':['Registered training masks required']}
-    try:
-        for image in images.values():validate(observation_scene(scene,image,project.root,complete=False),project.root,complete=True)
-    except ValueError as error:return scene,{'status':'NEEDS_MORE_DATA','needs':[str(error)]}
-    with ExitStack()as stack:
-        renderers={};targets={}
-        for row in active:
-            key=row['image_id']
-            if key not in renderers:
-                posed=observation_scene(result,images[key],project.root)
-                renderers[key]=stack.enter_context(Renderer(posed,project.root,folder/key,options.get('renderer','software-egl')))
-            mask=np.asarray(Image.open(local_path(project.root,row['mask'])).convert('L'))>0
-            if not mask.any():raise ValueError('Empty refinement mask')
-            targets[(key,row['object_id'])]=(mask,distance_transform_edt(~mask))
-        def measure(selected):
+    from ..files import write,sha
+    options=dict(options or{});folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    rows=cloud_inputs(project,scene);images,_,needs=registered_images(project,scene=scene)
+    by_id={i['id']:i for i in images};rows=[r for r in rows if r['image_id']in by_id]
+    training=[r for r in rows if r['split']=='train']
+    report={'status':'NEEDS_MORE_DATA','engine':options.get('engine','mujoco'),'physics_steps':0,'physical_verified':False,'needs':needs,
+        'scope':'native multiview fitting; not independent calibration/Task approval','holdout_used_for_optimization':False}
+    if not training:return scene,{**report,'needs':['Metric training observations required']}
+    max_iterations=int(options.get('max_iterations',4));budget=int(options.get('max_evaluations',120))
+    patience=int(options.get('patience',2));minimum=float(options.get('minimum_improvement',1e-4))
+    sigma=float(options.get('depth_sigma_m',.005));regression=float(options.get('max_view_regression',.05))
+    weights={**{'rgb':.15,'mask':1.,'edge':.5,'depth':.25,'metric':.25,'prior':.005},**options.get('loss_weights',{})}
+    if max_iterations<1 or budget<1 or patience<1 or minimum<0 or sigma<=0 or regression<0 or not np.isfinite([minimum,sigma,regression,*weights.values()]).all()or min(weights.values())<0:
+        raise ValueError('Finite positive iteration/loss settings required')
+    train_ids=sorted(i['id']for i in images if i['split']=='train');all_ids=sorted(by_id)
+    targets={};models={};loaded={}
+    for key in all_ids:
+        image=by_id[key];real=np.asarray(ImageOps.exif_transpose(Image.open(local_path(project.root,image['path']))).convert('RGB'))
+        targets[key]={'rgb':real,'rows':[r for r in rows if r['image_id']==key],'masks':{}}
+        for row in targets[key]['rows']:
+            name=row['object_id'];mask=np.asarray(Image.open(local_path(project.root,row['mask'])).convert('L'))>0
+            if mask.shape!=real.shape[:2]or not mask.any():raise ValueError('Mask/RGB pixels differ or mask is empty')
+            boundary=mask^binary_erosion(mask)
+            targets[key]['masks'][name]=(mask,boundary,distance_transform_edt(~boundary))
+            path=local_path(project.root,row['path'])
+            with np.load(path,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
+            loaded[key,name]=raw
+            if name not in models:models[name]=cKDTree(surface_points(next(o for o in scene['objects']if o['id']==name),scene,project.root))
+    first=observation_scene(scene,by_id[train_ids[0]],project.root)
+    strategy_rows=[]
+    from ..cameras import camera_pixels
+    for row in training:
+        image=by_id[row['image_id']];posed=observation_scene(scene,image,project.root)
+        cam=next(c for c in posed['cameras']if c['id']==image['camera'])
+        original_cam=next(c for c in scene['cameras']if c['id']==image['camera'])
+        _,optical=camera_pixels(original_cam,image)
+        physical_pose=world_pose(posed,cam).copy();physical_pose[:3,:3]=physical_pose[:3,:3]@optical
+        raw=loaded[row['image_id'],row['object_id']];points=raw['points_world_m']
+        singular=np.linalg.svd(points-points.mean(0),compute_uv=False)
+        rank=int(np.count_nonzero(singular>max(float(singular[0])*1e-3,1e-6)))
+        strategy_rows.append({**row,'camera':image['camera'],'camera_type':camera_type(image),
+            'camera_pose':physical_pose.tolist(),'measured_q':image.get('q_measured')is not None,
+            # The render loss reprojects pixel rays with the current K/pose.
+            # Optical-only archives are usable as fixed World geometry, but
+            # cannot supply that residual when the Camera changes.
+            'has_raw_depth':'uv_original'in raw and 'depth_relative'in raw,'cloud_rank':rank})
+    geometry_plan=select_parameters(scene,strategy_rows,options,stage='geometry')[3]
+    appearance_plan=select_parameters(scene,strategy_rows,options,stage='appearance')[3]
+    report['observability']={'holdout_used':False,'geometry':geometry_plan,'appearance':appearance_plan,'needs':geometry_plan['needs']}
+    report['needs']=list(dict.fromkeys([*report['needs'],*geometry_plan['needs']]))
+    has_appearance=bool(appearance_plan['active']);geometry_done=False;previous_stage=None
+    renderer_factory=options.pop('renderer_factory',Renderer)
+    history=[];evaluations=0;best=copy.deepcopy(scene);best_scales={};best_loss=float('inf');best_metrics=[]
+    def summarize(metrics):return float(np.mean([r['loss']for r in metrics]))
+    # One compiled native Scene and context, reused sequentially across views.
+    with renderer_factory(first,project.root,folder/'native',options.get('renderer','software-egl'))as renderer:
+        def measure(trial,scales,keys):
             metrics=[]
-            for row in selected:
-                key,name=row['image_id'],row['object_id'];target,distance=targets[(key,name)]
-                rendered=renderers[key].mask(images[key]['camera'],name)
-                if rendered.shape!=target.shape:raise ValueError('SAM and rendered mask pixels differ')
-                missing=float((target&~rendered).sum()/target.sum())
-                excess=float(distance[rendered].mean())if rendered.any()else float(np.hypot(*target.shape))
-                full=row.get('mask_kind')=='silhouette'
-                loss=missing+(excess/10 if full else 0.)
-                metrics.append({'image_id':key,'object_id':name,'split':row['split'],'loss':loss,
-                    'iou':float((target&rendered).sum()/max(1,(target|rendered).sum())),
-                    'mask_kind':row.get('mask_kind','visible_fragment'),'missing_fraction':missing,
-                    'boundary_distance_px':excess if full else None})
+            for key in keys:
+                project.checkpoint();image=by_id[key];posed=observation_scene(trial,image,project.root)
+                renderer.update_scene(posed);cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
+                rgb=renderer.rgb(image['camera']);target=targets[key];real=target['rgb']
+                if rgb.shape!=real.shape:raise ValueError('Native/Real RGB resolution differs')
+                diagonal=float(np.hypot(*real.shape[:2]));union=np.zeros(real.shape[:2],bool);object_metrics=[]
+                native_depth=None
+                for row in target['rows']:
+                    name=row['object_id'];mask,boundary,distance=target['masks'][name];rendered=renderer.mask(image['camera'],name)
+                    union|=mask|rendered;edge=rendered^binary_erosion(rendered)
+                    missing=float((mask&~rendered).sum()/mask.sum());full=row.get('mask_kind')=='silhouette'
+                    extra=float((rendered&~mask).sum()/max(1,rendered.sum()))if full else 0.
+                    edge_loss=float(distance_transform_edt(~edge)[boundary].mean()/diagonal)
+                    if full and edge.any():edge_loss+=float(distance[edge].mean()/diagonal)
+                    raw=loaded[key,name];scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',key),1.)
+                    obj=next(o for o in posed['objects']if o['id']==name);pose=world_pose(posed,obj)
+                    if 'uv_original'in raw and 'depth_relative'in raw:
+                        uv=raw['uv_original'];rays=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[uv,np.ones(len(uv))].T).T
+                        optical=rays*raw['depth_relative'][:,None]*scale;world=optical@camera_pose[:3,:3].T+camera_pose[:3,3]
+                        if native_depth is None:native_depth=renderer.depth(image['camera'])
+                        pixels=np.rint(uv).astype(int);h,w=mask.shape;valid=(pixels[:,0]>=0)&(pixels[:,0]<w)&(pixels[:,1]>=0)&(pixels[:,1]<h)
+                        pixels=pixels[valid];z=optical[valid,2]
+                        visible=mask[pixels[:,1],pixels[:,0]]&rendered[pixels[:,1],pixels[:,0]]
+                        residual=abs(native_depth[pixels[:,1],pixels[:,0]][visible]-z[visible])/sigma
+                        depth_loss=float(np.minimum(residual,3).mean())if len(residual)else 0.
+                    else:
+                        world=raw['points_world_m'];depth_loss=0.
+                    distances=models[name].query((world-pose[:3,3])@pose[:3,:3])[0]
+                    trimmed=np.sort(distances)[:max(1,int(len(distances)*.8))]
+                    metric_loss=float(np.minimum(trimmed/sigma,3).mean())
+                    object_metrics.append({'object_id':name,'mask':missing+extra,'edge':edge_loss,'depth':depth_loss,'metric':metric_loss,
+                        'iou':float((mask&rendered).sum()/max(1,(mask|rendered).sum()))})
+                rgb_loss=float(np.minimum(abs(rgb.astype(float)-real.astype(float))[union]/255.,.3).mean())if union.any()else float(np.minimum(abs(rgb.astype(float)-real.astype(float))/255.,.3).mean())
+                losses={name:float(np.mean([r[name]for r in object_metrics]))if object_metrics else 0. for name in('mask','edge','depth','metric')}
+                losses['rgb']=rgb_loss;total=sum(weights[k]*v for k,v in losses.items())
+                metrics.append({'image_id':key,'split':image['split'],'loss':float(total),'components':losses,'objects':object_metrics,
+                    'iou':float(np.mean([r['iou']for r in object_metrics]))if object_metrics else None})
             return metrics
-        before=measure(active);solvers=[]
-        for obj in list(result['objects']):
-            name=obj['id'];selected=options.get('objects')
-            training=[r for r in active if r['object_id']==name and r['split']=='train']
-            if not training or(selected and name not in selected)or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['provenance']in('measured','calibrated'):continue
-            seed=world_pose(result,obj);support=options.get('supports',{}).get(name)
-            samples=surface_points(obj,result,project.root);tree=cKDTree(samples);visible=[]
-            for row in training:
-                with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:visible.append(data['points_world_m'])
-            visible=np.concatenate(visible)
-            if len(visible)>10000:visible=visible[np.linspace(0,len(visible)-1,10000,dtype=int)]
-            depth_sigma=float(options.get('depth_sigma_m',.005));depth_weight=float(options.get('depth_weight',.25))
-            if not np.isfinite([depth_sigma,depth_weight]).all()or depth_sigma<=0 or depth_weight<=0:
-                raise ValueError('Positive depth residual scale/weight required; a fragment cannot set optical depth alone')
-            upright=bool(support)or any(r.get('same_support_plane')and name in r['objects']for r in result.get('geometry_constraints',{}).get('distances',[]))
-            count=3 if upright else 6;translation=options.get('translation_bound_m',.03);angle=options.get('rotation_bound_rad',.2)
-            if not np.isfinite([translation,angle]).all()or min(translation,angle)<=0:raise ValueError('Positive finite mask pose bounds required')
-            bounds=[(-translation,translation)]*(2 if upright else 3)+[(-angle,angle)]*(1 if upright else 3)
-            def move(x):
-                pose=seed.copy()
-                if upright:
-                    pose[:2,3]+=x[:2];pose[:3,:3]=Rotation.from_euler('z',x[2]).as_matrix()@seed[:3,:3]
-                else:
-                    pose[:3,3]+=x[:3];pose[:3,:3]=Rotation.from_rotvec(x[3:]).as_matrix()@seed[:3,:3]
-                trial=assign_pose(result,name,pose)
-                if result.get('geometry_constraints'):
-                    from ..initialization import apply_geometry_constraints
-                    trial,_=apply_geometry_constraints(trial,result['geometry_constraints'])
-                for node in trial['objects']:
-                    if node.get('link')or node['role']=='reference_robot':continue
-                    world=world_pose(trial,node)
-                    for renderer in renderers.values():renderer.set_object_pose(node['id'],world)
-                return trial
-            best=[float('inf'),np.zeros(count)]
-            def objective(x):
-                project.checkpoint();trial=move(x);pose=world_pose(trial,next(o for o in trial['objects']if o['id']==name))
-                score=float(np.mean([r['loss']for r in measure(training)]))
-                distances=tree.query((visible-pose[:3,3])@pose[:3,:3])[0]
-                trimmed=np.sort(distances)[:max(1,int(.8*len(distances)))]
-                score+=depth_weight*float(np.sqrt(np.mean(np.minimum(trimmed/depth_sigma,3.)**2)))
-                if score<best[0]:best[:]=[score,np.asarray(x).copy()]
-                return score
-            objective(np.zeros(count))
-            solution=minimize(objective,np.zeros(count),method='Powell',bounds=bounds,
-                options={'maxfev':int(options.get('max_evaluations',100)),'xtol':.0005,'ftol':.0001})
-            result=move(best[1])
-            solvers.append({'object_id':name,'evaluations':int(solution.nfev),'message':str(solution.message),
-                            'depth_sigma_m':depth_sigma,'depth_weight':depth_weight,
-                            'bound_hit':bool(np.any(np.isclose(abs(best[1]),np.asarray(bounds)[:,1],atol=1e-4)))})
-        after=measure(active)
-    preserve(scene,result)
-    return result,{'status':'OPTIMIZED_UNVERIFIED'if solvers else'NEEDS_MORE_DATA','before':before,'after':after,'solvers':solvers,
-                   'physics_steps':0,'physical_verified':False,'cameras':'fixed registered poses; landmark joint fitter handles shared unverified mounts',
-                   'needs':needs,'scope':'native visible masks; IoU on fragments is diagnostic, not full-shape accuracy'}
+        baseline=measure(best,{},train_ids);best_metrics=baseline;best_loss=summarize(baseline)
+        write(folder/'best-scene.yaml',best);idle=0;stop='max_iterations'
+        try:
+            for iteration in range(max_iterations):
+                project.checkpoint();seed=copy.deepcopy(best);seed_scales=dict(best_scales)
+                stage='appearance'if has_appearance and(geometry_done or iteration>=(max_iterations+1)//2)else'geometry'
+                blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage)
+                if not len(indices)and stage=='geometry'and has_appearance:
+                    geometry_done=True;stage='appearance'
+                    blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage)
+                if not len(indices):stop='unobservable'if report['observability']['needs']else'no_variables';break
+                if stage!=previous_stage:idle=0;previous_stage=stage
+                selected_blocks=[b for b in blocks if any(b[3]<=i<b[3]+b[4]for i in indices)]
+                zero=np.zeros(len(indices));start=best_loss
+                def objective(unit):
+                    nonlocal evaluations,best_loss,best,best_scales,best_metrics
+                    project.checkpoint();delta=np.zeros(len(radius));delta[indices]=unit*radius[indices]
+                    trial,scales=apply_parameters(seed,selected_blocks,delta);evaluations+=1
+                    scales={key:seed_scales.get(key,1.)*scales.get(key,1.)for key in seed_scales.keys()|scales.keys()}
+                    preserve(scene,trial);validate(trial,project.root,complete=True)
+                    metrics=measure(trial,scales,train_ids);score=summarize(metrics)
+                    penalty=weights['prior']*float(np.mean(unit**2))
+                    acceptable=all(new['loss']<=old['loss']+regression for new,old in zip(metrics,baseline))
+                    if acceptable and score<best_loss:
+                        best_loss,best,best_scales,best_metrics=score,trial,scales,metrics
+                    return score+penalty
+                solution=minimize(objective,zero,method='Powell',bounds=[(-1.,1.)]*len(zero),
+                    options={'maxfev':budget,'xtol':.002,'ftol':minimum})
+                improvement=start-best_loss;idle=idle+1 if improvement<minimum else 0
+                history.append({'iteration':iteration+1,'loss':best_loss,'improvement':improvement,'evaluations':int(solution.nfev),
+                    'solver_converged':bool(solution.success),'variables':strategy['active'],'strategy':strategy})
+                # A native worker may be killed before the next checkpoint.
+                # Publish a self-consistent completed iteration, while keeping
+                # raw rays and cumulative scale factors for the ongoing solve.
+                saved=reproject_observations(project,best,best_scales,folder/'observations')
+                preserve(scene,saved);validate(saved,project.root,complete=True)
+                write(folder/'best-scene.yaml',saved);write(folder/'iterations.json',history)
+                if idle>=patience or(solution.success and improvement<minimum):
+                    if stage=='geometry'and has_appearance:geometry_done=True;continue
+                    stop='no_improvement'if idle>=patience else'converged';break
+        except (InterruptedError,ValueError,RuntimeError)as error:
+            best=reproject_observations(project,best,best_scales,folder/'observations')
+            preserve(scene,best);validate(best,project.root,complete=True)
+            write(folder/'best-scene.yaml',best)
+            error.best_scene=best  # Caller can retain the accepted Candidate on Stop.
+            report.update(status='STOPPED'if isinstance(error,InterruptedError)else'FAILED',error=str(error),stop_reason='user_stop'if isinstance(error,InterruptedError)else'invalid_scene_or_render_failure')
+            write(folder/'report.json',{**report,'before':baseline,'after':best_metrics,'history':history,'best_loss':best_loss});raise
+        held=measure(best,best_scales,[key for key in all_ids if key not in train_ids])
+    # Refresh derived World points and camera dependency hashes once, after the
+    # final accepted state. The raw observations and source frames are immutable.
+    best=reproject_observations(project,best,best_scales,folder/'observations')
+    preserve(scene,best);validate(best,project.root,complete=True)
+    improved=best_loss<summarize(baseline)-minimum
+    status='UNRESOLVED'if stop=='unobservable'else'OPTIMIZED_UNVERIFIED'if improved and stop!='max_iterations'else'BUDGET_EXHAUSTED'if stop=='max_iterations'else'NOT_IMPROVED'
+    report.update(status=status,before=baseline,after=best_metrics,before_loss=summarize(baseline),after_loss=best_loss,
+        holdout=held,training_view_count=len(train_ids),evaluations=evaluations,history=history,stop_reason=stop,
+        weights=weights,depth_sigma_m=sigma,max_view_regression=regression,
+        best_scene=str(folder/'best-scene.yaml'),converged=stop in('converged','no_improvement'),
+        metric_constraints='measured dimensions/poses locked; explicit support projection',robot_constraints='fixed measured q/FK; one shared mount per physical camera')
+    write(folder/'best-scene.yaml',best);write(folder/'report.json',report)
+    return best,report
+
+
+def reproject_observations(project,scene,scales,folder):
+    """Own updated derived World clouds; preserve source optical rays and masks."""
+    from pathlib import Path
+    from ..files import sha
+    from ..scene import local_path,camera_calibration_signature,world_pose
+    from ..capture import observation_scene
+    import uuid
+    folder=Path(folder)
+    if not folder.resolve().is_relative_to(project.root):folder=project.root/'scratch/render-fit-observations'
+    folder=folder/uuid.uuid4().hex;folder.mkdir(parents=True,exist_ok=True);result=copy.deepcopy(scene)
+    images={i.get('id'):i for i in project.evidence['images']}
+    for index,row in enumerate(result.get('reconstruction_observations',{}).get('clouds',[])):
+        image=images.get(row['image_id'])
+        if not image:continue
+        source=local_path(project.root,row['path'])
+        if sha(source)!=row['sha256']:raise ValueError('Source optical observation changed')
+        with np.load(source,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
+        if 'points_camera_relative'not in raw:continue
+        posed=observation_scene(result,image,project.root,complete=False);cam=next(c for c in posed['cameras']if c['id']==image['camera'])
+        points=raw['points_camera_relative']
+        if 'uv_original'in raw:points=np.linalg.solve(np.asarray(cam['K']['value']),np.c_[raw['uv_original'],np.ones(len(points))].T).T*raw['depth_relative'][:,None]
+        row['depth_scale']=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',row['image_id']),1.)
+        pose=world_pose(posed,cam);raw['points_world_m']=(points*row['depth_scale'])@pose[:3,:3].T+pose[:3,3]
+        target=folder/f'{index}.npz'
+        np.savez_compressed(target,**raw);row.update(path=target.relative_to(project.root).as_posix(),sha256=sha(target))
+        if row.get('dependencies'):
+            row['dependencies'].update(camera_signature=camera_calibration_signature(result,next(c for c in result['cameras']if c['id']==image['camera'])),camera_pose=pose.tolist())
+    for key,binding in result.get('view_registrations',{}).items():
+        if key in images:binding['camera_signature']=camera_calibration_signature(result,next(c for c in result['cameras']if c['id']==images[key]['camera']))
+    return result
 
 
 def alignment_metrics(project,scene,folder,options=None):
     """Common per-view metrics/overlays for every backend, with honest units."""
+    if (options or{}).get('engine','mujoco')=='isaac'and 'renderer_factory'not in(options or{}):
+        from ..isaac_render import run_job
+        return run_job(project,scene,folder,options,'compare')
     from PIL import Image,ImageOps
     from ..validation import compare,mask_metrics
     from ..rendering import Renderer
@@ -248,15 +360,19 @@ def alignment_metrics(project,scene,folder,options=None):
     from ..scene import local_path,world_pose,validate
     from ..files import write
     options=options or{};rows=cloud_inputs(project,scene);images,state,needs=registered_images(project,scene=scene)
-    result=[];models={}
-    for image in images:
-        active=[r for r in rows if r['image_id']==image['id']]
-        if not active:continue
-        project.checkpoint();posed=observation_scene(scene,image,project.root,complete=False)
-        try:validate(posed,project.root,complete=True)
-        except ValueError as error:needs.append(str(error));continue
-        destination=folder/'previews'/image['id']
-        with Renderer(posed,project.root,folder/'native'/image['id'],options.get('renderer','software-egl'))as renderer:
+    result=[];models={};renderer=None
+    from contextlib import ExitStack
+    with ExitStack()as stack:
+        for image in images:
+            active=[r for r in rows if r['image_id']==image['id']]
+            if not active:continue
+            project.checkpoint();posed=observation_scene(scene,image,project.root,complete=False)
+            try:validate(posed,project.root,complete=True)
+            except ValueError as error:needs.append(str(error));continue
+            destination=folder/'previews'/image['id']
+            if renderer is None:
+                renderer=stack.enter_context(options.get('renderer_factory',Renderer)(posed,project.root,folder/'native',options.get('renderer','software-egl')))
+            else:renderer.update_scene(posed)
             real=np.asarray(ImageOps.exif_transpose(Image.open(local_path(project.root,image['path']))).convert('RGB'))
             metrics=compare(real,renderer.rgb(image['camera']),destination);objects=[]
             for row in active:
@@ -316,7 +432,7 @@ def compare_backends(project,scene,folder,options=None):
         if name!='icp_mask':
             trial,stages['joint']=fit_joint_scene(project,trial,{**options,'cameras':[]})
         if name=='hybrid':trial,stages['depth_bundle']=fit_depth_bundle(project,trial,options)
-        if name!='landmark':trial,stages['masks']=refine_masks(project,trial,folder/name,options)
+        if name!='landmark':trial,stages['render']=fit_scene(project,trial,folder/name,options)
         preserve(scene,trial);validate(trial,project.root)
         candidates[name]=trial
         results[name]={'stages':stages,'runtime_s':time.monotonic()-started,

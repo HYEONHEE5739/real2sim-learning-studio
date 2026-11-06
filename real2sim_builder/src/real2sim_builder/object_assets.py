@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import uuid
+from yaml import YAMLError
 from contextlib import contextmanager
 
 import numpy as np
@@ -28,9 +29,7 @@ def asset_manifests(project):
         for path in sorted(base.glob('*/*/manifest.json')):
             if len(path.parent.name)!=64:continue
             relative=os.path.relpath(path,project.root)
-            checked=local_path(project.root,relative)
-            if checked!=path:raise ValueError('Asset Library path mismatch')
-            result.append(checked)
+            result.append(path)
     return result
 
 
@@ -153,12 +152,17 @@ def _convert(stage,folder):
     return visual,collision,np.ptp(np.concatenate(all_points),axis=0).tolist()
 
 
+def dimensions_match(declared,actual):
+    """Check only known axes; a null dimension does not invent a measurement."""
+    return all(wanted is None or np.isclose(wanted,got,rtol=.02,atol=1e-5)for wanted,got in zip(declared,actual))
+
+
 def register_object_asset(project,path,*,asset_id,dimensions=None,origin='authored object origin',blend=None,generation_id=None):
     """Own a versioned USD closure and portable derivatives; never edit sources."""
     identifier(asset_id);stage,closure=inspect_usda(path);source=Path(path).resolve()
     if dimensions is not None:
-        dims=np.asarray(dimensions['value'],float)
-        if dims.shape!=(3,)or not np.isfinite(dims).all()or min(dims)<=0:raise ValueError('Positive object dimensions required')
+        dims=dimensions['value']
+        if not isinstance(dims,list)or len(dims)!=3 or any(d is not None and(type(d)not in(int,float)or not np.isfinite(d)or d<=0)for d in dims):raise ValueError('Positive object dimensions required')
         if dimensions.get('provenance')not in('measured','estimated','calibrated')or not dimensions.get('evidence'):raise ValueError('Object dimension provenance and evidence required')
     identity={p.relative_to(source.parent).as_posix():sha(p)for p in sorted(closure)}
     version_input={'files':identity,'dimensions':dimensions,'origin':origin,'blend':sha(blend)if blend else None,'converter_sha256':sha(__file__)}
@@ -182,11 +186,15 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
                     UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr('convexHull')
             owned.GetRootLayer().Save()
             visual,collision,size=_convert(owned,pending)
-            if dimensions is not None and not np.allclose(size,dimensions['value'],rtol=.02,atol=1e-5):raise ValueError('USDA bounds disagree with declared object dimensions; fix Blender scale')
+            if dimensions is not None and not dimensions_match(dimensions['value'],size):raise ValueError('USDA bounds disagree with declared object dimensions; fix Blender scale')
+            dimension_record=copy.deepcopy(dimensions)if dimensions else value(size,'estimated',['authored USDA mesh bounds'])
+            if dimensions and any(d is None for d in dims):
+                dimension_record=value(size,'estimated',['authored USDA mesh bounds; only specified axes are constrained'])
+                dimension_record['constraints']=copy.deepcopy(dimensions)
             if blend:shutil.copyfile(blend,pending/'source.blend')
             manifest={'schema':'real2sim.object-asset/1','asset_id':asset_id,'version':version,'entry':'usd/'+source.name,
                 'default_prim':str(stage.GetDefaultPrim().GetPath()),'units':'m','up_axis':'Z','origin':origin,
-                'dimensions':copy.deepcopy(dimensions)if dimensions else value(size,'estimated',['authored USDA mesh bounds']),
+                'dimensions':dimension_record,
                 'visual':visual,'collision':collision,'collision_status':'AUTHORED_UNVALIDATED'if collision else'UNRESOLVED',
                 'source_sha256':sha(source),'source_blend':'source.blend'if blend else None,'physical_verified':False,
                 'files':{p.relative_to(pending).as_posix():sha(p)for p in pending.rglob('*')if p.is_file()}}
@@ -218,7 +226,26 @@ def verify_object_asset(project,record):
 
 
 def list_object_assets(project):
-    return [verify_object_asset(project,read(path))for path in asset_manifests(project)]
+    """Metadata catalogue only; validate closure strictly when a version is used.
+
+    One malformed entry is an item error, never a failure of unrelated Scenes.
+    No USD imports or texture reads are needed to populate a menu.
+    """
+    result=[]
+    for path in asset_manifests(project):
+        relative=os.path.relpath(path,project.root)
+        summary={'asset_id':path.parent.parent.name,'version':path.parent.name,'manifest':relative,
+                 'collision_status':'UNRESOLVED','dimensions':None}
+        try:
+            checked=local_path(project.root,relative)
+            record=read(checked)
+            if not isinstance(record,dict)or record.get('schema')!='real2sim.object-asset/1':raise ValueError('Invalid asset manifest metadata')
+            if any(record.get(k)!=summary[k]for k in('asset_id','version','manifest')):raise ValueError('Asset ID/version/path mismatch')
+            if not all(k in record for k in('files','dimensions','collision_status','entry')):raise ValueError('Incomplete asset metadata')
+            result.append(record)
+        except (ValueError,OSError,KeyError,TypeError,YAMLError)as error:
+            result.append({**summary,'error':str(error)})
+    return result
 
 
 def publish_object_asset(project,manifest,*,source_project=None):

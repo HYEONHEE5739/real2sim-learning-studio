@@ -8,10 +8,10 @@ from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.scene_inputs import SceneInputs
 app=QApplication([]);panel=SceneInputs('.')
 assert not panel.notes.toPlainText()
-assert '[선택형 작업 물체]'in panel.notes.placeholderText()
+assert '자유롭게'in panel.notes.placeholderText()
 panel.load(dict(notes='',notes_saved=False))
 assert not panel.notes.toPlainText()
-assert '[물리·접촉 조건]'in panel.notes.placeholderText()
+assert '별도 필수 치수 입력은 없습니다'in panel.notes.placeholderText()
 panel.load(dict(notes='My measured scene',notes_saved=True))
 assert panel.notes.toPlainText()=='My measured scene'
 panel.load(dict(notes='',notes_saved=True))

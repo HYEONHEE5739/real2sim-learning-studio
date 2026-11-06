@@ -59,7 +59,7 @@ def main(argv=None):
     project=Project(args.project)
     if args.command=='modeling-run':
         from .candidate import Candidate
-        from .automation import run_codex_modeling
+        from .authoring import run_codex_modeling
         result=run_codex_modeling(Candidate(project,args.candidate))
         print(json.dumps(result,indent=2));return 2 if result['status']=='ASSET_REUSE_REVIEW_REQUIRED'else 0
     if args.command=='object-asset':
@@ -84,7 +84,7 @@ def main(argv=None):
         from .rendering import author_object_assets
         selected=Candidate(project,args.candidate);config=project.root/'input/reconstruction.yaml'
         measurements={r['id']:{'value':r['dimensions_m'],'provenance':'measured','evidence':r['evidence']}for r in read(config).get('measurements',[])}if config.is_file()else{}
-        from .automation import record_modeling_results
+        from .authoring import record_modeling_results
         task=selected.root/'modeling/tasks.json';groups=read(task).get('groups',{})if task.is_file()else{}
         requests={name:groups[name]['request_id']for name in args.objects if groups.get(name,{}).get('request_id')}
         result=author_object_assets(selected,args.script,args.objects,measurements,request_ids=requests,
@@ -101,7 +101,8 @@ def main(argv=None):
                 joint_record=read(args.joints)if args.joints else None)
         print(json.dumps(rows,indent=2));return 0
     if args.command=='reconstruct':
-        from .automation import reconstruct,save_configuration
+        from .automation import reconstruct
+        from .authoring import save_configuration
         config=save_configuration(project,read(args.config))if args.config else None
         result=reconstruct(project,candidate=args.candidate,config=config,scene_state=args.scene_state)
         print(json.dumps(result,indent=2));return 0 if result['status']=='DRAFT_READY'else 2

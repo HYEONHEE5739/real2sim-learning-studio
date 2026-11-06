@@ -228,3 +228,43 @@ def test_clone_into_another_workspace_publishes_only_referenced_asset_versions(t
     copied=clone_project(p.root,tmp_path/'second/scenes/cloned')
     assert [a['asset_id']for a in list_object_assets(copied)]==['used']
     assert copied.signature()['files']and all(sha(f)==h for f,h in before.items())
+
+
+def test_malformed_unused_manifest_is_a_catalogue_item_error(tmp_path):
+    from real2sim_builder.object_assets import list_object_assets
+    p=Project.create(tmp_path/'scenes','malformed unused metadata')
+    bad=p.workspace/'object_assets/unused'/('a'*64)/'manifest.json'
+    bad.parent.mkdir(parents=True);bad.write_text('{ unclosed: [')
+    rows=list_object_assets(p)
+    assert len(rows)==1 and rows[0]['asset_id']=='unused'and rows[0]['error']
+
+
+def test_unrelated_broken_asset_is_catalogued_without_blocking_selected_asset(tmp_path):
+    from real2sim_builder.object_assets import list_object_assets,instance_operation,register_object_asset
+    from real2sim_builder.authoring import modeling_tasks
+    from real2sim_builder.project import Project,Candidate
+    from real2sim_builder.files import write
+    p=Project.create(tmp_path/'scenes','selective');c=Candidate.create(p,'draft')
+    good=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='good')
+    broken=p.workspace/'object_assets/broken'/('a'*64)/'manifest.json';write(broken,{'invalid':'metadata'})
+    catalogue=list_object_assets(p)
+    assert len(catalogue)==2 and next(r for r in catalogue if r['asset_id']=='broken')['error']
+    instance_operation(p,good['manifest'],'block')
+    modeling_tasks(c,{'objects':{'block':{'prompt':'box','asset_manifest':good['manifest']}}},{})
+    (p.root/good['manifest']).parent.joinpath(good['entry']).write_bytes(b'corrupt')
+    import pytest
+    with pytest.raises(ValueError):instance_operation(p,good['manifest'],'block')
+def test_partial_memo_dimension_constrains_asset_without_marking_other_axes_measured(tmp_path):
+    import pytest
+    from real2sim_builder.project import Project
+    from real2sim_builder.object_assets import register_object_asset
+    p=Project.create(tmp_path/'scenes','partial')
+    path=asset_fixture(tmp_path/'asset')
+    original=register_object_asset(p,path,asset_id='unconstrained')
+    height=original['dimensions']['value'][2]
+    declared={'value':[None,None,height],'provenance':'measured','evidence':['Scene Memo: height']}
+    asset=register_object_asset(p,path,asset_id='partial',dimensions=declared)
+    assert asset['dimensions']['provenance']=='estimated'
+    assert asset['dimensions']['constraints']==declared
+    with pytest.raises(ValueError,match='bounds disagree'):
+        register_object_asset(p,path,asset_id='wrong_height',dimensions={**declared,'value':[None,None,height*2]})

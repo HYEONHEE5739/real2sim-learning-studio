@@ -211,11 +211,13 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
         if not np.isfinite(data.qpos).all()or not np.isfinite(data.qvel).all():finite=False;break
     final=contacts();speed=float(np.max(abs(data.qvel)))if model.nv else 0.
     penetrations=[r for r in initial if r['distance_m']<-.001]
+    final_penetrations=[r for r in final if r['distance_m']<-.001]
     report['mujoco']={'status':'STEPPED','steps':completed,'simulation_seconds':completed*float(model.opt.timestep),
-        'finite':finite,'initial_contacts':initial,'initial_penetrations':penetrations,'final_contacts':final,
-        'contact_count':len(final),'max_final_generalized_speed':speed,'settled':finite and speed<.01,
+        'finite':finite,'initial_contacts':initial,'initial_penetrations':penetrations,'final_contacts':final,'final_penetrations':final_penetrations,
+        'contact_count':len(final),'max_final_generalized_speed':speed,'settled':finite and speed<.01 and not final_penetrations,
         'parameters':{o['id']:o['physics']for o in dynamic}}
     if penetrations:report['needs'].append('Initial inter-object penetration exceeds 1mm')
+    if final_penetrations:report['needs'].append('Final inter-object penetration exceeds 1mm; low velocity alone is not settling')
     if not finite or speed>=.01:report['needs'].append('Objects did not reach the settling threshold')
     report['needs']+=['Isaac/PhysX steps and robot articulation collision require native execution validation',
                        'Open-container block-drop and independent physical parameter validation remain required']

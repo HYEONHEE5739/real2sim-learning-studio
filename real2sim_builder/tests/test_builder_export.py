@@ -16,6 +16,34 @@ def legacy_scene():
     return scene
 
 
+@pytest.mark.parametrize('height',[.10,.16,.25])
+def test_block_drop_stays_above_thin_convex_cup_floor(tmp_path,height):
+    """Real native contacts: soft response must not push through a 3mm floor."""
+    import trimesh,mujoco
+    from real2sim_builder.scene import value
+    from real2sim_builder.exporters.mjcf import export
+    from real2sim_builder.files import sha
+    scene=legacy_scene();block=scene['objects'][1]
+    block['dimensions']=value([.02]*3,'measured')
+    block['pose']['value'][0][3]=.2;block['pose']['value'][2][3]=height
+    block['physics']['mass_kg']=value(.03,'estimated',['synthetic drop'])
+    mesh=tmp_path/'floor.stl';trimesh.creation.cylinder(radius=.04,height=.003,sections=48).export(mesh)
+    scene['assets']['floor']={'path':'floor.stl','sha256':sha(mesh)}
+    floor=copy.deepcopy(block);floor.update(id='cup_floor',role='receptacle')
+    floor['pose']['value'][2][3]=.0015
+    floor['dimensions']=value([.08,.08,.003],'measured')
+    floor['physics']['mass_kg']=value(None)
+    floor['visual']=floor['collision']={'type':'mesh','asset':'floor'}
+    scene['objects'].append(floor)
+    export(scene,tmp_path,tmp_path/'scene.xml')
+    model=mujoco.MjModel.from_xml_path(str(tmp_path/'scene.xml'));data=mujoco.MjData(model)
+    body=mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_BODY,'block')
+    for _ in range(900):mujoco.mj_step(model,data)
+    assert .0125<data.xpos[body,2]<.0135
+    assert np.max(abs(data.qvel))<.01
+    assert all(c.dist>-.001 for c in data.contact[:data.ncon])
+
+
 def test_original_native_exporters_preserve_body_pose_camera_units(tmp_path):
     from real2sim_builder.exporters import mjcf,usd
     scene=legacy_scene();mjcf.export(scene,tmp_path,tmp_path/'scene.xml');usd.export(scene,tmp_path,tmp_path/'scene.usda')

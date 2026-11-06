@@ -18,19 +18,22 @@ write(p.root/'input/reconstruction.yaml',{'scene_state_id':'layout','anchors':{'
  'fitting':{'max_evaluations':20},'da3':{'process_res':280}})
 d=ReconstructionDialog(p.root,sys.executable)
 config=d.configuration()
+assert d.objects.columnCount()==7
+assert all('mm'not in d.objects.horizontalHeaderItem(i).text()for i in range(7))
+assert 'Scene Memo'in d.tabs.tabText(0)
 assert config['anchors']=={'photo':{'evidence':['board']}}
 assert config['objects']['cube']['images']['photo']['box_xyxy']==[1,2,30,40]
 assert config['objects']['cube']['asset_group']=='blocks'and config['objects']['cube']['category']=='block'
 assert config['objects']['cube']['asset_group_relation']['provenance']=='estimated'
-d.objects.cellWidget(0,9).setCurrentIndex(d.objects.cellWidget(0,9).findData('__new_model__'))
+d.objects.cellWidget(0,4).setCurrentIndex(d.objects.cellWidget(0,4).findData('__new_model__'))
 assert d.configuration()['objects']['cube']['modeling_action']=='new'
 request=d.configuration()['objects']['cube']['modeling_request_id']
 assert d.configuration()['objects']['cube']['modeling_request_id']==request
 d.add_object({'id':'cube2','kind':'box','role':'manipulable_object'})
-d.objects.item(1,11).setText('blocks')
-d.group_asset_choice(d.objects.cellWidget(0,9))
+d.objects.item(1,6).setText('blocks')
+d.group_asset_choice(d.objects.cellWidget(0,4))
 config=d.configuration();assert config['objects']['cube']['modeling_request_id']==config['objects']['cube2']['modeling_request_id']
-d.objects.cellWidget(1,9).setCurrentIndex(0);d.group_asset_choice(d.objects.cellWidget(1,9))
+d.objects.cellWidget(1,4).setCurrentIndex(0);d.group_asset_choice(d.objects.cellWidget(1,4))
 assert all('modeling_action'not in q for q in d.configuration()['objects'].values())
 assert config['measurements'][0]['dimensions_m']==[.03]*3
 assert config['da3']['process_res']==280 and d.objects.rowCount()==2
@@ -122,7 +125,7 @@ from real2sim_builder.ui_reconstruction import ReconstructionDialog
 app=QApplication([]);d=ReconstructionDialog(sys.argv[1],sys.executable)
 assert d.asset_list.count()==1 and 'Workspace' in d.asset_list.itemText(0)
 assert d.objects.rowCount()==2
-assert all(d.objects.cellWidget(r,9).currentData()==d.asset_list.itemData(0)for r in range(2))
+assert all(d.objects.cellWidget(r,4).currentData()==d.asset_list.itemData(0)for r in range(2))
 d.objects.selectRow(1);d.remove_objects()
 assert set(d.configuration()['objects'])=={'cup1'}
 assert d.asset_list.count()==1
@@ -140,7 +143,7 @@ def test_scene_prepare_literal_prompt_to_fake_codex_and_fresh_ui_restore(tmp_pat
     from real2sim_builder.project import Project,Candidate
     from real2sim_builder.files import read,write,sha
     from real2sim_builder.evidence import save_scene_memo
-    from real2sim_builder.automation import modeling_tasks,run_codex_modeling
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
     from real2sim_builder.object_assets import register_object_asset
     from test_object_assets import asset_fixture
     from test_scene_memo_contract import reply_for,fake_cli

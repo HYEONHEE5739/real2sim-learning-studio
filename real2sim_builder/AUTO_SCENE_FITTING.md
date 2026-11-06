@@ -4,6 +4,14 @@
 
 사용자는 Scene Prepare의 메모에 자유롭게 설명하고 **Scene 자료 저장**을 누른다. 별도 문법/단어 목록은 없다. 저장 경로는 `<workspace>/scenes/<project>/input/scene_memo.txt`다. 줄바꿈·언어·기호를 보존하며, Qt에서 원문을 수정하지 않고 다시 저장할 때도 원래 줄바꿈을 유지한다. 새 Project와 빈 메모는 빈 입력으로 남긴다.
 
+실측 치수도 이 메모의 일부다. 별도의 치수 표를 채울 필요가 없다. Codex가 원문과 이미지에서 Object/Asset Group, 치수, 역할·지지면 관계, 모델링 지시를 구조화한다. Python은 치수 문장·키워드를 파싱하지 않는다.
+
+Codex 응답의 `geometry`는 null 또는 `kind`, `dimensions_m`(X/Y/Z, 모르는 축은 null), `source`, `evidence_quote`, `evidence`, `wall_m`, `support`를 갖는다. 예를 들어 “컵 높이는 100mm야”는 Codex가 `[null, null, 0.1]`로 반환한다. `user_memo`는 실제 치수를 명시한 원문 인용이 필요하다. 이미지/복원 추정과 원하는 디자인 치수는 `visual_inference`이며 실측으로 승격하지 않는다. 사용자에게 이 JSON을 작성하도록 요구하지 않는다.
+
+검증된 계획은 `objects.<id>.geometry`에 저장한다. `authoring.geometry_specs`가 이를 보존된 Scene/선택적 기존 `measurements` 자료와 대조하고 Geometry·metric Camera 초기화·모델링에 같은 수치 입력을 전달한다. 기존 측정과 충돌하면 새 계획을 저장하지 않는다. 기존 구조화 측정 파일과 provenance는 그대로 보존하며 이 설정은 고급 선택 입력이다. 새 기본 경로는 `measurements`를 별도로 만들지 않는다.
+
+일부 축만 실측이면 Blender 자산의 해당 축만 확인한다. 자산 전체 크기는 estimated, 알려진 축은 `dimensions.constraints`에 원 실측 출처와 함께 남는다. 실측이 전혀 없으면 기존 Robot/Calibration·다중 시점 기하를 사용하며, metric scale까지 관측 불가능하면 scale=1을 발명하지 않고 필요한 근거를 보고한다. 수평 Support 외 자유 공간 관계는 `modeling_notes`로 Codex에게 전달되며 모든 자연어 관계를 수치 최적화 제약으로 자동 변환하는 기능은 아니다.
+
 ```python
 from real2sim_builder.evidence import scene_memo, save_scene_memo
 save_scene_memo(project, "오른쪽 컵 두 개는 같은 제품이고 위치만 달라.\n")
@@ -18,9 +26,9 @@ python -m real2sim_builder.cli reconstruct PROJECT --candidate NAME
 python -m real2sim_builder.cli modeling-run PROJECT --candidate NAME
 ```
 
-새/변경된 메모가 미해석 상태면 `reconstruct`는 **SAM/DA3 실행 전에** `WAITING_FOR_CODEX_ANALYSIS`와 `modeling/tasks.json`을 만든다. 명시 `modeling-run` 또는 현재 Codex 대화가 원문과 사진을 읽는다. `tasks.json`에는 하나의 `scene_memo.text/sha256`, 등록 사진/선택 Capture 배치·q/시각/Camera metadata, 기존 Object/Group, 명시 실측이 전달된다. 미등록 참고 사진은 문맥 입력이며 metric View로 승인되지 않는다. 다음 재구성에서 기존 SAM→DA3→Blender/Library→정합을 계속한다. Pair 재정합은 기존 Revision geometry 보존 경로를 유지한다.
+새/변경된 메모가 미해석 상태면 `reconstruct`는 **SAM/DA3 실행 전에** `WAITING_FOR_CODEX_ANALYSIS`와 `modeling/tasks.json`을 만든다. 명시 `modeling-run` 또는 현재 Codex 대화가 원문과 사진을 읽는다. `tasks.json`에는 하나의 `scene_memo.text/sha256`, 등록 사진/선택 Capture 배치·q/시각/Camera metadata, 기존 Object/Group과 보존된 측정 자료가 전달된다. 미등록 참고 사진은 문맥 입력이며 metric View로 승인되지 않는다. 다음 재구성에서 기존 SAM→DA3→Blender/Library→정합을 계속한다. Pair 재정합은 기존 Revision geometry 보존 경로를 유지한다.
 
-공식 Codex CLI 응답 Schema는 `automation.scene_analysis_schema()`가 단일 정의다. 최상위 필드는 `scene_memo_sha256`, `objects`, `asset_groups`, `needs`다. Object는 `id/prompt/role/category/asset_group/material_variant/modeling_notes/observations`, Group은 `id/members/relation_source/evidence_quote/change_kind/evidence`를 모두 제공한다. 미제공 문자열은 빈 문자열, 미관측 Box는 null이다. 이 계약은 Codex용이며 사용자가 JSON을 작성할 필요는 없다.
+공식 Codex CLI 응답 Schema는 `authoring.scene_analysis_schema()`가 단일 정의다. 최상위 필드는 `scene_memo_sha256`, `objects`, `asset_groups`, `needs`다. Object는 `id/prompt/role/category/asset_group/material_variant/modeling_notes/observations/geometry`, Group은 `id/members/relation_source/evidence_quote/change_kind/evidence`를 모두 제공한다. 미제공 문자열은 빈 문자열, 미관측 Box는 null이다. 이 계약은 Codex용이며 사용자가 JSON을 작성할 필요는 없다.
 
 `parse_scene_analysis`는 필드·타입·ID 중복·Group 멤버/참조·Image ID/Box·현재 SHA·인용문 존재를 검사한다. 인용문의 **의미**는 Codex가 판단하며, 실제 인용문이 있다고 물리 동일성/정확도가 입증되지는 않는다. 실제 Mask 수/Association·실측 충돌·Manifest/Closure SHA 검사는 별도로 유지한다. `note_relation`, `modeling_change_evidence`와 현재/이력 메모 선택 API는 제거했다.
 
@@ -90,7 +98,7 @@ Fingerprint에는 중복을 제거한 형상 관련 member 정보, 실제 RGB/Ma
 
 Blender Object Authoring은 `--ro-bind / /`를 사용하지 않는다. 빈 루트에 실제 설치 Blender executable, bpy로 찾은 SYSTEM/LOCAL 리소스, ldd로 확인한 라이브러리 디렉터리/로더, 필요한 시스템 폰트/설정, Worker 소스 파일만 읽기 전용으로 노출한다. 작업 폴더가 유일한 호스트 쓰기 경로이고 author.py/inputs는 그 안에서도 읽기 전용이다. `/tmp`는 전용 임시 filesystem, `/dev`는 최소 가상 장치, `/proc`는 새 PID namespace이며 네트워크는 차단한다. HOME은 `/nonexistent`, locale/PATH/temp/thread 설정만 전달하며 부모의 API Key/토큰/인증/Python/loader 환경변수는 전달하지 않는다. 입력 symlink는 거부한다. 런타임/Sandbox 구성을 확인할 수 없으면 권한을 늘리지 않고 중단한다. 일반 Scene Renderer의 환경/실행 방식은 유지한다.
 
-사용자는 Scene Prepare에서 사진·실측·메모 저장 → Auto Reconstruction/Codex 분석 → 공유 Group 검토 → 필요 시 Mask 선택 → 모델링 실행 → 정합/비교 순으로 사용한다. 표에서 Group/종류를 확인·수정할 수 있다. Codex는 그룹마다 Blender root `r2s_id=asset_group` 하나를 작성하고, `blender-object-author --objects ASSET_GROUP ...`로 등록한다. Backend가 기존 instance_operation으로 개별 Instance를 만든다.
+사용자는 Scene Prepare에서 사진·Scene Memo 저장 → Auto Reconstruction/Codex 분석 → 공유 Group 검토 → 필요 시 Mask 선택 → 모델링 실행 → 정합/비교 순으로 사용한다. 표에서 Group/종류를 확인·수정할 수 있다. Codex는 그룹마다 Blender root `r2s_id=asset_group` 하나를 작성하고, `blender-object-author --objects ASSET_GROUP ...`로 등록한다. Backend가 기존 instance_operation으로 개별 Instance를 만든다.
 
 이번 안정화에서는 새 원격 Codex 호출 없이 Fake CLI 응답과 기존 Blender 스크립트를 사용했다. 동일 컵 2개 → 그룹 1개 → 실제 Texture/Collision USDA 1개 → Instance 2개 → 실제 640×480 MuJoCo RGB를 시험했다. RGB/Mask와 치수는 통제 fixture이며 실제 사진 정합 정확도/새 SAM·DA3·원격 모델링 성공으로 보고하지 않는다. 실제 자료의 Camera/Scale·Object 연결이 부족하면 기존 NEEDS_MORE_DATA/AMBIGUOUS를 유지한다.
 
@@ -208,10 +216,11 @@ python -m real2sim_builder.cli physics-check PROJECT --candidate auto_1 --steps 
 
 ```python
 from real2sim_builder.project import Project, Candidate
-from real2sim_builder.automation import reconstruct, save_configuration
+from real2sim_builder.automation import reconstruct
+from real2sim_builder.authoring import save_configuration
 from real2sim_builder.observations import register_image, register_views
 from real2sim_builder.inference import run_models, build_point_clouds
-from real2sim_builder.calibration.hybrid import compare_backends
+from real2sim_builder.calibration.hybrid import fit_scene
 
 project = Project(project_path)
 # UI와 같은 구조화된 구성. 일반 사용자는 UI를 사용한다.
@@ -219,7 +228,7 @@ save_configuration(project, config)
 report = reconstruct(project, candidate="auto_1")
 ```
 
-고급/API용 구성 예:
+고급/API용 구성 예 (기존 수치 측정 자료가 있을 때만 `measurements`를 선택적으로 사용한다. 일반 입력은 Scene Memo이며 아래 표를 작성할 필요가 없다):
 
 ```yaml
 scene_state_id: layout_1
@@ -246,19 +255,22 @@ measurements:
     dimensions_m: [0.03, 0.03, 0.03] # 형식 예; 실제 측정값으로 바꿀 것
     evidence: [caliper_record]
 fitting:
-  backend: hybrid # provisional 요청값. 벤치마크 우승/기본값 선정이 아님
   supports: {block: table}
-  max_evaluations: 100
+  max_iterations: 4
+  max_evaluations: 120 # 반복당 native loss 평가 예산
+  minimum_improvement: 0.0001
+  patience: 2
+  optimize_intrinsics: false # 관측 가능한 변수만 Codex가 선택; 실측 K는 고정
 ```
 
-`measurements`는 box/cylinder/sphere/container다. Container에는 `wall_m`, 선택 `round`, `bottom_diameter_m`를 선언한다. 기존 CAD/Robot은 재생성하지 않는다. 실측으로 보호된 치수와 Robot은 수정하지 않는다. `mass_kg/friction`을 제공하면 `physics_source`를 명시하며 기본 provenance는 estimated다. 새 Object pose는 unknown이며 metric 관측 없이 identity pose를 넣지 않는다.
+선택적 기존 `measurements`는 box/cylinder/sphere/container/mesh다. 메모에서 해석한 새 치수는 `objects.<id>.geometry`로 전달하며 두 설정을 중복 작성하지 않는다. Container에는 `wall_m`, 선택 `round`, `bottom_diameter_m`를 선언한다. 기존 CAD/Robot은 재생성하지 않는다. 실측으로 보호된 치수와 Robot은 수정하지 않는다. `mass_kg/friction`을 제공하면 `physics_source`를 명시하며 기본 provenance는 estimated다. 새 Object pose는 unknown이며 metric 관측 없이 identity pose를 넣지 않는다.
 
 `anchors.<image_id>`는 `world_points_m`, `uv_px`, `source: measured|calibrated`, `evidence`다. `selections.<image_id>.<object_id>`는 Mask 후보 index 또는 수정 PNG 경로다. `objects.<id>.images.<image_id>.box_xyxy`는 원 해상도 Box hint다. 명시 `image_ids`로 같은 배치의 일부 사진만 모델 추론에 사용할 수 있다. 원본 이미지·관절 기록을 덮어쓰지 않는다.
 
 ## 좌표·근거·캐시
 
-- 원 해상도 Mask와 DA3의 실제 resize/center-crop 행렬을 결합한다. 모델의 예측 K를 실제 Calibration으로 부르지 않는다. 현재 metric 역투영은 알려진 undistorted K를 요구한다.
-- World Anchor의 optical 깊이와 DA3 깊이 비율을 robust median으로 추정한다. 근거가 없으면 scale=1로 진행하지 않는다. 측정 Anchor를 썼어도 결과 점군은 derived/estimated다.
+- 원 해상도 Mask와 DA3의 실제 resize/center-crop 행렬을 결합한다. 모델의 예측 K를 실제 Calibration으로 부르지 않는다. 같은 물리 렌즈는 하나의 K를 공유하고 이미지별 resize/crop/EXIF optical 회전을 적용한다. 알 수 없는 crop·거울 반전은 추측하지 않는다.
+- Metric 기준은 검증된 Camera baseline, 다양한 실제 q/FK의 hand-eye, 또는 실측 직사각형 지지면의 가시 Depth다. 지지면 기반 World 원점·축은 명시 좌표 gauge이며 측정된 Robot Base가 아니다. 부분/비평면/크기비 불일치로 식별할 수 없으면 scale=1로 진행하지 않는다. 결과 점군은 derived/estimated다.
 - 유효 Depth·confidence·Mask 경계를 필터링하고 가시 점만 생성한다. 가려진 면을 관측으로 채우지 않는다. EXIF 방향은 원본을 보존한 Candidate-local upright RGB로 한 번만 변환하고 SAM/DA3/코너 지정에서 같은 좌표를 사용한다. Distortion 자동 제거는 아직 제공하지 않으며 undistorted calibration 자료가 필요하다.
 - `inference/sam/<digest>`는 이미지/Object/Prompt·모델·Runtime별 캐시, `inference/da3/<digest>`는 순서 있는 이미지 batch·설정·Calibration·모델별 캐시다. Measurement는 모델 추론 key에 넣지 않으며 바뀐 치수로 정합을 다시 수행한다.
 - `reconstruction_observations`는 Candidate-local NPZ/PNG와 SHA·단위·World frame·scale/Camera 근거를 보존한다. Project signature가 이 파일을 포함한다. 실행 설정도 Candidate-local `reconstruction-config.yaml`에 고정한다. Project의 현재 설정 수정은 원본 Evidence 변경으로 취급하지 않으며, 실행에서 쓴 설정은 Candidate signature와 새 Export에 함께 보존한다. Camera/source가 바뀐 점군은 다시 만든다.
@@ -266,12 +278,49 @@ fitting:
 
 ## 정합과 결과 읽기
 
-A `landmark`: 기존 `fit_joint_scene`. B `icp_mask`: 고정 크기 Geometry와 가시 점군의 trimmed ICP 후 실제 MuJoCo Mask 보정. C `hybrid`: ICP → 기존 공동 Landmark → Mask 보정. 하나의 정적 배치에서 물체 World pose를 공유한다. 명시 수평 Support가 있으면 roll/pitch/Z를 유지한다. 가림 Mask fragment를 전체 silhouette로 취급하지 않는다.
+자동 실행은 `automation.reconstruct → hybrid.fit_scene` 한 경로다. 알 수 없는 물체 pose는 `fit_clouds`로 초기화한다. 이어 선택한 MuJoCo 또는 Isaac의 실제 RGB/Mask/optical depth를 모든 유효 train View에서 렌더하고 공통 Camera/Object 변수를 제한적으로 갱신한다. 원 optical ray를 매 평가에서 현재 K/pose로 재투영한다. Side pose와 Wrist mount는 물리 Camera별 하나이고 measured q·실측 치수·보호된 Calibration은 고정한다. 명시 Support의 upright/높이를 보존하며 종이 테두리를 XY 제한으로 쓰지 않는다.
 
-`fitting/comparison.json`은 동일 입력의 세 초안과 단계별 수치·Runtime과 같은 입력의 per-view RGB/Mask/가시 표면 오차·overlay를 기록한다. 현재 비교는 metric Camera를 고정하며 **Camera/depth bundle adjustment와 독립 성능 근거로 최종 Backend를 선정하는 단계는 미완료**다. 따라서 `winner/default_backend`는 null이다. Ground truth가 없는 경우 mm 정확도를 제공하지 않는다.
+`fitting/report.json`(Isaac은 `fitting/isaac-*/report.json`)은 반복별 공동 loss, View/Object 지표, 최선 상태와 종료 이유를 기록한다. RGB는 0..1 robust 차이, Mask는 누락/초과 비율, Edge는 영상 대각선으로 정규화한 거리, Depth/Metric은 기본 5mm 척도다. 기본 가중치는 RGB .15 / Mask 1 / Edge .5 / Depth .25 / Metric .25 / Prior .005다. 한 View가 기준보다 .05 넘게 나빠지는 갱신은 채택하지 않는다. 정상 중단/오류에서는 최선 상태를 재투영해 `best-scene.yaml`과 Candidate에 보존한다. Native 강제 종료에서는 마지막으로 완료된 반복의 Camera/점군이 일치하는 체크포인트를 보존한다. 예산 소진은 `BUDGET_EXHAUSTED`이고 정합 성공이 아니다. Validation은 최적화/최선 상태 선택에 사용하지 않는다.
 
-`renders/auto_<backend>/previews/<image_id>/`에 반투명 overlay·difference·side-by-side를 저장하고 기존 Builder Compare에서 선택한다. `미검증 초안 새 Export`는 기존 명시 review Export를 호출하며 정상 승인/승격과 구분한다. `reconstruction.json`에는 진행 단계와 필요한 추가 근거가 나온다. `physics/physics.json`은 실제 MuJoCo 수동 물체 중력·접촉 Step만 수행한다. Isaac PhysX Step, Robot Articulation 충돌, Cup block-drop, 독립 물성 검증은 별도 미완료로 표시한다. 정적 렌더나 parser 결과를 Physics-Ready/Task 성공으로 승격하지 않는다.
+`fitting/final/previews/<image_id>/`에 overlay·difference·side-by-side를 저장한다. `compare_backends`는 명시 실험 API에만 남으며 자동 실행이나 기본 Backend 선택에 쓰지 않는다. 실험 구성의 `backend`는 이 비교 함수에서만 의미가 있다. 삭제한 `refine_masks`는 사용하지 않는다.
+
+`미검증 초안 새 Export`는 기존 명시 review Export이며 승인과 구분한다. `reconstruction.json`에는 필요한 추가 근거가 나온다. `physics/physics.json`은 해당 Candidate의 실제 MuJoCo 수동 물체 probe다. Isaac은 `physics-check ... --engine isaac`의 별도 native child로 검사한다. 실행하지 않은 엔진/Robot/Task는 NOT_TESTED다. 실제 사진의 전체 E2E 한계와 재설계 결과는 [현재 검증 기록](../docs/real2sim-multiview-architecture.md)을 따른다.
 
 ## 기존 디버깅/검토 인터페이스
 
 `auto-observe`의 기존 HSV/Marker/Landmark proposal/commit과 `candidate ... fit --target joint:scene`은 baseline/특수 보정용으로 유지한다. 새 자동 경로의 필수 Codex 작업이 아니다. `candidate evaluate`, `promote`, `export`, `verify`의 기존 보호·Revision/Scene Contract는 유지한다. 자동 재구성만으로 이 검토를 우회하거나 Teleop/학습을 실행하지 않는다.
+
+### 공동 렌더 엔진과 외관 설정
+
+기존 Reconstruction 설정의 `fitting`에서 지정한다. UI 프로세스에 Kit를 로드하지 않는다.
+
+```yaml
+fitting:
+  engine: mujoco  # 또는 isaac: 별도 Kit child, 같은 공동 solver
+  max_iterations: 4
+  max_evaluations: 120  # iteration당 평가 예산
+  optimize_appearance: true
+  optimize_lighting: true
+  native_timeout_s: 900  # Isaac child의 일시정지 외 실행 제한
+```
+
+초기 생성은 appearance/lighting을 기본 활성화한다. 추정 일반 물체의 색·roughness/metallic, ambient/광원 energy만 변경하고 보호 실측·Robot·공용 Asset의 불변 재질·Texture는 보존한다. Pair 재정합은 원 재질을 유지하므로 두 옵션을 비활성화한다. 불변 공용 Asset의 재질 변경은 명시 새 Version/Variant 작업이며 이 최적화에서 자동 생성하지 않는다. MuJoCo 재질은 Phong 근사이고 두 엔진의 색상 동등성 인증이 아니다. distortion은 최적화하지 않는다.
+
+### 관측에 따른 자동 변수 선택
+
+공동 렌더 정합은 `joint.select_parameters`에서 **train 관측만** 보고 조정할 변수를 선택한다. 사용자가 매번 Camera/Object 목록을 작성할 필요는 없다. `optimize_intrinsics`, `optimize_depth_scale`, `robot_base`는 기본적으로 후보에 포함하되 아래 조건이 부족하면 현재 값을 고정한다. 명시 `false`는 해당 변수를 제외한다. `true`가 관측 부족이나 보호된 실측을 우회하지는 않는다.
+
+- Camera/Object가 함께 움직여도 구별할 수 없는 경우 Camera를 고정한다. 같은 물체를 관측하는 고정 Camera 또는 위치가 고정된 가시 기준 물체가 필요하다. 다른 사진에만 있는 무관한 기준과 함께 움직이는 Robot Base는 기준으로 빌려 쓰지 않는다.
+- Wrist Mount는 실제 q가 있는 서로 다른 자세 3개 이상, 두 축 이상의 회전 변화가 필요하다. 같은 자세 사진이나 검증용 사진을 더해 이 조건을 채우지 않는다. 렌즈 K에는 서로 다른 시점 3개 이상과 비평면 점군 근거도 요구한다.
+- Camera·K·Scale을 변경하려면 원 pixel 좌표와 relative depth가 필요하다. World/optical 점군만 남은 자료로 Camera를 변경하지 않는다. 고정 Camera의 기존 World 점군은 물체 위치 정합에 계속 사용할 수 있다.
+- Depth Scale에는 같은 batch의 실측 크기와 서로 다른 시점이 필요하다. Robot Base에는 Wrist 관측과 연결된 World 기준이 필요하다. 조건을 충족한 값도 추정 결과이며 실측 Calibration으로 승격하지 않는다.
+- 무늬 없는 단순 구의 회전, 수직 원통의 yaw는 현재 방향을 유지한다. Texture·자식 물체·비대칭 Collision·공용 Asset에는 이 단순 대칭 규칙을 적용하지 않는다. 일반 Mesh의 대칭이나 모든 퇴화를 자동으로 판별하는 기능은 아니다.
+- 색 기준이 고정된 가시 물체 없이 색과 조명을 동시에 바꾸면 서로 보상할 수 있으므로 조명은 고정하고 외관만 조정한다.
+
+처음에는 Geometry 변수만, 이후에는 Appearance 변수만 실행한다. 외관 변수가 있으면 `max_iterations`의 앞쪽 절반(올림)을 Geometry에 배정하고 나머지를 외관에 사용한다. Geometry가 먼저 수렴하거나 조정할 변수가 없으면 바로 외관 단계로 넘어간다. `max_iterations: 1`에서 Geometry 변수가 있으면 외관 단계까지 실행하지 않는다. 기존 평가 예산·최선 체크포인트·중단 처리는 유지한다.
+
+`fitting/report.json`의 `observability.geometry/appearance`에 활성 변수와 고정한 좌표·이유·추가 자료 안내가 나온다. `history[].strategy`는 실제 반복 단계다. 필수 Camera/Object 근거가 부족한 경우 `observability.needs`를 초안 준비 판정에 전달하므로 낮은 loss만으로 준비 완료가 되지 않는다. 선택적 K/Scale/Base의 고정 사유는 별도로 표시하며 그 자체로 전체 실행을 중단하지 않는다.
+
+이 선택은 보수적인 기하 조건 검사다. 자세 중복 기준은 이동 5mm·회전 약 2도 미만이고, Wrist 두 축 회전은 기준 자세 대비 회전 벡터의 두 번째 특잇값 0.05rad 초과를 사용한다. 이는 실측 정확도 보증이나 전체 수치 Jacobian의 rank/불확실성 분석을 대체하지 않는다.
+
+Isaac 렌더는 반복 중 Physics Step 없이 RGB/semantic mask/optical depth를 읽는다. 센서 초기화와 정합의 물리 준비/Task 검증은 별개다. 실행 중 Camera 해상도를 바꾸려면 재초기화한다. 중단/예산 초과는 성공으로 기록하지 않으며 완료된 체크포인트를 보존한다.

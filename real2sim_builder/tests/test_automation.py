@@ -74,7 +74,7 @@ def test_review_export_owns_cloud_and_mask_and_cannot_promote_the_draft(tmp_path
 
 
 def test_mask_selection_preferences_do_not_rebase_the_current_scene_evidence(tmp_path):
-    from real2sim_builder.automation import save_configuration
+    from real2sim_builder.authoring import save_configuration
     from test_builder_export import legacy_scene
     p=Project.create(tmp_path,'preferences');p.save_scene(legacy_scene());before=p.signature()
     save_configuration(p,{'objects':{'block':{'prompt':'cube'}}})

@@ -95,6 +95,77 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def cross_view_associations(report,objects):
+    """Extend seeded instance tracks in one DA3 frame, without SAM order identity.
+
+    Only geometry resolves another view. Unseeded symmetric instances remain
+    ambiguous; missing masks are view-local and never change Asset Identity.
+    """
+    import numpy as np
+    from PIL import Image
+    from scipy.optimize import linear_sum_assignment
+    from .calibration.registration import align_depth_batches
+    from .files import sha
+    batches=report.get('depth_batches',[])
+    if not batches or len({r['image_id']for r in report.get('segments',[])})<2:return report
+    alignment=align_depth_batches(batches);views={};cache={};tracks={}
+    for batch,binding in zip(batches,alignment['batches']):
+        if binding['state']=='UNRESOLVED':continue
+        with np.load(batch['path'],allow_pickle=False)as data:
+            validate_depth_output(data,len(batch['image_ids']))
+            for i,key in enumerate(batch['image_ids']):
+                if key in views:continue
+                ext=np.eye(4);ext[:data['extrinsics'][i].shape[0]]=data['extrinsics'][i]
+                pose=np.linalg.inv(ext);common=np.asarray(binding['T_common_batch'])
+                views[key]=({k:v[i].copy()for k,v in data.items()},pose,common,binding['scale'])
+    def geometry(image,mask):
+        key=(image,mask['sha256'])
+        if key in cache:return cache[key]
+        if image not in views:return None
+        if sha(mask['path'])!=mask['sha256']:raise ValueError('Association Mask SHA changed')
+        raw,pose,common,scale=views[image]
+        pixels=np.asarray(Image.open(mask['path']).convert('L'))>0
+        points,_=object_points(raw['depth'],pixels,raw['intrinsics'],raw['original_to_processed'],confidence=raw.get('conf'),max_points=1500)
+        if len(points)<20:return None
+        points=(points@pose[:3,:3].T+pose[:3,3])*scale
+        points=points@common[:3,:3].T+common[:3,3]
+        center=np.median(points,axis=0);size=max(1e-8,float(np.linalg.norm(np.percentile(points,95,axis=0)-np.percentile(points,5,axis=0))))
+        cache[key]=(center,size)
+        return cache[key]
+    for row in report.get('segments',[]):
+        a=row.get('association',{})
+        if a.get('status')!='ASSIGNED_ESTIMATED':continue
+        data=geometry(row['image_id'],{'path':a['mask_path'],'sha256':a['mask_sha256']})
+        if data:tracks.setdefault(row['object_id'],[]).append(data)
+    for image in views:
+        rows=[r for r in report.get('segments',[])if r['image_id']==image]
+        unresolved=[r for r in rows if r['object_id']in tracks and r.get('association',{}).get('status')!='ASSIGNED_ESTIMATED']
+        used={r['association']['mask_sha256']for r in rows if r.get('association',{}).get('status')=='ASSIGNED_ESTIMATED'}
+        masks={m['sha256']:m for r in unresolved for m in r['masks']if m['sha256']not in used}
+        masks=[m for m in masks.values()if geometry(image,m)]
+        if not unresolved or not masks:continue
+        cost=np.full((len(unresolved),len(masks)),1e6)
+        for i,row in enumerate(unresolved):
+            track=tracks[row['object_id']];center=np.median([t[0]for t in track],axis=0);size=np.median([t[1]for t in track])
+            allowed={m['sha256']for m in row['masks']}
+            for j,mask in enumerate(masks):
+                if mask['sha256']not in allowed:continue
+                observed,extent=geometry(image,mask)
+                cost[i,j]=np.linalg.norm(center-observed)/max(size,extent)
+        ri,ci=linear_sum_assignment(cost)
+        for i,j in zip(ri,ci):
+            score=cost[i,j];alternatives=np.delete(cost[i],j);competitors=np.delete(cost[:,j],i)
+            if score>.65 or np.any(alternatives<score+.2)or np.any(competitors<score+.2):continue
+            row=unresolved[i];mask=masks[j];index=next(k for k,m in enumerate(row['masks'])if m['sha256']==mask['sha256'])
+            row['association']={'status':'ASSIGNED_ESTIMATED','basis':'cross_view_geometry','mask_index':index,'mask_path':mask['path'],
+                'mask_sha256':mask['sha256'],'provenance':'derived','physical_identity_verified':False,'normalized_center_error':float(score)}
+            tracks[row['object_id']].append(geometry(image,mask))
+        for row in unresolved:
+            if row.get('association',{}).get('status')!='ASSIGNED_ESTIMATED'and row['masks']:
+                row['association']={'status':'NOT_FOUND','basis':'No compatible cross-view 3D candidate; occlusion or missed detection'}
+    return report
+
+
 def associate_instances(report,objects,selections=None):
     """Assign per-image observations independently from shared asset identity.
 
@@ -141,7 +212,9 @@ def associate_instances(report,objects,selections=None):
             names=', '.join(r['object_id']for r in rows)
             for row in rows:row['association']={'status':'AMBIGUOUS','basis':'Conflicting same Mask assignments'}
             needs.append(rows[0]['image_id']+': same Mask assigned to multiple Objects: '+names)
-    result['association_needs']=list(dict.fromkeys(needs));return result
+    result=cross_view_associations(result,objects)
+    result['association_needs']=[r['image_id']+'/'+r['object_id']+': '+r['association']['basis']for r in result.get('segments',[])if r['association']['status']!='ASSIGNED_ESTIMATED']
+    return result
 
 
 def build_point_clouds(candidate,report,*,selections=None):

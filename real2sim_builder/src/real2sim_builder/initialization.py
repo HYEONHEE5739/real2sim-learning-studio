@@ -16,28 +16,29 @@ def measured_geometry(scene, measurements):
     result=copy.deepcopy(scene);objects={o['id']:o for o in result['objects']}
     for spec in measurements:
         name=identifier(spec['id']);kind=spec['kind'];evidence=spec.get('evidence',[])
-        dims=np.asarray(spec['dimensions_m'],float)
-        if not evidence or dims.shape!=(3,)or not np.isfinite(dims).all()or min(dims)<=0:
+        raw=spec['dimensions_m'];known=[d for d in raw if d is not None];complete=all(d is not None for d in raw)
+        dims=np.asarray(raw,float);provenance=spec.get('provenance','measured')
+        if not evidence or dims.shape!=(3,)or any(type(d)not in(int,float)or not np.isfinite(d)or d<=0 for d in known)or provenance not in('measured','calibrated','estimated'):
             raise ValueError('Positive measured dimensions and their evidence are required')
         if kind not in('box','cylinder','sphere','container','mesh'):raise ValueError('Unknown measured object kind')
         existing=objects.get(name)
         if existing and (existing.get('link')or existing['role']=='reference_robot'):raise ValueError('Robot geometry is locked')
-        if existing and existing['dimensions']['provenance']in('measured','calibrated')and not np.array_equal(existing['dimensions']['value'],dims):
+        if existing and existing['dimensions']['provenance']in('measured','calibrated')and any(d is not None and d!=existing['dimensions']['value'][i]for i,d in enumerate(raw)):
             raise ValueError('Existing measured dimensions are locked: '+name)
         if existing and existing['dimensions']['provenance']in('measured','calibrated'):
             continue
         geometry={'type':kind}
         if kind=='container':
-            geometry.update(wall=value(spec.get('wall_m'),'measured'if spec.get('wall_m')is not None else'unknown',evidence),round=bool(spec.get('round',False)))
+            geometry.update(wall=value(spec.get('wall_m'),provenance if spec.get('wall_m')is not None else'unknown',evidence),round=bool(spec.get('round',False)))
             if 'bottom_diameter_m'in spec:geometry['bottom_diameter_m']=spec['bottom_diameter_m']
         if existing:
             # Measurements do not replace an existing CAD/compound visual or
             # collision record. Their dimensions are the authority.
-            existing['dimensions']=value(dims.tolist(),'measured',evidence)
+            if complete:existing['dimensions']=value(dims.tolist(),provenance,evidence)
             continue
         role=spec.get('role','manipulable_object')
         obj={'id':name,'role':role,'frame':'world','pose':value(None),
-             'dimensions':value(dims.tolist(),'measured',evidence),'visual':{'type':'unknown'},'collision':copy.deepcopy(geometry)if kind!='mesh'else{'type':'unknown'},
+             'dimensions':value(dims.tolist(),provenance,evidence)if complete else value(None),'visual':{'type':'unknown'},'collision':copy.deepcopy(geometry)if complete and kind!='mesh'else{'type':'unknown'},
              'color':value(spec.get('color',[.5,.5,.5]),'estimated',['display default; not a color measurement']),
              'physics':{'mass_kg':value(None),'friction':value(None)}}
         for field in('mass_kg','friction'):

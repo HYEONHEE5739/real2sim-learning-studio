@@ -1,23 +1,29 @@
 # 자동 Scene 제작·정합 가이드
 
-2026-11-04. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**이다. 사진 분석은 SAM→DA3, 새 외형 제작은 **Codex가 기존 Blender로 작성한 물체별 USDA**, 배치는 기존 Candidate가 담당한다. 기존 USDA가 있거나 Pose만 바뀌면 다시 모델링하지 않는다. 구현·실행 범위는 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [누적 기록](../docs/automated-reconstruction.md)을 따른다.
+2026-11-05. 현재 기본 진입점은 **Scene Prepare → Auto Reconstruction**이다. 사진 분석은 SAM→DA3, 새 외형 제작은 **Codex가 기존 Blender로 작성한 물체별 USDA**, 배치는 기존 Candidate가 담당한다. 기존 USDA가 있거나 Pose만 바뀌면 다시 모델링하지 않는다. 구현·실행 범위는 [자동 정합 사용법](AUTO_SCENE_FITTING.md), [누적 기록](../docs/automated-reconstruction.md)을 따른다.
+
+## Scene Memo 입력 원칙 (2026-11-05)
+
+Scene Memo는 사용자가 Codex에게 전달하는 하나의 자유로운 제작 지시문이다. 장면 설명·실측 치수·공유 제품·공간 관계·형상/색/재질·작업 목적을 한 메모에 작성한다. 항목별 양식이나 별도 치수 입력은 필수가 아니다. Scene Prepare의 안내는 예시 placeholder이며 저장할 메모 본문을 자동 생성하지 않는다.
+
+Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `authoring.scene_analysis_schema/parse_scene_analysis`로 타입·단위(m)·ID·참조·수치·원문 인용/SHA만 검증한다. 정규식/키워드/문장 패턴 기반 치수나 물체 해석기를 추가하지 않는다. 미지 치수는 null, 영상 기반 추정은 estimated다. 부분 실측은 부분 제약으로 보존하며 나머지 축까지 measured로 만들지 않는다. 기존 측정 자료와 충돌하면 검토를 요청하고 원본을 유지한다. 현재 API와 실행법은 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md)의 단일 메모 경로를 따른다.
 
 ## 1. 사용자 흐름과 현재 범위
 
 1. 새 Project에 사진/영상·Capture·메모를 모은다. 정적 배치가 바뀌면 `scene_state_id`를 분리한다.
 2. Auto Reconstruction에서 촬영 배치·사진/영상과 선택적인 실측 치수(mm)를 등록한다. 물체 ID·역할·SAM 설명은 Codex가 Scene 메모/사진을 해석해 구성한다. 설치된 Codex CLI의 명시 시작 버튼 또는 현재 Codex 대화에서 작업자료를 사용할 수 있다. Wrist는 실제 q가 기록된 Capture를 사용한다.
 3. 기존 모델 환경 탭에서 설치된 SAM Python/Checkpoint와 DA3 Python/로컬 snapshot을 한 번 선택한다. Project 구성에 저장된다. 설치·다운로드하지 않는다.
-4. SAM → DA3 → 겹치는 배치 정렬·Camera 초기 추정 → Codex/Blender 작업자료 → USDA 등록/재사용 → Pose 초기화·공동 Depth/Camera/Object 정합 → 렌더/Mask 비교 순서다. 모호한 Mask는 상태 탭에서 선택·수정하고 다시 실행한다.
+4. SAM → DA3 → 겹치는 배치 정렬·Camera 초기 추정 → Codex/Blender 작업자료 → USDA 등록/재사용 → Pose 초기화 → 선택한 MuJoCo/Isaac의 실제 다중 View RGB/Mask/Depth 공동 반복 정합 → 최선 Candidate 비교 순서다. 모호한 Mask는 상태 탭에서 선택·수정하고 다시 실행한다.
 5. 새 물체가 필요하면 `scratch/agent/<candidate>/modeling/CODEX_MODELING.md`를 Codex가 읽고 해당 물체만 만든다. 등록 결과를 재구성이 자동 Import한다. Camera/Scale이 식별되지 않으면 `UNRESOLVED`와 추가 촬영 이유를 남긴다. Current·기존 Export는 바꾸지 않는다.
 6. 검토·기존 Candidate 평가/승격·새 Revision Export는 기존 Builder 기능을 사용한다. 자동 재구성 실행만으로 ACCEPTED/Physics-Ready가 되지 않는다.
 
-사용자에게 K·Extrinsic·Wrist Mount·보드 코너 입력을 요구하지 않는다. DA3 K와 상대 Pose를 초기 추정하고, 공통 이미지의 Depth로 배치 좌표계를 정렬한다. 실제 q/FK의 충분한 Wrist 운동 또는 검증된 카메라 baseline이 Scale 근거다. 기존 검증된 Calibration은 고정한다. 근거가 없으면 Scale=1로 진행하지 않는다. 보드 지정은 고급 진단용 선택 기능이다.
+사용자에게 K·Extrinsic·Wrist Mount·보드 코너 입력을 요구하지 않는다. DA3 K와 상대 Pose를 초기 추정하고, 공통 이미지의 Depth로 배치 좌표계를 정렬한다. 실제 q/FK의 충분한 Wrist 운동, 검증된 카메라 baseline, 또는 가시 실측 직사각형 지지면이 Scale 근거다. 기존 검증된 Calibration은 고정한다. 근거가 없으면 Scale=1로 진행하지 않는다. 보드 지정은 고급 진단용 선택 기능이다.
 
-공동 정합은 원 optical Depth를 매 평가마다 재투영하며 Side Pose, 공유 Wrist Mount, External Pose, 선택한 K/Robot Base/Depth Scale과 Object Pose를 다룬다. Rank가 부족하면 보정을 적용하지 않는다. 일반 렌즈 왜곡 자동 추정·실물 정확도·최종 Backend 선정·전체 Robot/Gripper 물리 검증은 완료하지 않았다. 현재 실제 두 장의 Camera/Scale은 UNRESOLVED다.
+공동 정합은 원 optical Depth를 매 평가마다 재투영하며 Side Pose, 공유 Wrist Mount, External Pose, 선택한 K/Robot Base/Depth Scale과 Object Pose를 다룬다. Hand-eye/수치 bundle의 Rank가 부족하면 보정을 적용하지 않는다. Render 최적화는 추정 초안이며 독립 Calibration 인증이 아니다. 일반 렌즈 왜곡 자동 추정·실물 정확도·전체 Robot/Gripper 물리 검증은 완료하지 않았다. 현재 실제 두 장의 Camera/Scale은 UNRESOLVED다.
 
 ## 물체 USDA 자산과 Codex 명령
 
-신규 Library는 Workspace의 `object_assets/<asset_id>/<version>/manifest.json`에 있다. Project의 `input/object_assets/`는 Legacy로 유지한다. 같은 USDA를 여러 Instance가 참조하고, Instance 제거는 Library를 삭제하지 않는다. Scene Pose는 Candidate에만 있고 USDA root는 identity다. m/+Z·defaultPrim·Mesh/UV/Texture·상대 종속 경로·SHA를 검사한다. Visual과 convex Collision은 분리한다. 알 수 없는 Collision은 UNRESOLVED다.
+신규 Library는 Workspace의 `object_assets/<asset_id>/<version>/manifest.json`에 있다. Project의 `input/object_assets/`는 Legacy로 유지한다. 같은 USDA를 여러 Instance가 참조하고, Instance 제거는 Library를 삭제하지 않는다. Scene Pose는 Candidate에만 있고 USDA root는 identity다. 목록은 Metadata만 읽고 오류를 항목별 표시한다. 선택한 Version을 사용할 때 m/+Z·defaultPrim·Mesh/UV/Texture·상대 종속 경로·SHA를 엄격히 검사한다. 무관한 자산 오류는 전체 Scene을 차단하지 않는다. Visual과 convex Collision은 분리한다. 알 수 없는 Collision은 UNRESOLVED다.
 
 다음 명령은 **Codex가 사용하는 제작 API**다. 사용자가 터미널/JSON을 작성하는 필수 절차가 아니다.
 

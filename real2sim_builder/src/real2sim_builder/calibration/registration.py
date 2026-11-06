@@ -156,3 +156,36 @@ def align_depth_batches(batches):
         if not progress:break
     return {'batches':[resolved.get(i,{'state':'UNRESOLVED','needs':['Add overlapping views; independent DA3 frames were not merged']})for i in range(len(batches))],
             'metric_scale_verified':False,'physical_verified':False}
+
+
+def metric_plane(points,dimensions,*,target_pose=None,camera_centers=()):
+    """Measured rectangular support, visible plane; World origin/yaw may be a gauge.
+
+    Returns an estimate only when the two observed extents agree on scale.
+    Occlusion/truncation is not silently treated as a complete measurement.
+    """
+    from scipy.spatial import ConvexHull
+    points=np.asarray(points,float);size=np.asarray(dimensions,float)
+    if points.ndim!=2 or points.shape[1]!=3 or len(points)<50 or size.shape!=(3,)or not np.isfinite(points).all()or np.any(size<=0):
+        return {'status':'UNRESOLVED','needs':['Visible rectangular support and measured dimensions required']}
+    center=np.median(points,axis=0);_,singular,vt=np.linalg.svd(points-center,full_matrices=False)
+    if singular[1]<1e-9 or singular[2]>singular[1]*.08:return {'status':'UNRESOLVED','needs':['Measured support mask is not a visible plane']}
+    normal=vt[2];centers=np.asarray(camera_centers)
+    if len(centers)and normal@(centers.mean(0)-center)<0:normal=-normal
+    flat=(points-center)@vt[:2].T;hull=flat[ConvexHull(flat).vertices]
+    best=None
+    for edge in np.diff(np.vstack([hull,hull[0]]),axis=0):
+        direction=edge/np.linalg.norm(edge);axes=np.column_stack([direction,[-direction[1],direction[0]]]);projected=flat@axes
+        extent=np.ptp(projected,axis=0);area=np.prod(extent)
+        if best is None or area<best[0]:best=(area,axes,extent,(projected.max(0)+projected.min(0))/2)
+    _,axes,extent,offset=best
+    if (extent[0]>extent[1])!=(size[0]>size[1]):axes=axes[:,::-1];extent=extent[::-1];offset=offset[::-1]
+    scales=size[:2]/extent
+    if np.ptp(scales)/np.mean(scales)>.12:return {'status':'UNRESOLVED','needs':['Observed support aspect ratio disagrees with measurements; check mask/occlusion']}
+    basis=vt[:2].T@axes;x=basis[:,0];y=np.cross(normal,x);rotation=np.column_stack([x,y,normal])
+    source_center=center+basis@offset;scale=float(np.mean(scales))
+    target=np.eye(4)if target_pose is None else np.asarray(target_pose,float)
+    pose=np.eye(4);pose[:3,:3]=target[:3,:3]@rotation.T;pose[:3,3]=target[:3,3]-pose[:3,:3]@(scale*source_center)
+    return {'status':'ESTIMATED','scale':scale,'T_world_relative':pose.tolist(),'source':'measured rectangular support dimensions',
+        'plane_rmse_relative':float(singular[2]/np.sqrt(len(points))),'provenance':'derived','physical_verified':False,
+        'gauge':'support center/normal; in-plane axis sign is not independently calibrated'}

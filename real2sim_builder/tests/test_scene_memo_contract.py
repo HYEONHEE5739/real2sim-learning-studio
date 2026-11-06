@@ -4,8 +4,59 @@ import pytest
 from real2sim_builder.project import Project,Candidate
 from real2sim_builder.files import read,write,sha
 from real2sim_builder.evidence import save_scene_memo,scene_memo
-from real2sim_builder.automation import modeling_tasks,run_codex_modeling,parse_scene_analysis
+from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,parse_scene_analysis
 from test_modeling_handoff import semantic_reply
+
+
+def test_memo_dimensions_flow_through_codex_plan_without_measurement_form(tmp_path):
+    from real2sim_builder.authoring import geometry_specs
+    from real2sim_builder.initialization import measured_geometry
+    p=Project.create(tmp_path,'memo sizes');text='컵 높이는 100mm야. 작업판은 200×150×5mm야.'
+    memo=save_scene_memo(p,text);c=Candidate.create(p,'plan')
+    geometry={'kind':'container','dimensions_m':[None,None,.1],'source':'user_memo',
+              'evidence_quote':'컵 높이는 100mm야.','evidence':[],'wall_m':None,'support':'board'}
+    board={**geometry,'kind':'box','dimensions_m':[.2,.15,.005],'evidence_quote':'작업판은 200×150×5mm야.','support':None}
+    answer=semantic_reply([{'id':'cup','prompt':'cup','role':'receptacle','geometry':geometry},
+                           {'id':'board','prompt':'board','role':'support_surface','geometry':board}],text)
+    modeling_tasks(c,{},{});fake=tmp_path/'codex';fake_cli(fake,text,json.dumps(answer))
+    run_codex_modeling(c,executable=fake,timeout_s=10)
+    config=read(p.root/'input/reconstruction.yaml')
+    assert 'measurements'not in config
+    specs=geometry_specs(config,c.scene)
+    assert specs[0]['dimensions_m']==[None,None,.1] and specs[0]['provenance']=='measured'
+    scene=measured_geometry(c.scene,specs)
+    assert next(o for o in scene['objects']if o['id']=='board')['dimensions']['value']==[.2,.15,.005]
+    assert next(o for o in scene['objects']if o['id']=='cup')['dimensions']['value']is None
+    assert config['fitting']['supports']=={'cup':'board'}
+    job=modeling_tasks(c,config,{})
+    task=read(c.root/'modeling/tasks.json')
+    assert next(g for g in task['objects']if g['object_id']=='cup')['measurements']['dimensions_m']==[None,None,.1]
+    assert scene_memo(p)==memo
+
+
+@pytest.mark.parametrize('bad',('quote','negative','nan','boolean','support'))
+def test_invalid_dimension_plan_is_rejected_without_natural_language_guessing(tmp_path,bad):
+    p=Project.create(tmp_path,'invalid size');memo=save_scene_memo(p,'height 100mm')
+    geometry={'kind':'container','dimensions_m':[None,None,.1],'source':'user_memo',
+              'evidence_quote':'height 100mm','evidence':[],'wall_m':None,'support':None}
+    if bad=='quote':geometry['evidence_quote']='different sentence'
+    elif bad=='negative':geometry['dimensions_m'][2]=-.1
+    elif bad=='nan':geometry['dimensions_m'][2]=float('nan')
+    elif bad=='boolean':geometry['dimensions_m'][2]=True
+    else:geometry['support']='absent'
+    answer=semantic_reply([{'id':'cup','prompt':'cup','role':'receptacle','geometry':geometry}],memo['text'])
+    with pytest.raises(ValueError):parse_scene_analysis(answer,memo)
+
+
+def test_estimates_cannot_replace_preserved_dimensions(tmp_path):
+    from real2sim_builder.authoring import geometry_specs
+    from real2sim_builder.initialization import measured_geometry
+    p=Project.create(tmp_path,'protected');c=Candidate.create(p,'plan')
+    measured={'id':'cube','kind':'box','dimensions_m':[.03]*3,'evidence':['caliper']}
+    scene=measured_geometry(c.scene,[measured])
+    config={'objects':{'cube':{'geometry':{**measured,'dimensions_m':[.05]*3,'provenance':'estimated'}}}}
+    with pytest.raises(ValueError,match='locked|conflict'):geometry_specs(config,scene)
+    assert scene['objects'][0]['dimensions']['value']==[.03]*3
 
 
 def reply_for(text):
@@ -78,7 +129,7 @@ def test_invalid_json_keeps_last_configuration_and_response_for_diagnosis(tmp_pa
 
 
 def test_manual_asset_choices_do_not_skip_a_new_uninterpreted_memo(tmp_path):
-    from real2sim_builder.automation import analysis_required
+    from real2sim_builder.authoring import analysis_required
     memo=save_scene_memo(Project.create(tmp_path,'manual'),'Keep the asset; move the cups.')
     config={'objects':{'cup':{'prompt':'cup','asset_group':'cups','asset_manifest':'chosen/manifest.json'}}}
     assert analysis_required(config,memo['sha256'])
@@ -91,3 +142,14 @@ def test_handoff_text_cannot_disagree_with_frozen_memo_bytes(tmp_path):
     fake=tmp_path/'must_not_run';fake_cli(fake,'a substituted prompt',json.dumps(semantic_reply([],'one real prompt')))
     with pytest.raises(ValueError,match='memo'):run_codex_modeling(c,executable=fake,timeout_s=10)
     assert not(c.root/'modeling/codex').exists()
+
+
+def test_codex_child_receives_only_runtime_and_existing_login_environment(tmp_path,monkeypatch):
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
+    p=Project.create(tmp_path,'minimal child');save_scene_memo(p,'one cup')
+    c=Candidate.create(p,'analysis');modeling_tasks(c,{},{})
+    monkeypatch.setenv('PRIVATE_UNUSED_TOKEN','never-forward-this')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY','never-forward-that')
+    fake=tmp_path/'check_env'
+    fake.write_text('#!'+sys.executable+'\nimport os,sys,json\nfrom pathlib import Path\nassert "PRIVATE_UNUSED_TOKEN"not in os.environ and "AWS_SECRET_ACCESS_KEY"not in os.environ\nPath(sys.argv[sys.argv.index("--output-last-message")+1]).write_text('+repr(json.dumps(semantic_reply([],'one cup')))+')\n')
+    fake.chmod(0o700);run_codex_modeling(c,executable=fake,timeout_s=10)

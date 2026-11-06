@@ -135,7 +135,7 @@ def test_comparison_does_not_mark_rendered_but_unfitted_scene_ready(tmp_path,mon
     metrics={'images':[{'split':'train','image_id':'one','mae':.1}]}
     monkeypatch.setattr(hybrid,'alignment_metrics',lambda *args:metrics)
     unavailable=lambda p,s,*args:(s,{'status':'NEEDS_MORE_DATA','needs':['no fit inputs']})
-    monkeypatch.setattr(hybrid,'fit_clouds',unavailable);monkeypatch.setattr(hybrid,'refine_masks',unavailable)
+    monkeypatch.setattr(hybrid,'fit_clouds',unavailable);monkeypatch.setattr(hybrid,'fit_scene',unavailable)
     monkeypatch.setattr(joint,'fit_joint_scene',unavailable);monkeypatch.setattr(joint,'fit_depth_bundle',unavailable)
     _,report=hybrid.compare_backends(p,scene,p.root/'scratch/compare')
     assert report['status']=='NEEDS_MORE_DATA'
@@ -159,14 +159,12 @@ def test_draft_gate_requires_training_solved_render_finite_pose_and_geometry(tmp
     from real2sim_builder.automation import draft_readiness
     from test_builder_export import legacy_scene
     p=Project.create(tmp_path/'projects','readiness');scene=legacy_scene()
-    solved={'status':'PROVISIONAL_COMPARISON','requested_backend':'hybrid','backends':{'hybrid':{
-        'stages':{'icp':{'status':'ESTIMATED','objects':{'block':{'status':'ESTIMATED'}}}},
-        'metrics':{'images':[{'split':'train','image_id':'photo','mae':.1}]}}}}
+    solved={'status':'OPTIMIZED_UNVERIFIED','converged':True,'training_view_count':2,'after_loss':.1}
     assert draft_readiness(p,scene,solved)['status']=='DRAFT_READY'
     for kind in ['validation_only','backend_failed','missing_visual','missing_pose','nonfinite','no_camera']:
         trial=copy.deepcopy(scene);report=copy.deepcopy(solved)
-        if kind=='validation_only':report['backends']['hybrid']['metrics']['images'][0]['split']='validation'
-        elif kind=='backend_failed':report['backends']['hybrid']['stages']['icp']['status']='FAILED'
+        if kind=='validation_only':report['training_view_count']=0
+        elif kind=='backend_failed':report['status']='BUDGET_EXHAUSTED'
         elif kind=='missing_visual':trial['objects'][1]['visual']={'type':'unknown'}
         elif kind=='missing_pose':trial['objects'][1]['pose']['value']=None
         elif kind=='nonfinite':trial['cameras'][0]['pose']['value'][0][3]=float('nan')

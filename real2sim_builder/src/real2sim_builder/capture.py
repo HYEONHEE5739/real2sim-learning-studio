@@ -309,6 +309,12 @@ def observation_scene(scene, image, root, complete=True):
         if registration['source_image_sha256']!=image['sha256']or registration['scene_state_id']!=image['scene_state_id']:
             raise ValueError('View registration identity differs')
         if registration['status']not in('REGISTERED_ESTIMATED','REGISTERED_CALIBRATED'):raise ValueError('View is not World registered')
+        if registration.get('pixel_from_camera')is not None:
+            camera=next(c for c in result['cameras']if c['id']==image['camera'])
+            camera['K']=value((np.asarray(registration['pixel_from_camera'])@np.asarray(camera['K']['value'])@np.asarray(registration.get('optical_from_camera',np.eye(3))).T).tolist(),camera['K']['provenance'],camera['K'].get('evidence',[]))
+            camera['resolution']=image['resolution']
+            if registration.get('T_world_camera')is None and registration.get('optical_from_camera')is not None:
+                pose=np.asarray(camera['pose']['value']);pose[:3,:3]=pose[:3,:3]@np.asarray(registration['optical_from_camera']).T;camera['pose']=value(pose.tolist(),camera['pose']['provenance'],camera['pose'].get('evidence',[]))
         if registration.get('T_world_camera')is not None:
             camera=next(c for c in result['cameras']if c['id']==image['camera'])
             camera['frame']='world';camera['pose']=value(registration['T_world_camera'],'optimized',registration['calibration_evidence'])

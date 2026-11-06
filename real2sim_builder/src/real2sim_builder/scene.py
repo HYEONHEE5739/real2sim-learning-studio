@@ -44,7 +44,7 @@ def cameras_audited(scene):
 
 def camera_calibration_signature(scene, camera):
     import hashlib, json
-    data = {k: camera.get(k) for k in ('id', 'frame', 'purpose', 'resolution', 'K', 'pose', 'distortion')}
+    data = {k: camera.get(k) for k in ('id', 'frame', 'purpose', 'resolution', 'K', 'pose', 'distortion', 'reference_orientation')}
     data['world_registration'] = scene.get('world_registration')
     data['world'] = scene['frames']['world']
     if camera['frame'].startswith('robot_link_'):

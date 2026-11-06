@@ -1,5 +1,7 @@
 # Automated Real2Sim Reconstruction
 
+최신 후속 변경은 [다중 시점 재설계 기록](real2sim-multiview-architecture.md)의 G절(2026-11-06)을 따른다. 공동 렌더 정합에서 train 관측의 기준·Wrist 움직임·원 pixel/depth·형상 대칭을 확인해 변수를 자동 선택하고, Geometry 뒤에 Appearance를 조정한다. 관측 부족 사유와 추가 촬영 안내를 보고서 및 초안 준비 판정에 연결했다. 아래 Phase 기록은 각 시점의 구현·검증 이력이며, 실제 사진 전체 E2E가 완료됐다는 의미는 아니다.
+
 2026-11-03. 사용자 제공 구현 지시서(2026-11-03)의 Phase 0–7을 구현 기준으로 사용한다. 시작 브랜치는 `workflow-restoration`, HEAD는 `5030b48487271b8ec3178467f7141143d4ee0522`였고 작업 트리는 깨끗했다. 원격 Push/Merge는 이 작업에 포함하지 않는다. 기존 Scene/촬영/Calibration/모델/환경은 원본으로 보존한다.
 
 ## Phase 0 — 조사와 경계
@@ -549,3 +551,10 @@ Candidate의 `modeling/scene_memo_<SHA>.txt`와 `modeling/codex/<job>/answer.jso
 이번 작업의 새 원격 Codex 호출, 새 실제 SAM/DA3 inference, 실물 연결/모터 명령은 모두 0이다. Blender/OpenUSD/MuJoCo와 Qt 회귀 실행은 실제 설치 환경을 사용하며 설치/업그레이드하지 않았다. 독립 실사진/실측 정확도, 일반 자연어 해석 정확도, 전체 PhysX Task, 장시간/전원 장애는 새로 검증하지 않았다. Commit/Push/Merge와 Workspace 복제/이관 변경은 수행하지 않는다.
 
 사용법은 [단일 자유 메모 계약](../real2sim_builder/AUTO_SCENE_FITTING.md)에 반영했다. 소량 로그/JUnit·SHA/기준 비교는 Git 제외 `workbench_runs/scene_memo_refactor_20261104/`에 보관하며 모델 가중치/Runtime/전체 임시 결과는 복제하지 않는다.
+
+
+## 2026-11-05 — 다중 시점 구조 재설계 및 통합 Scene Memo
+
+후속 작업은 `feat/real2sim-multiview`, 기준 `14996df88f54e7e6d2deb997a6553cf94df75595`에서 진행했다. 위의 역사적 단계별 수치는 당시 실행 기록이며 현재 결과로 소급 수정하지 않는다. 현재 코드 감사·교체 목록·실제 호출 흐름·시험 결과·남은 범위는 [다중 시점 파이프라인 보고서](real2sim-multiview-architecture.md)에 기록한다.
+
+Scene Memo에는 실측 치수도 포함된다. Codex가 원문/사진을 이해하고 Python은 구조화된 값만 검증·실행한다. 별도 필수 치수 표는 삭제했으며 기존 측정 데이터는 보존한다. 후속 전체 1,330 passed, baseline과 동일한 66 failed/28 errors, 신규 실패0이다. 이후 중단 체크포인트 수정의 관련19개도 통과했다. 일반 물체의 추정 appearance/lighting 공동 변수와 Isaac native 반복 렌더를 추가했고 기존 Workbench 정적 Isaac 렌더를 같은 구현으로 통합했다. 앞서 실패한 동일 MuJoCo 컵 낙하는 접촉 응답 수정 후 관통 없이 통과했다. 실제 사진의 완성 Scene E2E·독립 정확도, 공용 Asset의 자동 Material Variant·distortion 정합은 미완료다. 물리 준비 완료나 전체 자동화 완료로 표시하지 않는다.

@@ -56,6 +56,191 @@ def _posed(candidate, cached):
     return result
 
 
+def parameter_blocks(scene,observations,options):
+    """One parameter definition for raw-depth and native-render optimization."""
+    blocks=[];bounds=[];cams={c['id']:c for c in scene['cameras']};nodes={o['id']:o for o in scene['objects']}
+    train=[r for r in observations if r['split']=='train'];observed={r['camera']for r in train}
+    translation=float(options.get('translation_bound_m',.08));angle=float(options.get('rotation_bound_rad',.35))
+    if not np.isfinite([translation,angle]).all()or min(translation,angle)<=0:raise ValueError('Positive fitting bounds required')
+    def add(kind,name,seed,size,radius):blocks.append((kind,name,seed,len(bounds),size));bounds.extend(radius)
+    external={r['image_id']for r in train if scene.get('view_registrations',{}).get(r['image_id'],{}).get('T_world_camera')is not None}
+    for name in options.get('cameras',sorted(observed)):
+        cam=cams[name]
+        if name not in observed:continue
+        # External photos share K but have per-view pose, never a second global pose.
+        if cam['pose']['value']is not None and cam['pose']['provenance']not in('measured','calibrated')and not all(r['image_id']in external for r in train if r['camera']==name):
+            add('camera',name,np.asarray(cam['pose']['value']),6,[translation]*3+[angle]*3)
+        if options.get('optimize_intrinsics',False)and cam['K']['provenance']not in('measured','calibrated'):
+            add('intrinsics',name,np.asarray(cam['K']['value']),4,[.15,.15,cam['resolution'][0]*.05,cam['resolution'][1]*.05])
+    if options.get('external_views',True):
+        for key in sorted(external):
+            r=scene['view_registrations'][key]
+            if r['status']!='REGISTERED_CALIBRATED':add('view',key,np.asarray(r['T_world_camera']),6,[translation]*3+[angle]*3)
+    if options.get('robot_base')and 'robot_base'in scene['frames']and scene['frames']['robot_base']['transform']['provenance']not in('measured','calibrated'):
+        add('base','robot_base',np.asarray(scene['frames']['robot_base']['transform']['value']),6,[translation]*3+[angle]*3)
+    default=[n for n in sorted({r['object_id']for r in train})if nodes[n]['role']not in('support_surface','fixture')]
+    for name in options.get('objects',default):
+        obj=nodes[name]
+        if name not in{r['object_id']for r in train}or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['value']is None or obj['pose']['provenance']in('measured','calibrated'):continue
+        support=_support(scene,obj,options.get('supports',{}).get(name))
+        add('object_support'if support else'object',name,(world_pose(scene,obj),support),3 if support else 6,[translation]*2+[angle]if support else[translation]*3+[angle]*3)
+    if options.get('optimize_depth_scale',False):
+        for key in sorted({r.get('depth_batch',r['image_id'])for r in train}):add('scale',key,0.,1,[.25])
+    if options.get('optimize_appearance',False):
+        for name in sorted({r['object_id']for r in train}):
+            obj=nodes[name]
+            # Library assets keep one immutable shared material identity. Scene
+            # lighting can change without silently editing the asset's bytes.
+            if obj.get('object_asset')or obj.get('link')or obj['role']=='reference_robot':continue
+            color=obj['color']
+            if color['value']is not None and color['provenance']not in('measured','calibrated')and not obj['visual'].get('texture'):
+                add('color',name,np.asarray(color['value']),3,[.25]*3)
+            for field,record in obj.get('material',{}).items():
+                if record['provenance']not in('measured','calibrated'):add(field,name,float(record['value']),1,[.25])
+    if options.get('optimize_lighting',False):
+        ambient=scene['lights']['ambient']
+        if ambient['provenance']not in('measured','calibrated'):add('ambient','ambient',np.asarray(ambient['value']),3,[.15]*3)
+        for light in scene['lights'].get('sources',[]):
+            if light['energy']['provenance']not in('measured','calibrated')and light['energy']['value']>0:
+                add('light_energy',light['id'],float(light['energy']['value']),1,[.5])
+    return blocks,np.asarray(bounds)
+
+
+def select_parameters(scene,observations,options,*,stage='geometry'):
+    """Conservative training-only eligibility, not a calibration certificate.
+
+    Keep parameter definitions in parameter_blocks. Select their coordinates
+    here so a known symmetry can lock rotation without losing translation.
+    """
+    if stage not in('geometry','appearance'):raise ValueError('Unknown fitting stage')
+    requested={**options}
+    for key in('optimize_intrinsics','optimize_depth_scale','robot_base'):requested.setdefault(key,True)
+    rows=[r for r in observations if r['split']=='train']
+    blocks,radius=parameter_blocks(scene,rows,requested)
+    nodes={o['id']:o for o in scene['objects']};cameras={c['id']:c for c in scene['cameras']}
+    images={r['image_id']:r for r in rows};frozen=[];needs=[];indices=[]
+    report={'stage':stage,'training_images':sorted(images),'frozen':frozen,'needs':needs,
+        'scope':'geometric eligibility and coordinate gauges; not full numerical identifiability or physical calibration'}
+    def diverse(records):
+        poses=[]
+        for row in records:
+            if row.get('camera_pose')is None:continue
+            pose=np.asarray(row['camera_pose'])
+            if not any(np.linalg.norm(pose[:3,3]-p[:3,3])<.005 and
+                    np.linalg.norm(Rotation.from_matrix(pose[:3,:3]@p[:3,:3].T).as_rotvec())<.035 for p in poses):poses.append(pose)
+        return poses
+    def motion(records):
+        poses=diverse(records)
+        if len(poses)<3:return False
+        turns=np.array([Rotation.from_matrix(p[:3,:3]@poses[0][:3,:3].T).as_rotvec()for p in poses[1:]])
+        return np.linalg.svd(turns,compute_uv=False)[1]>.05
+    moving={b[1]for b in blocks if b[0].startswith('object')}
+    moving_cameras={b[1]for b in blocks if b[0]=='camera'}
+    moving_views={b[1]for b in blocks if b[0]=='view'}
+    moving_base=any(b[0]=='base'for b in blocks)
+    def moves_with_base(frame):
+        while frame is not None:
+            if frame=='robot_base':return moving_base
+            frame=scene['frames'][frame]['parent']
+        return False
+    # Anchor only to visible fixed geometry or a camera already held fixed.
+    # A table elsewhere in the Scene is not evidence for the current image.
+    anchored_objects={r['object_id']for r in rows if r['object_id']not in moving and not moves_with_base(nodes[r['object_id']]['frame'])}
+    anchored_images={key for key,row in images.items()if row['camera']not in moving_cameras and key not in moving_views
+        and not _mounted(scene,cameras[row['camera']]['frame'])and not moves_with_base(cameras[row['camera']]['frame'])}
+    for _ in range(len(images)+1):
+        previous=(len(anchored_objects),len(anchored_images))
+        anchored_objects.update(r['object_id']for r in rows if r['image_id']in anchored_images)
+        anchored_images.update(r['image_id']for r in rows if r['object_id']in anchored_objects)
+        if previous==(len(anchored_objects),len(anchored_images)):break
+    fixed_color=any(nodes[r['object_id']].get('object_asset')or nodes[r['object_id']]['color']['provenance']in('measured','calibrated')
+        or not options.get('optimize_appearance',False) for r in rows)
+    for kind,name,seed,start,count in blocks:
+        appearance=kind in('color','roughness','metallic','ambient','light_energy')
+        if appearance!=(stage=='appearance'):continue
+        reason=None;locked=[];required=False
+        related=[r for r in rows if r['camera']==name]if kind in('camera','intrinsics')else rows
+        if kind=='view':related=[r for r in rows if r['image_id']==name]
+        if kind in('camera','view'):
+            if not any(r['image_id']in anchored_images for r in related):
+                reason='unanchored_camera_object_gauge';required=True
+            if any(r.get('camera_type')=='wrist'for r in related)and(not all(r.get('measured_q')for r in related)or not motion(related)):
+                reason='insufficient_wrist_motion';required=True
+            if not all(r.get('has_raw_depth')for r in related):reason='raw_camera_rays_required';required=True
+        elif kind=='intrinsics':
+            if len(diverse(related))<3 or not any(r.get('cloud_rank',0)==3 for r in related):reason='insufficient_lens_view_geometry'
+            elif not any(r['image_id']in anchored_images for r in related):reason='unanchored_lens_pose_gauge'
+            elif not all(r.get('has_raw_depth')for r in related):reason='raw_camera_rays_required'
+        elif kind=='base':
+            wrist=[r for r in rows if r.get('camera_type')=='wrist'and r.get('measured_q')]
+            if not motion(wrist)or not any(r['image_id']in anchored_images for r in wrist)or not all(r.get('has_raw_depth')for r in wrist):reason='insufficient_world_hand_eye_constraints'
+        elif kind=='scale':
+            related=[r for r in rows if r.get('depth_batch',r['image_id'])==name]
+            metric=any(nodes[r['object_id']]['dimensions']['provenance']in('measured','calibrated')for r in related)
+            if not metric or len(diverse(related))<2 or not all(r.get('has_raw_depth')for r in related):reason='insufficient_metric_scale_constraints'
+        elif kind.startswith('object'):
+            obj=nodes[name];related=[r for r in rows if r['object_id']==name]
+            if not any(r.get('cloud_rank',0)>=2 and(r.get('has_raw_depth')or
+                    (r['camera']not in moving_cameras and r['image_id']not in moving_views))for r in related)and len(diverse(related))<2:
+                reason='insufficient_object_geometry';required=True
+            shape=obj['visual']['type'];dims=obj['dimensions']['value']
+            symmetric=(not obj.get('object_asset')and not obj['visual'].get('texture')and obj['collision']['type']==shape
+                and not any(o.get('parent_object')==name for o in nodes.values()))
+            if symmetric and shape=='sphere'and np.allclose(dims,[dims[0]]*3):locked=list(range(3,count))if kind=='object'else[2]
+            if symmetric and shape=='cylinder'and np.isclose(dims[0],dims[1])and np.allclose(world_pose(scene,obj)[:3,2],[0,0,1]):locked=[5]if kind=='object'else[2]
+        elif kind in('ambient','light_energy')and not fixed_color:reason='albedo_lighting_ambiguity'
+        if reason:
+            actions={
+                'unanchored_camera_object_gauge':'같은 물체가 보이는 고정 기준 Camera 또는 위치가 알려진 기준 물체 관측을 추가하세요.',
+                'insufficient_wrist_motion':'같은 정적 배치에서 서로 다른 두 축으로 회전한 Wrist 자세 3개 이상과 실제 q를 확보하세요.',
+                'insufficient_lens_view_geometry':'같은 렌즈의 서로 다른 시점 3개 이상과 깊이가 다양한 물체 관측을 추가하세요.',
+                'unanchored_lens_pose_gauge':'World 기준을 확보한 뒤 초점·Camera 위치를 함께 정합하세요.',
+                'insufficient_world_hand_eye_constraints':'고정 World 기준과 여러 축으로 움직인 Wrist의 measured-q 관측을 추가하세요.',
+                'insufficient_metric_scale_constraints':'실측 크기와 raw depth가 연결된 서로 다른 시점 관측을 확보하세요.',
+                'insufficient_object_geometry':'유효한 depth 또는 같은 물체를 보는 서로 다른 시점을 추가하세요.',
+                'albedo_lighting_ambiguity':'색이 고정된 물체 관측이 없으므로 현재 조명을 유지하고 물체 외관만 조정합니다.'}
+            actions['raw_camera_rays_required']='Camera를 변경하려면 원 pixel ray/depth 관측을 복구하세요. World 점군만으로 Camera를 재정합하지 않습니다.'
+            frozen.append({'kind':kind,'id':name,'coordinates':list(range(count)),'reason':reason,'action':actions[reason]})
+            if required:needs.append(name+': '+actions[reason])
+            continue
+        if locked:frozen.append({'kind':kind,'id':name,'coordinates':locked,'reason':'uniform_primitive_rotation_symmetry'})
+        indices.extend(i for i in range(start,start+count)if i-start not in locked)
+    report['active']=[{'kind':k,'id':n,'coordinates':[i-s for i in indices if s<=i<s+c]}for k,n,_,s,c in blocks if any(s<=i<s+c for i in indices)]
+    return blocks,radius,np.asarray(indices,dtype=int),report
+
+
+def apply_parameters(scene,blocks,x):
+    from .hybrid import assign_pose
+    result=copy.deepcopy(scene);scales={}
+    for kind,name,seed,start,count in blocks:
+        delta=x[start:start+count]
+        if kind=='scale':scales[name]=float(np.exp(delta[0]));continue
+        if kind in('color','roughness','metallic','ambient','light_energy'):
+            if kind=='light_energy':
+                target=next(l for l in result['lights']['sources']if l['id']==name);field='energy';updated=float(seed*np.exp(delta[0]))
+            elif kind=='ambient':target=result['lights'];field='ambient';updated=np.maximum(0,seed+delta).tolist()
+            else:
+                target=next(o for o in result['objects']if o['id']==name);field=kind
+                if kind=='color':updated=np.clip(seed+delta,0,1).tolist()
+                else:target=target['material'];updated=float(np.clip(seed+delta[0],0,1))
+            target[field]=value(updated,'optimized',['native multiview appearance fit; not measured material']);continue
+        if kind=='intrinsics':
+            k=seed.copy();k[0,0]*=np.exp(delta[0]);k[1,1]*=np.exp(delta[1]);k[0,2]+=delta[2];k[1,2]+=delta[3]
+            next(c for c in result['cameras']if c['id']==name)['K']=value(k.tolist(),'optimized',['joint image/depth fit']);continue
+        pose=seed[0].copy()if kind.startswith('object')else seed.copy()
+        if kind=='object_support':
+            pose[:2,3]+=delta[:2];pose[2,3]=seed[1][2];pose[:3,:3]=Rotation.from_euler('z',delta[2]).as_matrix()@pose[:3,:3]
+        else:pose[:3,3]+=delta[:3];pose[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@pose[:3,:3]
+        if kind.startswith('object'):result=assign_pose(result,name,pose)
+        elif kind=='camera':next(c for c in result['cameras']if c['id']==name)['pose']=value(pose.tolist(),'optimized',['joint image/depth fit'])
+        elif kind=='base':result['frames'][name]['transform']=value(pose.tolist(),'optimized',['joint image/depth fit'])
+        elif kind=='view':result['view_registrations'][name].update(T_world_camera=pose.tolist(),state='OPTIMIZED')
+    if result.get('geometry_constraints'):
+        from ..initialization import apply_geometry_constraints
+        result,_=apply_geometry_constraints(result,result['geometry_constraints'])
+    return result,scales
+
+
 def fit_depth_bundle(project,scene,options=None):
     """Joint camera/mount/base/object/scale fit from raw optical observations.
 
@@ -91,57 +276,10 @@ def fit_depth_bundle(project,scene,options=None):
     training=[r for r in rows if r[0]['split']=='train']
     report={'status':'NEEDS_MORE_DATA','needs':needs,'physical_verified':False,'scope':'OPTIMIZED_UNVERIFIED_DRAFT'}
     if not training:return scene,{**report,'needs':['Raw optical depth observations with registered scale and visible object assets required']}
-    blocks=[];bounds=[]
-    def add(kind,name,seed,size,limits):
-        blocks.append((kind,name,seed,len(bounds),size));bounds.extend(limits)
-    cams={c['id']:c for c in scene['cameras']};observed={r[2]for r in training}
-    translation=float(options.get('translation_bound_m',.08));angle=float(options.get('rotation_bound_rad',.35))
-    if not np.isfinite([translation,angle]).all()or min(translation,angle)<=0:raise ValueError('Positive fitting bounds required')
-    external={r[0]['image_id']for r in training if scene.get('view_registrations',{}).get(r[0]['image_id'],{}).get('T_world_camera')is not None}
-    for name in options.get('cameras',sorted(observed)):
-        cam=cams[name]
-        if name not in observed:continue
-        if cam['pose']['value']is not None and cam['pose']['provenance']not in('measured','calibrated'):
-            add('camera',name,np.asarray(cam['pose']['value']),6,[translation]*3+[angle]*3)
-        if options.get('optimize_intrinsics',False)and cam['K']['provenance']not in('measured','calibrated'):
-            if any(r[2]==name and 'uv_original'not in r[1]for r in training):needs.append(name+': raw pixel rays required to refine K')
-            else:add('intrinsics',name,np.asarray(cam['K']['value']),4,[.15,.15,cam['resolution'][0]*.05,cam['resolution'][1]*.05])
-    for image_id in sorted(external):
-        registration=scene['view_registrations'][image_id]
-        if registration.get('status')=='REGISTERED_CALIBRATED':continue
-        if options.get('external_views',True):add('view',image_id,np.asarray(registration['T_world_camera']),6,[translation]*3+[angle]*3)
-    if options.get('robot_base')and 'robot_base'in scene['frames']and scene['frames']['robot_base']['transform']['provenance']not in('measured','calibrated'):
-        add('base','robot_base',np.asarray(scene['frames']['robot_base']['transform']['value']),6,[translation]*3+[angle]*3)
-    for name in options.get('objects',sorted({r[0]['object_id']for r in training})):
-        obj=original_nodes[name]
-        if name not in models or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['provenance']in('measured','calibrated'):continue
-        support=_support(scene,obj,options.get('supports',{}).get(name))
-        add('object_support'if support else'object',name,(world_pose(scene,obj),support),3 if support else 6,[translation]*2+[angle]if support else[translation]*3+[angle]*3)
-    if options.get('optimize_depth_scale',False):
-        # Scale is shared by inference batch, never independently per object.
-        for group in sorted({r[0].get('depth_batch',r[0]['image_id'])for r in training}):add('scale',group,0.,1,[.25])
+    observations=[{**r[0],'camera':r[2]}for r in training]
+    blocks,bounds=parameter_blocks(scene,observations,options)
     if not blocks:return scene,{**report,'needs':['All observed variables are protected or no variable was selected']}
-    def assign(x):
-        result=copy.deepcopy(scene);scales={}
-        for kind,name,seed,start,count in blocks:
-            delta=x[start:start+count]
-            if kind=='scale':scales[name]=np.exp(delta[0]);continue
-            if kind=='intrinsics':
-                k=seed.copy();k[0,0]*=np.exp(delta[0]);k[1,1]*=np.exp(delta[1]);k[0,2]+=delta[2];k[1,2]+=delta[3]
-                next(c for c in result['cameras']if c['id']==name)['K']=value(k.tolist(),'optimized',['raw depth bundle']);continue
-            pose=seed[0].copy()if kind.startswith('object')else seed.copy()
-            if kind=='object_support':
-                pose[:2,3]+=delta[:2];pose[2,3]=seed[1][2];pose[:3,:3]=Rotation.from_euler('z',delta[2]).as_matrix()@pose[:3,:3]
-            else:pose[:3,3]+=delta[:3];pose[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@pose[:3,:3]
-            if kind.startswith('object'):result=assign_pose(result,name,pose)
-            elif kind=='camera':next(c for c in result['cameras']if c['id']==name)['pose']=value(pose.tolist(),'optimized',['raw depth bundle'])
-            elif kind=='base':result['frames'][name]['transform']=value(pose.tolist(),'optimized',['raw depth bundle'])
-            elif kind=='view':result['view_registrations'][name]['T_world_camera']=pose.tolist()
-            if kind=='view':result['view_registrations'][name]['state']='OPTIMIZED'
-        if result.get('geometry_constraints'):
-            from ..initialization import apply_geometry_constraints
-            result,_=apply_geometry_constraints(result,result['geometry_constraints'])
-        return result,scales
+    def assign(x):return apply_parameters(scene,blocks,x)
     def world_points(trial,scales,row,raw,camera,image):
         posed=observation_scene(trial,image,project.root,complete=False)if image else trial
         cam=next(c for c in posed['cameras']if c['id']==camera);optical=raw['points_camera_relative']

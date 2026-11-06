@@ -18,6 +18,15 @@ def pose(t):
     return {'pos':numbers(t[:3,3]),'quat':numbers(np.r_[q[3],q[:3]])}
 
 
+def material_parameters(obj,part=None):
+    """PBR authoring to native Phong approximation, not material calibration."""
+    material=obj.get('material',{})
+    part=part or{}
+    roughness=part.get('roughness',material.get('roughness',{}).get('value',.5))
+    metallic=part.get('metallic',material.get('metallic',{}).get('value',0.))
+    return {'shininess':1.-roughness,'specular':.5+.5*metallic}
+
+
 def export(scene,root,path):
     validate(scene,root,complete=True);path=Path(path)
     model=ET.Element('mujoco',model=scene['name']);ET.SubElement(model,'compiler',angle='radian',autolimits='true')
@@ -48,6 +57,11 @@ def export(scene,root,path):
                     'contype':'0' if field=='visual' else '1','conaffinity':'0' if field=='visual' else '1',
                     'group':'1' if field=='visual' else '3','rgba':numbers([*part.get('color',obj['color']['value'] or [.5]*3),1 if field=='visual' else 0]),
                     'mass':str(float(mass)/len(collisions)) if dynamic and field=='collision' else '0'}
+                # Default 20ms soft contacts can cross thin container floors at
+                # impact, even with smaller timesteps. Use a critically damped
+                # 4ms response (2 * timestep), also used by native contact pads.
+                # This is a solver setting, not a measured material stiffness.
+                if field=='collision':attrs['solref']='.004 1'
                 kind=part['type'];dims=part['dimensions'];attrs['type']=kind
                 if kind=='box':attrs['size']=numbers(dims/2)
                 elif kind=='sphere':
@@ -65,12 +79,16 @@ def export(scene,root,path):
                 friction=obj['physics']['friction']['value']
                 if friction is not None:attrs['friction']=numbers([friction,.005,.0001])
                 texture=part.get('texture',obj['visual'].get('texture')) if field=='visual' else None
+                material={}
                 if texture:
                     if texture not in texture_names:
                         name='texture_'+str(len(texture_names));texture_names[texture]=name
                         ET.SubElement(assets,'texture',name=name,type='2d',file=os.path.relpath(local_path(root,scene['assets'][texture]['path']),path.parent))
-                        ET.SubElement(assets,'material',name=name,texture=name,texrepeat='1 1',texuniform='true')
-                    attrs['material']=texture_names[texture]
+                    material.update(texture=texture_names[texture],texrepeat='1 1',texuniform='true')
+                if field=='visual'and(obj.get('material')or 'roughness'in part or 'metallic'in part):
+                    material.update({k:str(v)for k,v in material_parameters(obj,part).items()})
+                if material:
+                    name=obj['id']+'_material_'+str(i);ET.SubElement(assets,'material',name=name,**material);attrs['material']=name
                 ET.SubElement(body,'geom',**attrs)
     for light in scene['lights'].get('sources',[]):
         t=np.asarray(light['pose']['value']);gain=float(light['energy']['value'])/1000

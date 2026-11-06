@@ -21,7 +21,10 @@ class ReconstructionDialog(QDialog):
         self.scene=self.project.scene if(self.project.root/'working/current_scene.yaml').exists()else{'objects':[],'cameras':[]}
         box=QVBoxLayout(self);box.addWidget(QLabel(self.project.info['name']+' · Current/기존 Export는 변경하지 않습니다.'))
         self.tabs=QTabWidget();box.addWidget(self.tabs,1)
-        inputs=QWidget();layout=QVBoxLayout(inputs);self.tabs.addTab(inputs,'사진·실측')
+        inputs=QWidget();layout=QVBoxLayout(inputs);self.tabs.addTab(inputs,'Scene Memo·사진')
+        from .evidence import scene_memo
+        memo=QPlainTextEdit();memo.setReadOnly(True);memo.setPlainText(scene_memo(self.project)['text']);memo.setMaximumHeight(140)
+        layout.addWidget(QLabel('Scene Memo · 장면 설명, 실측 크기, 작업 목적을 Codex가 함께 이해합니다. 수정은 Scene Prepare에서 저장하세요.'));layout.addWidget(memo)
         row=QHBoxLayout();layout.addLayout(row);row.addWidget(QLabel('촬영 배치'));self.state=QComboBox();self.state.setEditable(True)
         groups=sorted({i['scene_state_id']for i in self.project.evidence['images']if i.get('scene_state_id')})
         self.state.addItems(groups);self.state.setCurrentText(self.saved.get('scene_state_id',groups[-1]if groups else'layout_1'));row.addWidget(self.state)
@@ -31,8 +34,9 @@ class ReconstructionDialog(QDialog):
         button=QPushButton('사진·영상 등록');button.clicked.connect(lambda:self.guard(self.register_images));layout.addWidget(button)
         layout.addWidget(QLabel('Wrist는 실제 q·시각이 포함된 기존 Capture/Snapshot 등록을 사용합니다. 배치가 바뀌면 다른 ID를 쓰세요.'))
         self.images=QComboBox();layout.addWidget(self.images)
-        layout.addWidget(QLabel('실측 치수: mm. 빈 치수는 추측하지 않습니다. 기존 측정값과 Robot은 보호합니다.'))
-        self.objects=QTableWidget(0,12);self.objects.setHorizontalHeaderLabels(['Object ID','충돌 종류','역할','가로 mm','세로 mm','높이 mm','벽 mm','Support ID','SAM 설명','USDA 자산','물체 종류','공유 Asset Group'])
+        advanced=QWidget();layout=QVBoxLayout(advanced);self.tabs.addTab(advanced,'고급 · 분석 물체/자산')
+        layout.addWidget(QLabel('Codex 분석 결과와 자산 선택 · 치수는 Scene Memo에 자유롭게 적으세요. 미입력 치수는 실측으로 취급하지 않습니다.'))
+        self.objects=QTableWidget(0,7);self.objects.setHorizontalHeaderLabels(['Object ID','역할','Support ID','SAM 설명','USDA 자산','물체 종류','공유 Asset Group'])
         self.objects.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch);layout.addWidget(self.objects,1)
         add=QPushButton('물체 행 추가');add.clicked.connect(lambda:self.add_object({}));layout.addWidget(add)
         remove=QPushButton('선택 물체 삭제');remove.clicked.connect(self.remove_objects);layout.addWidget(remove)
@@ -98,16 +102,15 @@ class ReconstructionDialog(QDialog):
 
     def add_object(self,spec):
         row=self.objects.rowCount();self.objects.insertRow(row);name=spec.get('id','')
-        dims=spec.get('dimensions_m',[None]*3);query=self.saved.get('objects',{}).get(name,{})
-        values=[name,spec.get('kind','box'),spec.get('role','manipulable_object'),*[str(v*1000)if v is not None else''for v in dims],
-                str(spec['wall_m']*1000)if spec.get('wall_m')is not None else'',self.saved.get('fitting',{}).get('supports',{}).get(name,''),query.get('prompt','')]
+        query=self.saved.get('objects',{}).get(name,{})
+        values=[name,spec.get('role','manipulable_object'),self.saved.get('fitting',{}).get('supports',{}).get(name,''),query.get('prompt','')]
         for col,value in enumerate(values):self.objects.setItem(row,col,QTableWidgetItem(str(value)))
-        choice=QComboBox();choice.addItem('자동 판정 / 기존 유지','');choice.addItem('검토 후 새 모델링','__new_model__');self.objects.setCellWidget(row,9,choice)
+        choice=QComboBox();choice.addItem('자동 판정 / 기존 유지','');choice.addItem('검토 후 새 모델링','__new_model__');self.objects.setCellWidget(row,4,choice)
         choice.setProperty('saved_manifest',query.get('asset_manifest')or('__new_model__'if query.get('modeling_action')=='new'else''))
         choice.setProperty('request_id',query.get('modeling_request_id',''))
         choice.activated.connect(lambda _index,c=choice:self.group_asset_choice(c))
-        self.objects.setItem(row,10,QTableWidgetItem(query.get('category','')))
-        self.objects.setItem(row,11,QTableWidgetItem(query.get('asset_group','')))
+        self.objects.setItem(row,5,QTableWidgetItem(query.get('category','')))
+        self.objects.setItem(row,6,QTableWidgetItem(query.get('asset_group','')))
         self.mask_object.addItem(name,name)
 
     def group_asset_choice(self,choice):
@@ -115,36 +118,34 @@ class ReconstructionDialog(QDialog):
         request='request_'+__import__('uuid').uuid4().hex if selection=='__new_model__'else''
         def key(row):
             name=self.objects.item(row,0).text().strip()
-            group=self.objects.item(row,11).text().strip()or name
+            group=self.objects.item(row,6).text().strip()or name
             return group,self.saved.get('objects',{}).get(name,{}).get('material_variant')
-        target=next(row for row in range(self.objects.rowCount())if self.objects.cellWidget(row,9)is choice)
+        target=next(row for row in range(self.objects.rowCount())if self.objects.cellWidget(row,4)is choice)
         for row in range(self.objects.rowCount()):
             if key(row)==key(target):
-                combo=self.objects.cellWidget(row,9);combo.setProperty('request_id',request)
+                combo=self.objects.cellWidget(row,4);combo.setProperty('request_id',request)
                 combo.setCurrentIndex(max(0,combo.findData(selection)))
 
     def configuration(self):
         if self.restore_conflicts:raise ValueError('\n'.join(self.restore_conflicts))
         result=copy.deepcopy(self.saved);result['scene_state_id']=self.state.currentText().strip();result.setdefault('objects',{})
         result['candidate']=self.candidate.text().strip()
-        result['measurements']=[];supports=result.setdefault('fitting',{}).setdefault('supports',{})
-        previous={s['id']:s for s in self.saved.get('measurements',[])};active=set();requests={}
+        supports=result.setdefault('fitting',{}).setdefault('supports',{});requests={}
         for row in range(self.objects.rowCount()):
-            values=[self.objects.item(row,col).text().strip()for col in range(9)];name,kind,role,*_=values
+            values=[self.objects.item(row,col).text().strip()for col in range(4)];name,role,*_=values
             if not name:continue
-            active.add(name)
             query=result['objects'].setdefault(name,{})
             query['role']=role
-            query['category']=self.objects.item(row,10).text().strip()
-            group=self.objects.item(row,11).text().strip()
+            query['category']=self.objects.item(row,5).text().strip()
+            group=self.objects.item(row,6).text().strip()
             if group and group!=query.get('asset_group'):
                 query['asset_group']=group;query['asset_group_relation']={'provenance':'user_declared','status':'CONFIRMED','evidence':['Scene Prepare group selection']}
             elif not group:
                 query.pop('asset_group',None);query.pop('asset_group_relation',None)
-            asset=self.objects.cellWidget(row,9).currentData()
+            asset=self.objects.cellWidget(row,4).currentData()
             if asset=='__new_model__':
                 query['modeling_action']='new';query.pop('asset_manifest',None)
-                choice=self.objects.cellWidget(row,9)
+                choice=self.objects.cellWidget(row,4)
                 key=(group or name,query.get('material_variant'))
                 request=requests.setdefault(key,choice.property('request_id')or('request_'+__import__('uuid').uuid4().hex))
                 choice.setProperty('request_id',request);query['modeling_request_id']=request
@@ -152,18 +153,10 @@ class ReconstructionDialog(QDialog):
                 query['asset_manifest']=asset;query.pop('modeling_action',None);query.pop('modeling_request_id',None)
             else:
                 query.pop('asset_manifest',None);query.pop('modeling_action',None);query.pop('modeling_request_id',None)
-            if values[8]:result['objects'].setdefault(name,{})['prompt']=values[8]
-            if values[7]:supports[name]=values[7]
+            if values[3]:result['objects'].setdefault(name,{})['prompt']=values[3]
+            if values[2]:supports[name]=values[2]
             else:supports.pop(name,None)
-            if any(values[i]for i in(3,4,5)):
-                if not all(values[i]for i in(3,4,5)):raise ValueError(name+': 실측 가로·세로·높이를 모두 입력하세요.')
-                spec=copy.deepcopy(previous.get(name,{}));spec.update(id=name,kind=kind,role=role,
-                    dimensions_m=[float(values[i])/1000 for i in(3,4,5)],evidence=spec.get('evidence')or['user measured values entered in Scene Prepare'])
-                if values[6]:spec['wall_m']=float(values[6])/1000
-                if kind=='container':spec['round']=spec.get('round',True)
-                result['measurements'].append(spec)
         for(kind,key),edit in self.paths.items():result.setdefault(kind,{})[key]=edit.text().strip()
-        result['measurements'].extend(copy.deepcopy(s)for name,s in previous.items()if name not in active and name not in self.deleted_objects)
         for key in self.deleted_objects:
             result['objects'].pop(key,None);supports.pop(key,None)
             for selections in result.get('selections',{}).values():selections.pop(key,None)
@@ -188,12 +181,12 @@ class ReconstructionDialog(QDialog):
 
     def refresh_assets(self):
         # Metadata only in Qt. USD validation/conversion stays in Backend CLI.
-        from .object_assets import asset_manifests
-        records=[read(p)for p in asset_manifests(self.project)]
+        from .object_assets import list_object_assets
+        records=list_object_assets(self.project)
         self.asset_list.clear()
-        for record in records:self.asset_list.addItem(('Workspace · 'if record['manifest'].startswith('../../object_assets/')else'Legacy · ')+record['asset_id']+' · '+record['version'][:8]+' · '+record['collision_status'],record['manifest'])
+        for record in records:self.asset_list.addItem(('Workspace · 'if record['manifest'].startswith('../../object_assets/')else'Legacy · ')+record['asset_id']+' · '+record['version'][:8]+' · '+(record.get('error')or record['collision_status']),record['manifest'])
         for row in range(self.objects.rowCount()):
-            combo=self.objects.cellWidget(row,9);selected=combo.currentData()or combo.property('saved_manifest');combo.clear();combo.addItem('자동 판정 / 기존 유지','');combo.addItem('검토 후 새 모델링','__new_model__')
+            combo=self.objects.cellWidget(row,4);selected=combo.currentData()or combo.property('saved_manifest');combo.clear();combo.addItem('자동 판정 / 기존 유지','');combo.addItem('검토 후 새 모델링','__new_model__')
             for record in records:combo.addItem(('Workspace · 'if record['manifest'].startswith('../../object_assets/')else'Legacy · ')+record['asset_id']+' · '+record['version'][:8],record['manifest'])
             if selected and combo.findData(selected)<0:combo.addItem('선택 자산 확인 필요 · '+str(selected),selected)
             index=combo.findData(selected);combo.setCurrentIndex(max(0,index))

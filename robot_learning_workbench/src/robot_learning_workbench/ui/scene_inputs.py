@@ -3,21 +3,11 @@ from PyQt6.QtCore import pyqtSignal,Qt
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QPushButton,QLabel,QListWidget,QPlainTextEdit,QFileDialog
 
 
-DEFAULT_NOTES = """[장면과 작업 설명]
-
-[실측 크기·위치]
-물체 이름, 가로×세로×높이, 측정 단위를 적어주세요.
-
-[항상 배치할 구성요소]
-
-[선택형 작업 물체]
-실행 Script에서 선택해서 사용할 물체를 적어주세요.
-
-[물리·접촉 조건]
-충돌, 미끄러짐, 질량, 그리퍼 접촉 요구 등을 적어주세요.
-
-[카메라·기타 참고사항]
-"""
+DEFAULT_NOTES = """Codex에게 Scene 제작을 요청하듯 자유롭게 적어주세요.
+장면과 작업 목적, 물체 특징, 알고 있는 실측 크기와 단위,
+같은 제품인 물체, 위치 관계, 원하는 형상·색·재질 등을 함께 설명하면 됩니다.
+예: 두 컵은 같은 제품이고 높이는 100mm야. 빨간 블록을 왼쪽 컵에 넣고 싶어.
+정해진 형식이나 별도 필수 치수 입력은 없습니다."""
 
 
 class SceneInputs(QWidget):

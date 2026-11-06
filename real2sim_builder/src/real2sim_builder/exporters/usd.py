@@ -102,6 +102,8 @@ def export(scene,root,path):
         lines.extend(['    float inputs:intensity = '+str(light['energy']['value']), '    color3f inputs:color = '+tuple_string(light['color']['value'])])
         if kind=='RectLight':lines.extend(['    float inputs:width = '+str(light['size']['value']), '    float inputs:height = '+str(light['size']['value'])])
         lines.append('  }')
-    lines.extend(['  def DistantLight "KeyLight" {','    float inputs:intensity = 1000','  }','}'])
+    lines.extend(['  def DomeLight "AmbientLight" {','    float inputs:intensity = 1000',
+        '    color3f inputs:color = '+tuple_string(scene['lights']['ambient']['value']),'  }',
+        '  def DistantLight "KeyLight" {','    float inputs:intensity = 1000','  }','}'])
     Path(path).write_text('\n'.join(lines)+'\n')
     return {o['id']:'/Scene/'+o['id'] for o in scene['objects']}
