@@ -195,6 +195,15 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
     try:validate(scene,project.root,complete=True)
     except ValueError as error:
         report['needs'].append(str(error));write(output,report);return report
+    if engine=='mujoco':
+        import mujoco
+        from .cameras import pinhole_scene
+        path=folder/'scene.xml';mjcf.export(pinhole_scene(scene),project.root,path)
+        model=mujoco.MjModel.from_xml_path(str(path));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
+        report['collision_query']={'status':'QUERIED','physics_steps':0,'enabled_geometries':sum(bool(model.geom_contype[i]or model.geom_conaffinity[i])for i in range(model.ngeom)),
+            'contacts':[{'a':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom1)),
+                         'b':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom2)),'distance_m':float(c.dist)}for c in data.contact[:data.ncon]],
+            'scope':'initial native collision query; no dynamics or mass/friction validation','physical_verified':False}
     dynamic=[o for o in scene['objects']if o['role']=='manipulable_object']
     for obj in dynamic:
         for field in('mass_kg','friction'):
@@ -236,9 +245,6 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
         finally:
             context.stop();bodies=None;SimulationContext.clear_instance()
     if engine!='mujoco':raise ValueError('Physics engine must be mujoco or isaac')
-    import mujoco
-    path=folder/'scene.xml';mjcf.export(scene,project.root,path)
-    model=mujoco.MjModel.from_xml_path(str(path));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     def contacts():
         return [{'a':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom1)),
                  'b':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom2)),

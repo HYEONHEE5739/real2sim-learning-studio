@@ -161,7 +161,9 @@ def test_failure_does_not_show_old_success_and_runtime_missing_is_actionable(tmp
     qt_check(tmp_path,'''
 d=ui.ReconstructionDialog(p.root,sys.executable)
 missing=ui.runtime_needs({})
-assert all(any(label in item for item in missing)for label in ('SAM3.1','MASt3R','COLMAP'))
+assert not any(any(label in item for label in ('SAM','MASt3R','COLMAP','DA3'))for item in missing)
+ui.os.environ['REAL2SIM_BLENDER']='/missing/blender'
+assert any('Blender'in item for item in ui.runtime_needs({}))
 assert not any('DA3'in item for item in missing)
 d.show_report({'status':'FAILED','error_code':'USAGE_LIMIT'})
 assert '계정 전환'in d.summary.toPlainText()
@@ -213,4 +215,21 @@ scene=c.scene;scene['reconstruction_state']={'id':'new'};write(c.root/'candidate
 d.close();again=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
 assert again.candidate.text()==name
 again.close()
+''')
+
+
+def test_codex_first_ui_has_no_geometry_preflight_and_opens_existing_visual_record(tmp_path):
+    qt_check(tmp_path,'''
+assert not any('SAM' in n or 'COLMAP' in n or 'MASt3R' in n for n in ui.runtime_needs({'sam':{},'geometry':{'backend':'not-installed'}}))
+d=ui.ReconstructionDialog(p.root,sys.executable)
+assert hasattr(d,'evidence_button')
+assert not any('SAM' in title or 'COLMAP' in title for _,title in d.stage_labels.values())
+from real2sim_builder.candidate import Candidate
+from real2sim_builder.visual_evidence import record
+c=Candidate.create(p,d.candidate.text());record(c,'01_scene_analysis','STOPPED',summary='retained')
+opened=[]
+ui.QDesktopServices.openUrl=lambda url:opened.append(url.toLocalFile())
+d.open_evidence()
+assert opened==[str(c.root/'evidence/index.html')]
+d.close()
 ''')

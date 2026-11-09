@@ -1,5 +1,12 @@
 # Real2Sim 입력·독립 자산·정합·Task 통합
 
+## 2026-11-09 현재 실행 계약 — Codex-First
+
+제품 Auto Reconstruction은 Scene/Model 사진과 Memo를 Codex가 직접 분석하고, 기존 Sandbox Blender로 자산을 제작한 뒤 실제 Simulator 렌더를 보며 typed Scene plan을 반복 수정한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 초기 Scene 생성의 필수 단계가 아니다. 최초 Scene/각 Iteration/최종 결과의 실제 Visual Evidence를 Candidate에 보존하고 단일 UI에서 연다.
+
+현재 소유권·전환 이유·실제 실행/검증 범위는 [Codex-First 제작 기록](codex-first-scene-builder.md)을 따른다. 아래의 과거 날짜별 Backend/수치·검증 기록은 당시 범위이며 현재 기본 실행 순서가 아니다. 기존 Calibration/FK/Renderer/Asset/Export 계약과 사용자 원본은 유지한다.
+
+
 2026-11-06. 사용자 「Real2Sim 전체 구현 보완 및 통합 지시서」를 기준으로 진행한다.
 시작 HEAD `6c90f776b7e2bd3a0aca19dcad41c016fda76015`, 브랜치 `fix/baseline-tests-20261106`.
 직전 테스트 정리 미커밋 28개를 유지한다. 해당 소스 상태에서 전체 1,441 passed, 실패/오류/skip 0을 확인했으며 이번 변경 전 기준으로 사용한다.

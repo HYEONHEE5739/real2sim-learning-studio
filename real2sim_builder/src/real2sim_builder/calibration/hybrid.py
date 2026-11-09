@@ -456,7 +456,9 @@ def alignment_metrics(project,scene,folder,options=None):
                     'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2)))if len(trimmed)else None,
                     'independent_3d_position_error_m':None,'rotation_error_rad':None,
                     'scope':'derived depth surface residual; not independent measured pose accuracy'})
-            result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects})
+            scope=scene.get('view_registrations',{}).get(image['id'],{}).get('comparison_scope','full_scene')
+            result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects,
+                'comparison_scope':scope,'use_for_best_selection':scope=='full_scene'})
     report={'images':result,'scene_state_id':state,'needs':list(dict.fromkeys(needs)),
             'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison','camera_quality':camera_quality(result,options.get('camera_quality'))}
     write(folder/'metrics.json',report);return report

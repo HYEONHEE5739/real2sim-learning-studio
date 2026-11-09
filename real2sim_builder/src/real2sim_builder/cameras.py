@@ -12,6 +12,18 @@ CLIP = (0.001, 1000.0)
 CONVENTIONS = {'canonical': '+X right, +Y down, +Z forward', 'render': '+X right, +Y up, -Z forward', 'conversion': OPTICAL_TO_RENDER.tolist(), 'clip_m': list(CLIP)}
 
 
+def pinhole_scene(scene):
+    """Transient native projection; RGB/mask/depth use the original lens warp.
+
+    This descriptor is never a saved Camera calibration or an exported Package.
+    Collision probes also need no lens distortion in their native model.
+    """
+    import copy
+    result=copy.deepcopy(scene)
+    for camera in result['cameras']:camera['distortion']['value']=[0.]*5
+    return result
+
+
 def render_pose(scene, camera):
     return world_pose(scene, camera) @ OPTICAL_TO_RENDER
 

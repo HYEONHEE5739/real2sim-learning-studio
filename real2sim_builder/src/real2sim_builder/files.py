@@ -5,6 +5,7 @@ import yaml
 
 def read(path):
     with Path(path).open() as stream:
+        if Path(path).suffix=='.json':return json.load(stream)
         return yaml.safe_load(stream)
 
 

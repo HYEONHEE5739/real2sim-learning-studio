@@ -29,7 +29,7 @@ Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(reply))
     result=run_codex_modeling(c,executable=exe)
     folder=next((c.root/'modeling/codex').iterdir());manifest=read(folder/'input_manifest.json')
     assert manifest['guidance']['sha256']==sha(folder/'BUILDER_GUIDE.md')
-    assert manifest['guidance']['version']=='2026-11-08'
+    assert manifest['guidance']['version']=='2026-11-09-codex-first-v2'
     assert result['status']=='ANALYZED_OBJECT_PROPOSALS'
     assert read(p.root/'input/reconstruction.yaml')['scene_analysis']['guidance_sha256']==manifest['guidance']['sha256']
     assert 'BUILDER_GUIDE' in (c.root/'modeling/CODEX_MODELING.md').read_text()

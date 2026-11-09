@@ -247,13 +247,10 @@ def test_refit_without_a_saved_plan_analyzes_source_ids_into_candidate_only(tmp_
     assert c.scene==p.scene
 
 
-def test_runtime_reuse_copies_only_saved_installation_settings_and_rejects_ambiguity(tmp_path):
-    from real2sim_builder.authoring import runtime_configuration
-    first=Project.create(tmp_path/'scenes','configured');second=Project.create(tmp_path/'scenes','old package')
-    saved={'sam':{'python':'installed python','model':'installed model','private_token':'must not copy'},'objects':{'wrong':{'prompt':'cup'}}}
-    write(first.root/'input/reconstruction.yaml',saved)
-    result=runtime_configuration(second,{})
-    assert result['sam']=={'python':'installed python','model':'installed model'}and 'objects'not in result
-    assert runtime_configuration(second,{'sam':{'model':'explicit'}})['sam']=={'model':'explicit'}
-    third=Project.create(tmp_path/'scenes','different installation');write(third.root/'input/reconstruction.yaml',{'sam':{'python':'other python','model':'other model'}})
-    assert 'sam'not in runtime_configuration(second,{})
+def test_codex_first_does_not_copy_another_projects_inference_installation(tmp_path):
+    from real2sim_builder.automation import _fitting_configuration
+    config={'sam':{'python':'old','model':'old'},'geometry':{'backend':'mast3r_colmap'},'da3':{'python':'old'},'objects':{'block':{'prompt':'block'}}}
+    result=_fitting_configuration(config,False)
+    assert not set(result)&{'sam','geometry','da3','selections'}
+    assert result['authoring_mode']=='codex'and result['objects']==config['objects']
+    assert 'sam'in config

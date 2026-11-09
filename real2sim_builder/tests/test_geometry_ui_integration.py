@@ -1,9 +1,9 @@
-"""New geometry backend through the current single-screen Workbench entry."""
+"""Codex-first authoring through the current single-screen Workbench entry."""
 from test_reconstruction_ui import qt_check
 import pytest
 
 
-def test_saved_geometry_runtime_is_used_without_reintroducing_environment_forms(tmp_path):
+def test_retired_geometry_settings_do_not_become_runtime_requirements(tmp_path):
     qt_check(tmp_path,'''
 from real2sim_builder.sfm import backend
 model=Path(sys.argv[1])/'weights';model.write_bytes(b'local test checkpoint')
@@ -16,8 +16,8 @@ write(p.root/'input/reconstruction.yaml',config)
 assert ui.runtime_needs(config)==[],ui.runtime_needs(config)
 assert backend({})=='mast3r_colmap'
 legacy={'sam':config['sam'],'da3':config['sam']}
-assert any('MASt3R'in n for n in ui.runtime_needs(legacy)) and backend(legacy)=='mast3r_colmap'
-assert any('MASt3R'in n for n in ui.runtime_needs({'sam':config['sam']}))
+assert ui.runtime_needs(legacy)==[]
+assert ui.runtime_needs({'sam':config['sam']})==[]
 assert ui.runtime_needs({'sam':config['sam']},refit=True)==[]
 d=ui.ReconstructionDialog(p.root,sys.executable)
 assert d.configuration()==config
@@ -35,13 +35,11 @@ d.close()
 ''')
 
 
-def test_native_geometry_progress_maps_to_single_screen_and_preserves_auth_controls(tmp_path):
+def test_codex_render_progress_maps_to_single_screen_and_preserves_auth_controls(tmp_path):
     qt_check(tmp_path,'''
 d=ui.ReconstructionDialog(p.root,sys.executable)
 d.busy=lambda:True
-for stage,phrase,key in [('MASt3R Matching','MASt3R','inference'),
-    ('COLMAP Registration / Bundle Adjustment','COLMAP','inference'),
-    ('Dense Geometry Alignment','Dense','inference'),('Metric Registration','Camera','camera')]:
+for stage,phrase,key in [('CODEX ANALYSIS','Codex','analysis'),('SCENE_COMPOSITION','Camera','camera'),('FITTING','렌더','fitting')]:
  p.update(status='RUNNING',stage=stage)
  d.update_progress()
  assert phrase in d.current.text(),d.current.text()
@@ -76,34 +74,27 @@ panel.close()
 
 
 @pytest.mark.parametrize('refit',[False,True])
-def test_reconstruction_hands_effective_fitting_settings_to_existing_solver(tmp_path,monkeypatch,refit):
+def test_reconstruction_hands_effective_render_settings_without_running_geometry(tmp_path,monkeypatch,refit):
     from test_multiview_pipeline import rendered_fixture
-    from real2sim_builder import automation,authoring,inference,observations,validation
+    from real2sim_builder import automation,inference
     from real2sim_builder.calibration import hybrid
-    from real2sim_builder.project import Candidate
     from real2sim_builder.files import sha
-    project,truth,observed=rendered_fixture(tmp_path);candidate=Candidate(project,'fit')
-    scene=candidate.scene;scene['reconstruction_observations']=observed['reconstruction_observations'];candidate.save(scene)
-    original=sha(project.root/'working/current_scene.yaml');received=[]
-    monkeypatch.setattr(inference,'run_models',lambda *a,**k:{'status':'INFERRED','images':project.evidence['images'],
-        'segments':[],'depth_batches':[],'geometry':{'backend':'mast3r_colmap','status':'GEOMETRY_READY'}})
-    monkeypatch.setattr(observations,'predict_views',lambda *a,**k:{'views':[]})
-    monkeypatch.setattr(inference,'build_point_clouds',lambda *a,**k:scene['reconstruction_observations'])
-    monkeypatch.setattr(automation,'attach_modeled_assets',lambda *a:{'attached':[]})
-    monkeypatch.setattr(automation,'modeling_tasks',lambda *a:{'status':'ASSETS_READY'})
-    def fit(project,scene,folder,options):
-        received.append(options)
-        return scene,{'status':'BUDGET_EXHAUSTED','converged':False,'training_view_count':2,'after_loss':0.}
-    monkeypatch.setattr(hybrid,'fit_scene',fit)
-    monkeypatch.setattr(hybrid,'alignment_metrics',lambda *a:{'images':[]})
-    monkeypatch.setattr(authoring,'fitting_review',lambda *a:{'status':'NEEDS_MORE_DATA','wrist_observed':False})
-    monkeypatch.setattr(validation,'physics_probe',lambda *a:{'status':'NOT_TESTED'})
-    config={'objects':{'block':{'prompt':'block'}},'scene_state_id':'layout','fitting':{'max_evaluations':7}}
+    project,truth,observed=rendered_fixture(tmp_path)
+    original=sha(project.root/'working/current_scene.yaml');received=[];real_compare=hybrid.alignment_metrics
+    def forbidden(*a,**k):raise AssertionError('Retired automatic geometry path executed')
+    monkeypatch.setattr(inference,'run_models',forbidden);monkeypatch.setattr(hybrid,'fit_scene',forbidden)
+    def compare(project,scene,folder,options):
+        received.append(options);return real_compare(project,scene,folder,options)
+    monkeypatch.setattr(hybrid,'alignment_metrics',compare)
+    config={'objects':{'block':{'prompt':'block'}},'scene_state_id':'layout',
+        'scene_plan':{'object_poses':[],'cameras':[],'needs':[]},'fitting':{'max_evaluations':7}}
     result=automation.reconstruct(project,candidate='fit',config=config,refit_only=refit)
     assert received[0]['max_evaluations']==7
     assert received[0]['optimize_appearance']is(not refit)
     if refit:assert received[0]['optimize_dimensions']is False
-    assert result['stages']['geometry_backend']['backend']=='mast3r_colmap'
+    assert 'geometry_backend'not in result['stages']
+    assert result['stages']['first_scene']['views']==2
+    assert not result['stages']['fitting']['solver_executed']
     assert sha(project.root/'working/current_scene.yaml')==original
 
 
@@ -124,7 +115,8 @@ def test_pair_without_a_detected_mask_still_saves_actual_same_pose_rgb_compariso
     from real2sim_builder import automation,inference
     from real2sim_builder.files import read
     p,truth,observed=rendered_fixture(tmp_path)
-    monkeypatch.setattr(inference,'run_models',lambda *a,**k:{'status':'SEGMENTED','images':p.evidence['images'],'segments':[],'depth_batches':[],'scene_state_id':'layout'})
+    def forbidden(*a,**k):raise AssertionError('Segmentation is not a Pair prerequisite')
+    monkeypatch.setattr(inference,'run_models',forbidden)
     result=automation.reconstruct(p,candidate='fit',config={'objects':{'block':{'prompt':'block'}},'scene_state_id':'layout'},refit_only=True)
     assert result['stages']['pair_comparison']['views']==2
     assert result['stages']['codex_review']['status']=='WAITING_FOR_CODEX_REVIEW'

@@ -1,5 +1,12 @@
 # Automated Real2Sim Reconstruction
 
+## 2026-11-09 현재 실행 계약 — Codex-First
+
+제품 Auto Reconstruction은 Scene/Model 사진과 Memo를 Codex가 직접 분석하고, 기존 Sandbox Blender로 자산을 제작한 뒤 실제 Simulator 렌더를 보며 typed Scene plan을 반복 수정한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 초기 Scene 생성의 필수 단계가 아니다. 최초 Scene/각 Iteration/최종 결과의 실제 Visual Evidence를 Candidate에 보존하고 단일 UI에서 연다.
+
+현재 소유권·전환 이유·실제 실행/검증 범위는 [Codex-First 제작 기록](codex-first-scene-builder.md)을 따른다. 아래의 과거 날짜별 Backend/수치·검증 기록은 당시 범위이며 현재 기본 실행 순서가 아니다. 기존 Calibration/FK/Renderer/Asset/Export 계약과 사용자 원본은 유지한다.
+
+
 최신 후속 변경은 [다중 시점 재설계 기록](real2sim-multiview-architecture.md)의 G절(2026-11-06)을 따른다. 공동 렌더 정합에서 train 관측의 기준·Wrist 움직임·원 pixel/depth·형상 대칭을 확인해 변수를 자동 선택하고, Geometry 뒤에 Appearance를 조정한다. 관측 부족 사유와 추가 촬영 안내를 보고서 및 초안 준비 판정에 연결했다. 아래 Phase 기록은 각 시점의 구현·검증 이력이며, 실제 사진 전체 E2E가 완료됐다는 의미는 아니다.
 
 2026-11-03. 사용자 제공 구현 지시서(2026-11-03)의 Phase 0–7을 구현 기준으로 사용한다. 시작 브랜치는 `workflow-restoration`, HEAD는 `5030b48487271b8ec3178467f7141143d4ee0522`였고 작업 트리는 깨끗했다. 원격 Push/Merge는 이 작업에 포함하지 않는다. 기존 Scene/촬영/Calibration/모델/환경은 원본으로 보존한다.

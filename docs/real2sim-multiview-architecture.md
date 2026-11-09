@@ -1,5 +1,12 @@
 # Real2Sim 다중 시점 파이프라인 재설계
 
+## 2026-11-09 현재 실행 계약 — Codex-First
+
+제품 Auto Reconstruction은 Scene/Model 사진과 Memo를 Codex가 직접 분석하고, 기존 Sandbox Blender로 자산을 제작한 뒤 실제 Simulator 렌더를 보며 typed Scene plan을 반복 수정한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 초기 Scene 생성의 필수 단계가 아니다. 최초 Scene/각 Iteration/최종 결과의 실제 Visual Evidence를 Candidate에 보존하고 단일 UI에서 연다.
+
+현재 소유권·전환 이유·실제 실행/검증 범위는 [Codex-First 제작 기록](codex-first-scene-builder.md)을 따른다. 아래의 과거 날짜별 Backend/수치·검증 기록은 당시 범위이며 현재 기본 실행 순서가 아니다. 기존 Calibration/FK/Renderer/Asset/Export 계약과 사용자 원본은 유지한다.
+
+
 현재 작업판 크기 등록 실패의 증상·코드 경로·사진별 진단·설명 정정·미확정 원인은 [작업판 Metric 등록 문제 정리](workspace-metric-registration-issue.md)를 따른다(2026-11-09). 아래 날짜별 기록의 실행 범위는 그대로 보존한다.
 
 2026-11-08 후속 통합: 최신 로컬 단일 UI·Codex 로그인/모델/사용량·Stop/Resume·Support 구현을 기준으로 MASt3R/COLMAP Geometry를 별도 Worktree에 통합했다. 원래 작업 폴더에 적용하거나 Commit/Push/Merge하지 않았다. 충돌 해결·실제 Scene Prepare 버튼/GPU 실행·회귀·백업/보존 범위는 [Geometry 통합 기록](geometry-backend-integration.md)을 따른다. 아래 날짜별 기록은 당시 실행 범위로 유지한다.

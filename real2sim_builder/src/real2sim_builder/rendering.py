@@ -267,6 +267,38 @@ def _blender_repose(description):
             setattr(obj.data, key, settings[key])
         obj['r2s_pixel_aspect'] = [settings['pixel_aspect_x'], settings['pixel_aspect_y']]
 
+def _blender_object_views(objects,folder):
+    """Real four-view CPU renders of the just-authored visual, not evidence placeholders."""
+    scene=bpy.context.scene;bpy.context.view_layer.update()
+    visual=[]
+    for obj in objects:
+        parent=obj;collision=False
+        while parent:
+            collision=collision or bool(parent.get('r2s_collision'));parent=parent.parent
+        if obj.type=='MESH'and not collision:visual.append(obj)
+    if not visual:raise ValueError('No visual mesh for modeling evidence')
+    corners=[obj.matrix_world@Vector(corner)for obj in visual for corner in obj.bound_box]
+    low=Vector([min(v[i]for v in corners)for i in range(3)]);high=Vector([max(v[i]for v in corners)for i in range(3)])
+    center=(low+high)/2;span=max(max(high-low),.001)
+    hidden={obj:obj.hide_render for obj in scene.objects}
+    for obj in scene.objects:obj.hide_render=obj not in visual
+    camera_data=bpy.data.cameras.new('EvidenceCamera');camera=bpy.data.objects.new('EvidenceCamera',camera_data);scene.collection.objects.link(camera)
+    camera_data.type='ORTHO';camera_data.ortho_scale=span*1.6;camera_data.clip_start=span*.001;camera_data.clip_end=span*100;scene.camera=camera
+    light_data=bpy.data.lights.new('EvidenceLight','AREA');light=bpy.data.objects.new('EvidenceLight',light_data);scene.collection.objects.link(light)
+    light.location=center+Vector((3,-3,5))*span;light.rotation_euler=(center-light.location).to_track_quat('-Z','Y').to_euler();light_data.energy=100;light_data.size=span*4
+    scene.render.engine='CYCLES';scene.cycles.device='CPU';scene.cycles.samples=8;scene.cycles.seed=0
+    scene.render.resolution_x=320;scene.render.resolution_y=320;scene.render.resolution_percentage=100
+    scene.render.image_settings.file_format='PNG';scene.render.image_settings.color_mode='RGB';scene.view_settings.view_transform='Standard'
+    scene.world=bpy.data.worlds.new('EvidenceWorld');scene.world.use_nodes=True;scene.world.node_tree.nodes.get('Background').inputs['Color'].default_value=(.3,.3,.3,1)
+    views={}
+    for name,axis in {'front':(0,-1,.1),'side':(1,0,.1),'top':(0,0,1),'isometric':(1,-1,1)}.items():
+        camera.location=center+Vector(axis).normalized()*span*3;camera.rotation_euler=(center-camera.location).to_track_quat('-Z','Y').to_euler()
+        path=folder/(name+'.png');scene.render.filepath=str(path);bpy.ops.render.render(write_still=True);views[name]=str(path)
+    bpy.data.objects.remove(camera,do_unlink=True);bpy.data.objects.remove(light,do_unlink=True)
+    for obj,state in hidden.items():obj.hide_render=state
+    return views
+
+
 def _blender_main():
     request = json.loads(Path(sys.argv[sys.argv.index('--blender-worker') + 1]).read_text())
     folder = Path(request['output'])
@@ -305,8 +337,9 @@ def _blender_main():
             elif 'export_textures'in supported:options['export_textures']=True
             if 'convert_scene_units'in supported:options.update(convert_scene_units='METERS',meters_per_unit=1.)
             bpy.ops.wm.usd_export(**options)
+            views=_blender_object_views(objects,target)
             for obj in objects:obj.matrix_world=saved[obj]
-            outputs.append({'id':name,'usda':str(target/(name+'.usda'))})
+            outputs.append({'id':name,'usda':str(target/(name+'.usda')),'previews':views})
         (folder/'result.json').write_text(json.dumps({'status':'OK','objects':outputs,'blend':str(folder/'source.blend')}))
         return
     if action in ('build', 'render'):
@@ -381,7 +414,8 @@ class Renderer:
         self.mj=mujoco;self.scene=scene;self.camera_views={c['id']:c for c in scene['cameras']};self.renderers={};self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
         scratch=Path(scratch);scratch.mkdir(parents=True,exist_ok=True)
         self.root=root;self.scratch=scratch
-        export(scene,root,scratch/'scene.xml')
+        from .cameras import pinhole_scene
+        export(pinhole_scene(scene),root,scratch/'scene.xml')
         self.model=mujoco.MjModel.from_xml_path(str(scratch/'scene.xml'));self.data=mujoco.MjData(self.model)
         mujoco.mj_forward(self.model,self.data)
 
@@ -805,4 +839,6 @@ def author_object_assets(candidate,script,object_ids,measurements=None,*,request
             write(folder/'registered.json',records)
             if on_registered:on_registered(records[-1])
         write(folder/'registered.json',records)
-        return {'status':'REGISTERED_UNVALIDATED','assets':records,'physical_verified':False}
+        return {'status':'REGISTERED_UNVALIDATED','assets':records,'build':str(folder),
+            'authored_usda':{r['id']:r['usda']for r in result['objects']},
+            'previews':{r['id']:r.get('previews',{})for r in result['objects']},'physical_verified':False}

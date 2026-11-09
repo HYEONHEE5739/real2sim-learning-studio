@@ -68,6 +68,10 @@ col=bpy.context.object;col.name="collision";col["r2s_collision"]=True;col.parent
     assert record['collision_status']=='AUTHORED_UNVALIDATED' and len(record['visual'])==1 and len(record['collision'])==1
     assert sha(c.root/'candidate_scene.yaml')==original
     assert record['source_blend']=='source.blend'
+    assert set(result['previews']['block'])=={'front','side','top','isometric'}
+    from PIL import Image
+    for path in result['previews']['block'].values():
+        with Image.open(path)as image:assert image.size==(320,320)
 
 
 def test_object_authoring_cannot_write_other_project_files(tmp_path,monkeypatch):

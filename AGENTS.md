@@ -11,6 +11,12 @@
 3. 소스 소유권: `real2sim_builder/src/real2sim_builder/`의 `authoring.py`(메모 분석·Codex/Blender), `automation.py`(단일 파이프라인 조율), `inference.py`(SAM/DA3), `observations.py`(사진/등록/3D 대응), `calibration/joint.py`·`hybrid.py`(공동 정합), `rendering.py`·`isaac_render.py`(엔진 렌더), `object_assets.py`(버전 자산), `capture.py`(q/FK/Pair), `export.py`(불변 패키지), `ui_reconstruction.py`(UI). Workbench는 `robot_learning_workbench/src/robot_learning_workbench/scene_preparation.py`, `tasks/`, `engines/`, `recipe.py`를 재사용한다.
 4. 원본 사진·Capture·Robot q·Mapping·실측·기존 Scene/Asset/Export는 수정하지 않는다. 사용자 요청이 없는 `git reset/clean/rebase/force push`, 커밋, Push, Merge 및 장치 구동은 하지 않는다. 불필요한 신규 Framework/Manager/Config/중복 실행기를 만들지 않는다.
 
+## 2026-11-09 우선 실행 계약
+
+제품 Reconstruction은 Codex의 실제 Scene/Model 이미지 분석 → 독립 Object bpy/USDA → 추정 Scene/Camera 구성 → 실제 Simulator 렌더 → Codex typed 수정의 기존 단일 호출 경로를 사용한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 자동 제작의 선행 조건이 아니다. 기존 Calibration/FK/기하 검증·진단 API의 별도 사용은 유지한다.
+
+Candidate Visual Evidence에 실제 입력/SHA·가이드/모델·Script/자산·최초 Scene·모든 Iteration Before/After·최선/물리/센서/미검증 상태를 남긴다. 기존 단일 UI의 제작 기록 버튼을 사용하며 새 Agent Framework/Manager/별도 앱은 만들지 않는다. 상세 현재 계약은 `docs/codex-first-scene-builder.md`와 최신 `CODEX_SCENE_GUIDE.md`다. 아래 이전 설계와 충돌하면 이 절과 최신 사용자 지시를 우선한다.
+
 ## 최신 설계 (이전 문서와 다를 때 우선)
 
 - **휴대폰 다중 시점:** Object 식별, 가려진 형상, 크기 비율, 상대 배치, USDA 초기 3D 복원을 위한 근거. 촬영 pose/K/절대 scale은 실제 anchor 없으면 추정이다. 초기 Photo 단계에서는 추정 Virtual Camera로 다중 View 렌더 공동 정합도 수행한다. 사진 학습 잔차를 독립 정확도로 표시하지 않으며 최종 Wrist/Side 품질을 희생하지 않는다.

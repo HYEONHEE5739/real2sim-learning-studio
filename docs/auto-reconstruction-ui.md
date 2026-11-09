@@ -1,5 +1,12 @@
 # Auto Reconstruction — 로그인·사용량·중단·재개
 
+## 2026-11-09 현재 실행 계약 — Codex-First
+
+제품 Auto Reconstruction은 Scene/Model 사진과 Memo를 Codex가 직접 분석하고, 기존 Sandbox Blender로 자산을 제작한 뒤 실제 Simulator 렌더를 보며 typed Scene plan을 반복 수정한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 초기 Scene 생성의 필수 단계가 아니다. 최초 Scene/각 Iteration/최종 결과의 실제 Visual Evidence를 Candidate에 보존하고 단일 UI에서 연다.
+
+현재 소유권·전환 이유·실제 실행/검증 범위는 [Codex-First 제작 기록](codex-first-scene-builder.md)을 따른다. 아래의 과거 날짜별 Backend/수치·검증 기록은 당시 범위이며 현재 기본 실행 순서가 아니다. 기존 Calibration/FK/Renderer/Asset/Export 계약과 사용자 원본은 유지한다.
+
+
 2026-11-07. Scene Prepare의 기존 **Auto Reconstruction** 버튼으로 여는 창이다. Scene Prepare의 입력·저장·Capture UI는 변경하지 않았다. 이전 다섯 탭과 수동 물체/Mask/USDA/환경 편집 UI 및 그 이벤트 코드는 제거했다. 고급 모드는 없다.
 
 ## 사용법

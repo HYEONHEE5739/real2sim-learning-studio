@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from PyQt6.QtCore import QProcess,QProcessEnvironment,QThread,QTimer,QSettings,pyqtSignal
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QUrl,QProcess,QProcessEnvironment,QThread,QTimer,QSettings,pyqtSignal
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,
     QPushButton,QPlainTextEdit,QGroupBox,QProgressBar)
 from .project import Project
@@ -37,19 +38,11 @@ def saved_configuration(project,candidate):
 
 
 def runtime_needs(config,*,refit=False):
-    from .sfm import backend
+    """Only the installed authoring tools; retired inference models are irrelevant."""
+    import shutil
     needs=[]
-    geometry=config.get('geometry',{});selected=backend(config)
-    runtimes=[('SAM3.1',config.get('sam',{}),True)]
-    if selected=='mast3r_colmap'and not refit:
-        runtimes.extend([('MASt3R',geometry,True),('COLMAP',{'python':geometry.get('colmap_python')},False)])
-    for label,spec,checkpoint in runtimes:
-        python=Path(spec.get('python')or'/nonexistent')
-        model=Path(spec.get('model')or'/nonexistent')
-        if not python.is_file()or not os.access(python,os.X_OK):needs.append(label+': 저장된 Python 실행 경로가 없습니다.')
-        if checkpoint and not model.exists():needs.append(label+': 저장된 로컬 모델 경로가 없습니다.')
-    if selected=='mast3r_colmap'and not refit and not(Path(geometry.get('source')or'/nonexistent')/'mast3r/model.py').is_file():
-        needs.append('MASt3R: 저장된 공식 소스 경로가 없습니다.')
+    if not shutil.which(os.environ.get('REAL2SIM_BLENDER','blender')):needs.append('Blender: 기존 실행 파일을 REAL2SIM_BLENDER로 지정하세요.')
+    if not shutil.which('bwrap'):needs.append('Blender Sandbox: 기존 bwrap 실행 파일이 필요합니다.')
     return needs
 
 
@@ -119,15 +112,15 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         scene_layout.addWidget(QLabel('저장된 Evidence · Capture · Scene Memo 자동 사용'))
         progress=QGroupBox('Scene 제작 진행 상황');steps=QVBoxLayout(progress);layout.addWidget(progress)
         self.stage_labels={}
-        from .sfm import backend
-        backend(saved);perception='SAM3.1 / MASt3R / COLMAP'
+        perception='Object / Reference 연결'
         for key,title in (('analysis','장면 분석'),('inference',perception),('modeling','Blender USDA 제작'),
-                          ('camera','Camera / Scale 초기화'),('fitting','Real/Sim 정합 및 Codex 수정 검토'),('checkpoint','최선 결과 저장')):
+                          ('camera','최초 Scene / 추정 Camera 구성'),('fitting','Real/Sim 정합 및 Codex 수정 검토'),('checkpoint','최선 결과 저장')):
             label=QLabel('○ '+title);steps.addWidget(label);self.stage_labels[key]=(label,title)
         self.current=QLabel('저장된 작업 확인 중…');self.current.setWordWrap(True);steps.addWidget(self.current)
         row=QHBoxLayout();layout.addLayout(row)
         self.start=QPushButton('생성 시작 / 이어서 실행');self.start.clicked.connect(self.run);row.addWidget(self.start)
         self.stop=QPushButton('중단');self.stop.clicked.connect(self.request_stop);self.stop.setEnabled(False);row.addWidget(self.stop)
+        self.evidence_button=QPushButton('제작 기록 / 결과 이미지 보기');self.evidence_button.clicked.connect(self.open_evidence);layout.addWidget(self.evidence_button)
         self.summary=QPlainTextEdit();self.summary.setReadOnly(True);self.summary.setMaximumHeight(150);layout.addWidget(self.summary)
         self.process.readyReadStandardOutput.connect(self.discard_output);self.process.readyReadStandardError.connect(self.discard_output)
         self.process.finished.connect(self.finished);self.process.errorOccurred.connect(self.process_error)
@@ -141,8 +134,6 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
     def configuration(self):
         result=saved_configuration(self.project,self.candidate.text())
         if self.refit:
-            from .authoring import runtime_configuration
-            result=runtime_configuration(self.project,result)
             if self.source_identity:result['refit_source_identity']=self.source_identity
             if self.capture_ids:result['refit_capture_ids']=self.capture_ids
             # Select the saved Pair layout, not the earlier Scene Prepare layout.
@@ -306,13 +297,10 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         try:
             state=self.project.state;report=json.loads((root/'reconstruction.json').read_text())if(root/'reconstruction.json').is_file()else{}
             stages=report.get('stages',{});stage=state.get('stage')if self.busy() else None
-            mapping={'CODEX ANALYSIS':'analysis','ANALYZE':'inference','GEOMETRY':'modeling','CODEX_MODELING':'modeling',
-                     'CAMERA & SCALE':'camera','Metric Registration':'camera','FITTING':'fitting','CODEX_REVIEW':'fitting','CHECKPOINT':'checkpoint','SENSOR_REGISTRATION':'camera','JOINT_SENSOR_FITTING':'fitting',
-                     'MASt3R Matching':'inference','COLMAP Registration / Bundle Adjustment':'inference',
-                     'Dense Geometry Alignment':'inference','COLMAP Registration / Bundle Adjustment / Dense Geometry Alignment':'inference'}
+            mapping={'CODEX ANALYSIS':'analysis','SCENE_COMPOSITION':'camera','GEOMETRY':'modeling','CODEX_MODELING':'modeling','FITTING':'fitting','CODEX_REVIEW':'fitting','CHECKPOINT':'checkpoint'}
             config=self.configuration()
-            complete={'analysis':bool(config.get('scene_analysis')),'inference':stages.get('inference',{}).get('status')=='INFERRED',
-                'modeling':stages.get('modeling',{}).get('status')=='ASSETS_READY','camera':bool(stages.get('clouds',{}).get('clouds')),
+            complete={'analysis':bool(config.get('scene_analysis')),'inference':bool(config.get('objects')),
+                'modeling':stages.get('modeling',{}).get('status')=='ASSETS_READY','camera':stages.get('first_scene',{}).get('status')=='RENDERED',
                 'fitting':report.get('status')=='VISUAL_DRAFT_REVIEWED','checkpoint':bool(report.get('selected_checkpoint'))}
             count=state.get('codex_calls',report.get('modeling_calls',0));review=state.get('review_calls',report.get('review_calls',0))
             assets=json.loads((root/'modeling/results.json').read_text())if(root/'modeling/results.json').is_file()else{}
@@ -323,13 +311,17 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
                 text=('● 'if mapping.get(stage)==key else'✓ 'if complete[key]else'○ ')+title
                 if key=='modeling':text+=f' ({completed}/{total})'
                 if label.text()!=text:label.setText(text)
-            labels={'CODEX ANALYSIS':'Codex 장면 분석 중','ANALYZE':'SAM3.1 / Geometry 실행 중','CODEX_MODELING':'Codex USDA 모델링 중','GEOMETRY':'USDA 연결 중','CAMERA & SCALE':'Camera/Scale 초기화 중','Metric Registration':'Camera/Scale 초기화 중',
-                'MASt3R Matching':'MASt3R Matching 중','COLMAP Registration / Bundle Adjustment':'COLMAP 등록 / Bundle Adjustment 중',
-                'Dense Geometry Alignment':'Dense Geometry 정합 중','COLMAP Registration / Bundle Adjustment / Dense Geometry Alignment':'COLMAP / Dense Geometry 준비 중',
-                'SENSOR_REGISTRATION':'Side/Wrist 센서 초기 정합 중','JOINT_SENSOR_FITTING':'휴대폰·Side/Wrist 공동 정합 중','OBSERVATIONS':'관측 점군 구성 중','FITTING':'Real/Sim 정합 중','CODEX_REVIEW':'Codex 수정 검토 중','PHYSICS':'물리 검사 중','VALIDATION':'결과 저장 중'}
+            labels={'CODEX ANALYSIS':'Codex 이미지·메모 분석 중','CODEX_MODELING':'Codex Blender 모델링 중','GEOMETRY':'USDA 자산 연결 중','SCENE_COMPOSITION':'최초 Scene / 추정 Camera 구성 중',
+                'FITTING':'실제 다중 View 렌더 생성 중','CODEX_REVIEW':'Codex Before/After 검토 중','PHYSICS':'실제 물리 진단 중','VALIDATION':'결과 저장 중'}
             self.current.setText(f"현재 작업: {labels.get(stage,report.get('status','대기'))} · 완료 Codex {count}회 / 검토 {review}회")
             if not self.busy() and report and not self.report_started:self.show_report(report)
         except (OSError,ValueError,KeyError):pass  # Atomic writer may be replacing a record.
+
+    def open_evidence(self):
+        path=self.project.root/'scratch/agent'/self.candidate.text()/'evidence/index.html'
+        if path.is_file()and not path.is_symlink()and path.resolve().is_relative_to(self.project.root.resolve()):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        else:self.summary.setPlainText('아직 생성된 제작 기록이 없습니다. 실행한 단계부터 실제 결과를 보존합니다.')
 
     def show_report(self,report):
         status=report.get('status','FAILED');code=report.get('error_code')

@@ -5,6 +5,10 @@ from real2sim_builder.automation import retain_fitting,restore_fitting
 
 
 def metrics(p,c,error):
+    from PIL import Image
+    folder=c.root/'fitting/final/previews/w';folder.mkdir(parents=True,exist_ok=True)
+    for kind in ('real','sim','side_by_side','overlay','difference'):
+        if not(folder/(kind+'.png')).exists():Image.new('RGB',(8,8),'white').save(folder/(kind+'.png'))
     return {'input_signature':p.signature(c.scene),'images':[{'image_id':'w','camera_type':'wrist','split':'train','q_measured':[0]*6,'mae':error,'rmse':error,'edge_iou':1-error,'objects':[]}]}
 
 
@@ -45,7 +49,7 @@ def test_pipeline_restores_best_after_later_model_round(tmp_path,monkeypatch,exi
         return {'status':'NOT_VERIFIED','stages':{'codex_review':{'status':'WAITING_FOR_CODEX_REVIEW'}}}
     monkeypatch.setattr(automation,'_reconstruct',stage)
     monkeypatch.setattr(automation,'modeling_tasks',lambda *a:None)
-    monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:{'decision':{'action':'complete'if rounds[0]==2 else'numeric','objects':[],'evidence':['w'],'reason':'refine'}})
+    monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:{'decision':{'action':'complete'if rounds[0]==2 else'numeric','objects':[],'evidence':['w'],'reason':'refine','scene_plan':{'object_poses':[],'cameras':[],'needs':[]}if rounds[0]==1 else None}})
     if exit_kind=='failure':
         with pytest.raises(RuntimeError):automation.reconstruct(p,candidate='draft',config={'objects':{}},run_modeling=True,max_review_calls=1)
     else:
@@ -72,7 +76,7 @@ def test_improved_phone_cannot_replace_regressed_wrist(tmp_path):
 def test_review_quota_resume_uses_validated_fitting_without_repeating_it(tmp_path,monkeypatch):
     from real2sim_builder import automation,authoring,codex_cli
     p=Project.create(tmp_path,'review resume');c=Candidate.create(p,'same')
-    config={'objects':{},'fitting':{'optimize_appearance':True,'optimize_lighting':True}}
+    config={'authoring_mode':'codex','objects':{},'fitting':{'optimize_appearance':True,'optimize_lighting':True}}
     write(c.root/'reconstruction-config.yaml',config)
     write(c.root/'metrics.json',metrics(p,c,.1))
     ready={'status':'NOT_VERIFIED','stages':{'codex_review':{'status':'WAITING_FOR_CODEX_REVIEW'}}}
