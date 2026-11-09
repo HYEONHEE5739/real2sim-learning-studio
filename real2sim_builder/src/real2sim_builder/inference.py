@@ -1,4 +1,4 @@
-"""Sequential local SAM/DA3 workers and explicit RGB/depth coordinate contracts.
+"""Sequential local perception workers and explicit RGB/depth coordinates.
 
 Workers use the already installed environments; this module installs/downloads nothing.
 Sources: Ultralytics SAM3SemanticPredictor and DepthAnything3.inference (see docs).
@@ -17,16 +17,24 @@ def validate_depth_output(arrays,count):
     import numpy as np
     depth=np.asarray(arrays['depth']);k=np.asarray(arrays['intrinsics']);ext=np.asarray(arrays['extrinsics'])
     if depth.ndim!=3 or depth.shape[0]!=count or k.shape!=(count,3,3)or ext.shape not in((count,3,4),(count,4,4)):
-        raise ValueError('DA3 depth/Camera batch shapes differ from ordered source images')
-    if not np.isfinite(k).all()or np.any(k[:,(0,1),(0,1)]<=0)or not np.allclose(k[:,2],[0,0,1]):raise ValueError('Invalid DA3 intrinsic matrices')
+        raise ValueError('Geometry depth/Camera batch shapes differ from ordered source images')
+    if not np.isfinite(k).all()or np.any(k[:,(0,1),(0,1)]<=0)or not np.allclose(k[:,2],[0,0,1]):raise ValueError('Invalid Geometry intrinsic matrices')
     rotation=ext[:,:3,:3]
-    if not np.isfinite(ext).all()or not np.allclose(rotation.transpose(0,2,1)@rotation,np.eye(3),atol=1e-3)or not np.allclose(np.linalg.det(rotation),1,atol=1e-3):raise ValueError('Invalid DA3 world-to-camera extrinsics')
-    if ext.shape[1]==4 and not np.allclose(ext[:,3],[0,0,0,1]):raise ValueError('Invalid DA3 homogeneous row')
-    if any(not np.any(np.isfinite(row)&(row>0))for row in depth):raise ValueError('DA3 has no valid positive depth in a view')
-    if 'conf'in arrays and np.asarray(arrays['conf']).shape!=depth.shape:raise ValueError('DA3 confidence/depth shapes differ')
+    if not np.isfinite(ext).all()or not np.allclose(rotation.transpose(0,2,1)@rotation,np.eye(3),atol=1e-3)or not np.allclose(np.linalg.det(rotation),1,atol=1e-3):raise ValueError('Invalid Geometry world-to-camera extrinsics')
+    if ext.shape[1]==4 and not np.allclose(ext[:,3],[0,0,0,1]):raise ValueError('Invalid Geometry homogeneous row')
+    if any(not np.any(np.isfinite(row)&(row>0))for row in depth):raise ValueError('Geometry has no valid positive depth in a view')
+    if 'conf'in arrays:
+        conf=np.asarray(arrays['conf'])
+        if conf.shape!=depth.shape or not np.isfinite(conf).all()or np.any(conf<0):raise ValueError('Invalid Geometry confidence/depth pixels')
+    if 'original_to_processed'in arrays:
+        affine=np.asarray(arrays['original_to_processed'])
+        if affine.shape!=(count,3,3)or not np.isfinite(affine).all()or np.any(abs(np.linalg.det(affine))<1e-12):raise ValueError('Invalid original-to-processed pixel transform')
+    if 'distortion'in arrays:
+        distortion=np.asarray(arrays['distortion'])
+        if distortion.shape!=(count,5)or not np.isfinite(distortion).all():raise ValueError('Invalid Geometry lens distortion')
 
 
-def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confidence=0.,erode_px=1,max_points=20000,distortion=None,distortion_rotation=None):
+def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confidence=0.,erode_px=1,max_points=20000,distortion=None,distortion_rotation=None,relative_units='geometry_relative'):
     """Backproject only observed mask pixels in the depth model's optical frame."""
     import cv2
     import numpy as np
@@ -50,7 +58,7 @@ def object_points(depth,mask,k,original_to_processed,*,confidence=None,min_confi
     if distortion_rotation is not None:lens['distortion_rotation']=distortion_rotation
     rays=optical_rays(lens,np.c_[u,v])
     points=rays*z[v,u,None]
-    return points,{'points':len(points),'frame':'camera_optical','units':'DA3_relative','provenance':'derived',
+    return points,{'points':len(points),'frame':'camera_optical','units':relative_units,'provenance':'derived',
                    'processed_resolution':[z.shape[1],z.shape[0]],'original_resolution':[source.shape[1],source.shape[0]],
                    'original_to_processed':a.tolist(),'hidden_surface_generated':False}
 
@@ -99,7 +107,7 @@ def _digest(value):
 
 
 def cross_view_associations(report,objects):
-    """Extend seeded instance tracks in one DA3 frame, without SAM order identity.
+    """Extend seeded instance tracks in one relative geometry frame, without SAM order identity.
 
     Only geometry resolves another view. Unseeded symmetric instances remain
     ambiguous; missing masks are view-local and never change Asset Identity.
@@ -284,10 +292,14 @@ def build_point_clouds(candidate,report,*,selections=None):
                 raise ValueError('Depth artifact identity or Candidate ownership changed')
             with np.load(file,allow_pickle=False)as data:
                 validate_depth_output(data,len(batch['image_ids']))
-                for index,image_id in enumerate(batch['image_ids']):depths.setdefault(image_id,({k:v[index].copy()for k,v in data.items()},batch))
+                for index,image_id in enumerate(batch['image_ids']):
+                    prediction=scene.get('camera_predictions',{}).get('views',{}).get(image_id)
+                    if prediction and prediction.get('depth_batch')!=batch.get('cache_key',batch['path']):continue
+                    depths.setdefault(image_id,({k:v[index].copy()for k,v in data.items()},batch))
         for segment in report['segments']:
             candidate.project.checkpoint();image=by_id.get(segment['image_id']);name=segment['object_id'];label=segment['image_id']+'/'+name
             if image is None:needs.append(label+': Camera not metric-registered');continue
+            if segment['image_id']not in depths:needs.append(label+': geometry Camera/Depth unresolved');continue
             if image['sha256']!=segment['source_image_sha256']:raise ValueError('Segmentation source identity changed')
             registration=scene.get('view_registrations',{}).get(image['id'],{});binding=registration.get('metric_anchors',{})
             motion_scale=registration.get('depth_scale')
@@ -316,14 +328,14 @@ def build_point_clouds(candidate,report,*,selections=None):
                 'scope':'estimated registration scale from recorded metric baseline/motion; not physical calibration'}if motion_scale is not None else depth_scale_from_anchors(arrays['depth'],affine,binding.get('uv_px',[]),binding.get('world_points_m',[]),camera_pose,binding.get('evidence',[]))
             if scale['status']!='ESTIMATED':needs.extend(label+': '+reason for reason in scale['needs']);continue
             k=affine@np.asarray(cam['K']['value']);points,info=object_points(arrays['depth'],mask,k,affine,confidence=arrays.get('conf'),
-                distortion=cam['distortion']['value'],distortion_rotation=cam.get('distortion_rotation'))
+                distortion=cam['distortion']['value'],distortion_rotation=cam.get('distortion_rotation'),relative_units=batch['metadata'].get('units','geometry_relative'))
             world=metric_points(points,scale['anchor'],camera_pose)['points_world_m']
             if len(world)<50:needs.append(label+': fewer than 50 valid visible points');continue
             dependencies={'mask_sha256':digest,'depth_sha256':batch['metadata']['sha256'],'image_sha256':image['sha256'],
                           'image_record_sha256':source_record_digest(image),
                           'camera_signature':camera_calibration_signature(scene,next(c for c in scene['cameras']if c['id']==image['camera'])),
                           'camera_pose':camera_pose.tolist(),'scale':scale,'algorithm_sha256':sha(Path(__file__))}
-            folder=candidate.root/'inference/clouds'/_digest(dependencies);folder.mkdir(parents=True,exist_ok=True)
+            folder=candidate.root/'.cache/inference/clouds'/_digest(dependencies);folder.mkdir(parents=True,exist_ok=True)
             stored_mask=folder/'mask.png';Image.fromarray(mask.astype('uint8')*255).save(stored_mask)
             cloud=folder/'points.npz'
             from .cameras import project_pixels
@@ -338,7 +350,44 @@ def build_point_clouds(candidate,report,*,selections=None):
         scene['reconstruction_observations']={'scene_state_id':state,'clouds':records};candidate.save(scene)
         result={'status':'METRIC_ESTIMATED'if records else'NEEDS_MORE_DATA','clouds':records,'needs':list(dict.fromkeys(needs)),
                 'physical_verified':False,'scene_state_id':state}
-        write(candidate.root/'inference/clouds.json',result);return result
+        write(candidate.root/'.cache/inference/clouds.json',result);return result
+
+
+def build_render_observations(candidate,report,*,same_layout=False):
+    """Append registered RGB/mask constraints without inventing sensor depth.
+
+    A different/ambiguous static layout may constrain recorded robot geometry,
+    but cannot move the photo Scene's objects to explain another arrangement.
+    """
+    import numpy as np
+    from .observations import registered_images,source_record_digest
+    from .scene import camera_calibration_signature,local_path
+    from .files import sha,write
+    scene=candidate.scene;images,_,needs=registered_images(candidate.project,scene=scene)
+    by_id={i['id']:i for i in images};nodes={o['id']:o for o in scene['objects']};records=[]
+    for segment in report.get('segments',[]):
+        image=by_id.get(segment['image_id']);obj=nodes.get(segment['object_id']);association=segment.get('association',{})
+        if image is None or obj is None:continue
+        if not same_layout and obj['role']!='reference_robot':continue
+        if association.get('status')!='ASSIGNED_ESTIMATED':continue
+        source=Path(association['mask_path']);digest=association['mask_sha256']
+        if not source.resolve().is_relative_to(candidate.root.resolve())or sha(source)!=digest:raise ValueError('Sensor Mask changed or escaped Candidate')
+        cam=next(c for c in scene['cameras']if c['id']==image['camera'])
+        dependencies={'image_sha256':image['sha256'],'image_record_sha256':source_record_digest(image),'mask_sha256':digest,
+                      'camera_signature':camera_calibration_signature(scene,cam)}
+        folder=candidate.root/'.cache/inference/clouds'/_digest(dependencies);folder.mkdir(parents=True,exist_ok=True)
+        cloud=folder/'image-observation.npz'
+        if not cloud.exists():np.savez_compressed(cloud,points_world_m=np.empty((0,3)))
+        records.append({'image_id':image['id'],'camera':image['camera'],'object_id':obj['id'],'split':image['split'],'group_id':image['group_id'],
+            'path':cloud.relative_to(candidate.project.root).as_posix(),'sha256':sha(cloud),
+            'mask':source.relative_to(candidate.project.root).as_posix(),'mask_sha256':digest,'mask_kind':'silhouette',
+            'points':0,'units':'m','frame':'world','render_only':True,'provenance':'derived','dependencies':dependencies,'identity_verified':False})
+    observation=scene.setdefault('reconstruction_observations',{'clouds':[]})
+    replacing={i['id']for i in report.get('images',[])}
+    observation['clouds']=[r for r in observation['clouds']if r['image_id']not in replacing]+records
+    candidate.save(scene)
+    return {'status':'IMAGE_OBSERVATIONS_READY'if records else'NEEDS_MORE_DATA','clouds':records,
+        'needs':needs+([]if records else['No eligible sensor Mask/Object correspondences; source Captures retained']),'depth_generated':False}
 
 
 def _run_worker(project,python,kind,request,folder,timeout):
@@ -349,11 +398,17 @@ def _run_worker(project,python,kind,request,folder,timeout):
              YOLO_AUTOINSTALL='false',YOLO_CONFIG_DIR=str(folder/'ultralytics'))
     env.pop('PYTHONPATH',None);env.pop('PYTHONHOME',None)
     started=time.monotonic()
+    last_stage=None
     with (folder/'worker.log').open('w')as log:
         child=subprocess.Popen([str(python),'-B',str(Path(__file__).resolve()),'--worker',kind,str(path)],stdout=log,stderr=subprocess.STDOUT,env=env,start_new_session=True)
         try:
             while child.poll()is None:
                 project.checkpoint()
+                if request.get('progress')and Path(request['progress']).is_file():
+                    progress=json.loads(Path(request['progress']).read_text())
+                    stage=progress.get('stage')
+                    if stage and stage!=last_stage:
+                        project.update(status='RUNNING',stage=stage);last_stage=stage
                 if time.monotonic()-started>timeout:raise TimeoutError(kind+' worker deadline exceeded')
                 time.sleep(.1)
             if child.returncode:
@@ -373,19 +428,19 @@ def _runtime(project,config,kind,folder):
     spec=config.get(kind,{})
     python=Path(spec.get('python',''));model=Path(spec.get('model',''))
     if not python.is_file()or not os.access(python,os.X_OK):raise ValueError(kind+': configure an existing Python interpreter')
-    files=sorted(p for p in model.rglob('*')if p.is_file()and p.suffix in('.json','.safetensors'))if model.is_dir()else[model]
-    if not files or any(not p.is_file()for p in files):raise ValueError(kind+': configure existing local model/checkpoint files')
-    _run_worker(project,python,'probe',{'kind':kind,'output':str(folder/'probe.json')},folder,60)
+    files=[]if kind=='colmap'else sorted(p for p in model.rglob('*')if p.is_file()and p.suffix in('.json','.safetensors'))if model.is_dir()else[model]
+    if kind!='colmap'and(not files or any(not p.is_file()for p in files)):raise ValueError(kind+': configure existing local model/checkpoint files')
+    _run_worker(project,python,'probe',{'kind':kind,'source':spec.get('source'),'output':str(folder/'probe.json')},folder,60)
     identity={'python':str(python.resolve()),'runtime':read(folder/'probe.json'),'files':{str(p.resolve()):sha(p)for p in files},'worker_sha256':sha(Path(__file__))}
     return spec,identity
 
 
 def prepare_rgb(candidate,images):
-    """Decode EXIF orientation identically for SAM/DA3; retain source SHA/bytes."""
+    """Decode EXIF orientation identically for perception; retain source SHA/bytes."""
     from PIL import Image,ImageOps
     from .files import sha
     from .scene import local_path
-    result={};folder=candidate.root/'inference/rgb';folder.mkdir(parents=True,exist_ok=True)
+    result={};folder=candidate.root/'.cache/inference/rgb';folder.mkdir(parents=True,exist_ok=True)
     for image in images:
         source=local_path(candidate.project.root,image['path'])
         if sha(source)!=image['sha256']:raise ValueError('Original RGB changed before model decoding')
@@ -403,19 +458,22 @@ def prepare_rgb(candidate,images):
     return result
 
 
-def run_models(candidate,config,*,scene_state=None):
-    """Cache SAM per image/object and DA3 per ordered view batch, independently."""
+def run_models(candidate,config,*,scene_state=None,sensor_alignment=False,segmentation_only=False):
+    """Cache SAM and the selected Geometry backend independently."""
     from .files import read,write,sha
     from .observations import input_images,camera_type
     from .candidate import exclusive
     images,state,needs=input_images(candidate.project,scene_state)
+    if not sensor_alignment and not segmentation_only:
+        images=[i for i in images if not i.get('capture_manifest')]
+        if not images:needs=needs+['Initial Scene reconstruction requires Scene Photos; Captures are reserved for sensor registration']
     if not images:return {'status':'NEEDS_MORE_DATA','needs':needs,'physical_verified':False}
     if config.get('image_ids'):
         requested=config['image_ids'];by_id={i['id']:i for i in images}
         if len(set(requested))!=len(requested)or not set(requested)<=by_id.keys():raise ValueError('Explicit image IDs must be unique and belong to the selected layout')
         images=[by_id[key]for key in requested]
     with exclusive(candidate.project):
-        candidate.require_open();root=candidate.root/'inference';root.mkdir(exist_ok=True)
+        candidate.require_open();root=candidate.root/'.cache/inference';root.mkdir(parents=True,exist_ok=True)
         prepared=prepare_rgb(candidate,images)
         config=json.loads(json.dumps(config));objects=config.get('objects',{})
         if not objects:return {'status':'NEEDS_MORE_DATA','needs':['Object IDs with SAM prompts or explicit box hints required']}
@@ -444,52 +502,16 @@ def run_models(candidate,config,*,scene_state=None):
             name=row['object_id'];image=row['image_id'];row.update(read(row['path']));row.update(object_id=name,image_id=image)
         association=associate_instances({'segments':segments},objects,config.get('selections'))
         segments=association['segments']
-        da3,da3_identity=_runtime(candidate.project,config,'da3',root/'da3-runtime')
-        batch_size=da3.get('batch_size',2);resolution=da3.get('process_res',280)
-        if type(batch_size)is not int or not 1<=batch_size<=4 or type(resolution)is not int or not 140<=resolution<=504:raise ValueError('DA3 batch_size 1..4 and process_res 140..504 required for this local worker')
-        batches=[];selections=[]
-        # Overlap a real reference RGB between independently inferred batches.
-        # Holdout outputs never replace the training prediction of that RGB.
-        preferred=[q.get('representative_view')for q in objects.values()]
-        reference=next((i for i in images if i['id']in preferred and i['split']=='train'),next((i for i in images if i['split']=='train'),images[0]))
-        for split in('train','validation'):
-            group=[i for i in images if i['split']==split and i['id']!=reference['id']]
-            if batch_size==1:selections.extend([[i]for i in images if i['split']==split]);continue
-            if not group and reference['split']==split:selections.append([reference])
-            for first in range(0,len(group),batch_size-1):selections.append([reference,*group[first:first+batch_size-1]])
-        for selected in selections:
-            params={'process_res':resolution,'device':da3.get('device','cuda:0'),'method':'upper_bound_resize'}
-            # Known Cameras can condition DA3. Raw/unregistered views retain its
-            # estimated cameras and relative depth; no metric flag is inferred.
-            cameras={c['id']:c for c in candidate.scene['cameras']};intrinsics=[];extrinsics=[]
-            from .capture import observation_scene
-            from .scene import world_pose
-            import numpy as np
-            for image in selected:
-                camera=cameras.get(image['camera'])
-                if camera and all(camera[k]['provenance']in('calibrated','measured')for k in('K','pose','distortion'))and not any(camera['distortion']['value']):
-                    posed=observation_scene(candidate.scene,image,candidate.project.root,complete=False);camera=next(c for c in posed['cameras']if c['id']==image['camera'])
-                    intrinsics.append(camera['K']['value']);extrinsics.append(np.linalg.inv(world_pose(posed,camera)).tolist())
-            known=len(intrinsics)==len(selected)
-            params['intrinsics']=intrinsics if known else None
-            # DA3's extrinsic scale alignment needs a nonzero multi-camera baseline.
-            centers=np.array([np.linalg.inv(np.asarray(t))[:3,3]for t in extrinsics])if known else np.empty((0,3))
-            params['extrinsics']=extrinsics if known and len(centers)>=3 and np.linalg.matrix_rank(centers-centers.mean(0))>=2 else None
-            key=_digest({'images':[i['sha256']for i in selected],'parameters':params,'model':da3_identity})
-            folder=root/'da3'/key
-            if not(folder/'COMPLETE').exists():
-                _run_worker(candidate.project,da3['python'],'da3',{'model':da3['model'],'images':[{**prepared[i['id']],'id':i['id']}for i in selected],
-                    'parameters':params,'output':str(folder)},root/'da3-job',float(da3.get('timeout_s',900)))
-            metadata=read(folder/'result.json')
-            if sha(folder/'depth.npz')!=metadata['sha256']:raise ValueError('Cached DA3 output changed')
-            with np.load(folder/'depth.npz',allow_pickle=False)as arrays:validate_depth_output(arrays,len(selected))
-            batches.append({'image_ids':[i['id']for i in selected],'path':str(folder/'depth.npz'),'metadata':metadata,'cache_key':key})
-        report={'status':'INFERRED','scene_state_id':state,'images':images,'segments':segments,'depth_batches':batches,
-                'models':{'sam':sam_identity,'da3':da3_identity},'prepared_rgb':prepared,'derived':True,'physical_verified':False,
-                'metric_scale':'NOT_ESTABLISHED_BY_AI','needs':needs}
+        from .sfm import backend,run_geometry
+        selected_backend=backend(config)
+        if segmentation_only:batches,geometry=[],{'status':'NOT_REQUESTED','needs':[],'scope':'Sensor registration uses the existing metric Scene, not a new SfM'}
+        else:batches,geometry=run_geometry(candidate,config,images,prepared,segments,root,include_capture=sensor_alignment)
+        report={'status':'SEGMENTED'if segmentation_only else'INFERRED'if batches else'NEEDS_MORE_DATA','scene_state_id':state,'images':images,'segments':segments,
+            'depth_batches':batches,'models':{'sam':sam_identity,'geometry':geometry.get('runtime_identity')},'geometry':geometry,
+            'backend':selected_backend,'prepared_rgb':prepared,'derived':True,'physical_verified':False,
+            'metric_scale':'NOT_ESTABLISHED_BY_AI','needs':needs+geometry['needs']}
         report=associate_instances(report,objects,config.get('selections'))
-        write(root/'results.json',report)
-        return report
+        write(root/('sensor_'+state+'.json'if segmentation_only else'results.json'),report);return report
 
 
 def _worker(kind,request):
@@ -500,16 +522,26 @@ def _worker(kind,request):
         folder=Path(folder);folder.mkdir(exist_ok=True,parents=True)
         (folder/'result.json').write_text(json.dumps(data,indent=2,allow_nan=False));(folder/'COMPLETE').write_text('complete\n')
     if kind=='probe':
+        if request['kind']in('mast3r','colmap'):
+            sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+            from real2sim_builder.sfm import probe
+            return probe(request)
+        if request['kind']!='sam':raise ValueError('Unknown inference worker probe')
         import importlib.metadata as meta
         import importlib.util
-        package='ultralytics'if request['kind']=='sam'else'depth_anything_3'
-        distribution='ultralytics'if request['kind']=='sam'else'depth-anything-3'
+        package='ultralytics'
+        distribution='ultralytics'
         spec=importlib.util.find_spec(package)
         if spec is None:raise ImportError(package+' is not installed in this configured interpreter')
         package_root=Path(spec.origin).parent if spec.origin else Path(next(iter(spec.submodule_search_locations)))
-        source=package_root/('models/sam/predict.py'if package=='ultralytics'else'api.py')
+        source=package_root/'models/sam/predict.py'
         Path(request['output']).write_text(json.dumps({'python':sys.version,'package':distribution,'version':meta.version(distribution),
             'torch':meta.version('torch'),'api_sha256':checksum(source)}));return
+    if kind in('mast3r','colmap'):
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+        from real2sim_builder import sfm
+        return getattr(sfm,kind+'_worker')(request)
+    if kind!='sam':raise ValueError('Unknown inference worker')
     import numpy as np
     import torch
     if kind=='sam':
@@ -542,36 +574,10 @@ def _worker(kind,request):
                 'parameters':params,'masks':rows,'status':'UNIQUE_ESTIMATED'if len(rows)==1 else'AMBIGUOUS'if rows else'NOT_FOUND',
                 'provenance':'derived','identity_verified':False})
         del predictor
-    elif kind=='da3':
-        from depth_anything_3.api import DepthAnything3
-        folder=Path(request['output']);folder.mkdir(parents=True,exist_ok=True);params=request['parameters']
-        for image in request['images']:
-            if checksum(image['path'])!=image['sha256']:raise ValueError('DA3 source image changed')
-        images=[i['path']for i in request['images']];device=params['device']
-        model=DepthAnything3.from_pretrained(request['model']).to(device)
-        # Run the installed processor with identity K to obtain its exact affine
-        # resize + per-view center-crop, rather than guessing a resolution ratio.
-        _,_,affine=model.input_processor(images,intrinsics=np.repeat(np.eye(3)[None],len(images),axis=0),
-            process_res=params['process_res'],process_res_method=params['method'],num_workers=1)
-        with torch.inference_mode():
-            prediction=model.inference(images,intrinsics=np.array(params['intrinsics'])if params['intrinsics']is not None else None,
-                extrinsics=np.array(params['extrinsics'])if params['extrinsics']is not None else None,
-                process_res=params['process_res'],process_res_method=params['method'],infer_gs=False,export_dir=None)
-        arrays={'depth':prediction.depth,'intrinsics':prediction.intrinsics,'extrinsics':prediction.extrinsics,
-                'original_to_processed':affine.cpu().numpy()}
-        if prediction.conf is not None:arrays['conf']=prediction.conf
-        validate_depth_output(arrays,len(images));np.savez_compressed(folder/'depth.npz',**arrays)
-        from PIL import Image
-        sizes=[list(Image.open(path).size)for path in images]
-        publish(folder,{'sha256':checksum(folder/'depth.npz'),'image_ids':[i['id']for i in request['images']],
-            'source_sha256':[i['source_sha256']for i in request['images']],'original_resolutions':sizes,'processed_resolution':list(prediction.depth.shape[1:][::-1]),
-            'original_to_processed':arrays['original_to_processed'].tolist(),'extrinsic_convention':'world_to_camera_optical',
-            'parameters':params,'provenance':'estimated','units':'DA3_relative','metric_scale_verified':False})
-        del model
     else:raise ValueError('Unknown inference worker')
     if torch.cuda.is_available():torch.cuda.empty_cache()
 
 
 if __name__=='__main__':
-    if len(sys.argv)!=4 or sys.argv[1]!='--worker':raise SystemExit('Internal worker: --worker probe|sam|da3 REQUEST.json')
+    if len(sys.argv)!=4 or sys.argv[1]!='--worker':raise SystemExit('Internal worker: --worker probe|sam|mast3r|colmap REQUEST.json')
     _worker(sys.argv[2],json.loads(Path(sys.argv[3]).read_text()))

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import shutil
 import uuid
+import re
+import time
 from yaml import YAMLError
 from contextlib import contextmanager
 
@@ -27,7 +29,7 @@ def asset_manifests(project):
     result=[]
     for base in(shared,project.root/'input/object_assets'):
         for path in sorted(base.glob('*/*/manifest.json')):
-            if len(path.parent.name)!=64:continue
+            if not re.fullmatch(r'v[0-9]{3,}',path.parent.name):continue
             relative=os.path.relpath(path,project.root)
             result.append(path)
     return result
@@ -166,13 +168,12 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
         if dimensions.get('provenance')not in('measured','estimated','calibrated')or not dimensions.get('evidence'):raise ValueError('Object dimension provenance and evidence required')
     identity={p.relative_to(source.parent).as_posix():sha(p)for p in sorted(closure)}
     version_input={'files':identity,'dimensions':dimensions,'origin':origin,'blend':sha(blend)if blend else None,'converter_sha256':sha(__file__)}
-    if generation_id:version_input['generation_request_id']=identifier(generation_id)
-    version=__import__('hashlib').sha256(json.dumps(version_input,sort_keys=True).encode()).hexdigest()
+    source_fingerprint=__import__('hashlib').sha256(json.dumps(version_input,sort_keys=True).encode()).hexdigest()
     with library_write(project)as library:
-        base=library/asset_id;dest=base/version
-        local_path(project.root,os.path.relpath(dest/'manifest.json',project.root))
-        if dest.exists():
-            record=read(dest/'manifest.json');verify_object_asset(project,record);return record
+        base=library/asset_id
+        existing=[read(p)for p in sorted(base.glob('v[0-9]*/manifest.json'))]
+        for record in existing:
+            if record.get('source_fingerprint')==source_fingerprint:return verify_object_asset(project,record)
         base.mkdir(parents=True,exist_ok=True);pending=base/('.building-'+uuid.uuid4().hex);pending.mkdir()
         try:
             # Closure is already package-local; retaining its relative layout
@@ -192,12 +193,21 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
                 dimension_record=value(size,'estimated',['authored USDA mesh bounds; only specified axes are constrained'])
                 dimension_record['constraints']=copy.deepcopy(dimensions)
             if blend:shutil.copyfile(blend,pending/'source.blend')
-            manifest={'schema':'real2sim.object-asset/1','asset_id':asset_id,'version':version,'entry':'usd/'+source.name,
+            manifest={'schema':'real2sim.object-asset/1','asset_id':asset_id,'version':None,'entry':'usd/'+source.name,
                 'default_prim':str(stage.GetDefaultPrim().GetPath()),'units':'m','up_axis':'Z','origin':origin,
                 'dimensions':dimension_record,
                 'visual':visual,'collision':collision,'collision_status':'AUTHORED_UNVALIDATED'if collision else'UNRESOLVED',
                 'source_sha256':sha(source),'source_blend':'source.blend'if blend else None,'physical_verified':False,
                 'files':{p.relative_to(pending).as_posix():sha(p)for p in pending.rglob('*')if p.is_file()}}
+            content={k:manifest[k]for k in('files','dimensions','origin','default_prim','units','up_axis')}
+            content_sha256=__import__('hashlib').sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()
+            for record in existing:
+                if record.get('content_sha256')==content_sha256:
+                    shutil.rmtree(pending);return verify_object_asset(project,record)
+            number=max([int(r['version'][1:])for r in existing]+[0])+1
+            version=f'v{number:03d}';dest=base/version
+            local_path(project.root,os.path.relpath(dest/'manifest.json',project.root))
+            manifest.update(version=version,content_sha256=content_sha256,source_fingerprint=source_fingerprint,created_ns=time.time_ns())
             if generation_id:manifest['generation_request_id']=generation_id
             manifest['manifest']=os.path.relpath(dest/'manifest.json',project.root)
             write(pending/'manifest.json',manifest);pending.rename(dest)
@@ -210,6 +220,8 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
 def verify_object_asset(project,record):
     path=local_path(project.root,record['manifest']);base=path.parent
     base_root=project.workspace/'object_assets'if Path(record['manifest']).parts[:3]==('..','..','object_assets')else project.root/'input/object_assets'
+    if not re.fullmatch(r'v[0-9]{3,}',str(record.get('version',''))):raise ValueError('Sequential asset version required')
+    if not re.fullmatch(r'[0-9a-f]{64}',str(record.get('content_sha256',''))):raise ValueError('Content digest required')
     expected=base_root/identifier(record['asset_id'])/record['version']/'manifest.json'
     if path!=expected or read(path)!=record:raise ValueError('Object asset ID/version/manifest identity mismatch')
     if record.get('schema')!='real2sim.object-asset/1':raise ValueError('Unsupported object asset manifest')
@@ -221,6 +233,8 @@ def verify_object_asset(project,record):
             if target.is_symlink():raise ValueError('Object asset dependency symlink is forbidden')
         target=target.resolve()
         if not target.is_relative_to(base)or not target.is_file()or sha(target)!=digest:raise ValueError('Object asset dependency changed: '+relative)
+    content={k:record[k]for k in('files','dimensions','origin','default_prim','units','up_axis')}
+    if __import__('hashlib').sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()!=record['content_sha256']:raise ValueError('Object asset content digest mismatch')
     inspect_usda(base/record['entry'])
     return record
 

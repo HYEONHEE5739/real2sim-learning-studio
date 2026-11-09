@@ -102,7 +102,13 @@ def copy_native_asset(source,destination,*,resolutions=None,copied=None,report=N
             if not item.is_file():raise ExportError('ASSET_MISSING',str(item),'required native dependency missing')
             seen.add(item);queue.extend(_declared_children(item,resolutions))
         common=Path(os.path.commonpath([str(p.parent) for p in seen]))
-        base=destination/'assets'/sha(source)
+        from scene_contract.naming import available_path,readable_name
+        label=readable_name(source.stem)
+        for existing in (destination/'assets').glob(label+'*'):
+            if existing.is_dir()and all((existing/p.relative_to(common)).is_file()and sha(existing/p.relative_to(common))==sha(p)for p in seen):
+                copied.update({p:existing/p.relative_to(common)for p in seen})
+                return copied[source]
+        base=available_path(destination/'assets',label)
         # Shared model meshes must retain the same relative layout for every URDF.
         # Reuse an already copied graph's prefix instead of rewriting calibrated
         # model bytes merely because its shared mesh was copied first.

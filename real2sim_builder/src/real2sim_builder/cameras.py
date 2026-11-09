@@ -60,7 +60,7 @@ def optical_rays(camera,pixels):
     if not np.isfinite(pixels).all():raise ValueError('Finite pixel coordinates required')
     k=np.asarray(camera['K']['value'],float);d=np.asarray(camera['distortion']['value'],float)
     rays=np.linalg.solve(k,np.c_[pixels,np.ones(len(pixels))].T).T
-    if not d.any():return rays
+    if not len(pixels)or not d.any():return rays
     rotation=np.asarray(camera.get('distortion_rotation',np.eye(3)),float)
     sensor=rays@rotation;sensor=sensor[:,:2]/sensor[:,2:]
     clean=cv2.undistortPointsIter(sensor.reshape(-1,1,2),np.eye(3),d,None,None,
@@ -75,6 +75,7 @@ def project_pixels(camera,points):
     import cv2
     points=np.asarray(points,float).reshape(-1,3);k=np.asarray(camera['K']['value'],float)
     d=np.asarray(camera['distortion']['value'],float)
+    if not len(points):return np.empty((0,2),float)
     if not d.any():pixels=points@k.T;return pixels[:,:2]/pixels[:,2:]
     rotation=np.asarray(camera.get('distortion_rotation',np.eye(3)),float)
     pixels,_=cv2.projectPoints(points@rotation,np.zeros(3),np.zeros(3),np.eye(3),d)

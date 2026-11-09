@@ -8,6 +8,21 @@ PROTECTED = {'measured', 'calibrated'}
 
 
 def preserve(before, after, path='scene'):
+    if path.endswith('.geometry_constraints.supports') and isinstance(before,dict):
+        from .scene import support_relations
+        # Validate normalized semantics, allowing only initial derived references
+        # to be filled in. A solver cannot drop/relax an established relation.
+        declarations={**before,**(after or{})}
+        names=set(declarations)|{(r if isinstance(r,str)else r['support'])for r in declarations.values()}
+        stub={'objects':[{'id':n}for n in names],'frames':{}}
+        previous=support_relations(stub,before)
+        following=support_relations(stub,after or{})
+        for name,row in previous.items():
+            if row['status']!='CONFIRMED':continue
+            new=following.get(name)
+            if new is None or any(new.get(k)!=v for k,v in row.items()):
+                raise ValueError('CONSTRAINT_CONFLICT: protected support relation: '+name)
+        return
     if isinstance(before, dict):
         if (before.get('provenance') in tuple(PROTECTED) or before.get('source') in tuple(PROTECTED)) and before != after:
             raise ValueError('Protected measured/calibrated field: ' + path)
@@ -157,6 +172,9 @@ def apply(scene, operations, root):
             preserve(old, result['lights'], 'lights')
         else:
             raise ValueError('Unsupported edit operation: ' + op)
+    if result.get('geometry_constraints',{}).get('supports'):
+        from .initialization import project_supports
+        result,_=project_supports(result,root=root,allow_incomplete=True)
     validate(result, root)
     return result
 

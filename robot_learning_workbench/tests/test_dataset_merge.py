@@ -116,14 +116,14 @@ def choose():
  for i in range(2):dialog.list.item(i).setCheckState(Qt.CheckState.Checked)
  dialog.merge_button.click()
 QTimer.singleShot(20,choose);QTest.mouseClick(p.buttons['Dataset Merge'],Qt.MouseButton.LeftButton)
-wait(lambda:p.source is not None and Path(p.source).name.startswith('merged-')and not p.busy and not p.plot_busy)
+wait(lambda:p.source is not None and Path(p.source).name.startswith('merged_')and not p.busy and not p.plot_busy)
 assert len(p.rows)==10
 p.close();app.processEvents()
 '''
     result=subprocess.run([UI,'-B','-c',code,sys.executable,str(workspace)],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),capture_output=True,text=True,timeout=140)
     assert result.returncode==0,result.stdout+result.stderr
-    exports=sorted((workspace/'dataset').glob('lerobot-*'))
+    exports=sorted((workspace/'dataset').glob('lerobot_*'))
     assert sorted(len(native.load_catalog(root).episodes)for root in exports)==[2,8]
-    merged=next((workspace/'dataset').glob('merged-*'));catalog=native.load_catalog(merged)
+    merged=next((workspace/'dataset').glob('merged_*'));catalog=native.load_catalog(merged)
     assert len(catalog.episodes)==10 and sorted(len(ids)for ids in catalog.splits.values())==[2,8]
     assert before=={p:native.file_sha256(p)for p in owner.root.rglob('*')if p.is_file()}

@@ -8,7 +8,7 @@ def test_mask_depth_resize_and_crop_are_explicit_in_pixel_coordinates():
     k=np.array([[3.,0,3],[0,3,2],[0,0,1]])
     transform=np.diag([.5,.5,1.])
     points,report=object_points(depth,mask,k,transform,erode_px=0)
-    assert len(points)==12 and report['frame']=='camera_optical'and report['units']=='DA3_relative'
+    assert len(points)==12 and report['frame']=='camera_optical'and report['units']=='geometry_relative'
     assert np.min(points[:,0])>=0 and np.all(points[:,2]==2)
     with pytest.raises(ValueError,match='pixel transform'):
         object_points(depth,mask,k,None)
@@ -60,7 +60,7 @@ def test_cloud_pipeline_binds_original_mask_metric_anchors_and_candidate_files(t
     world=[[-.3,-.2,1],[.3,-.2,1],[.3,.2,1],[-.3,.2,1]]
     uv=[[22,18],[58,18],[58,42],[22,42]]
     register_views(c,{row['id']:{'source':'measured','evidence':['board corners'],'world_points_m':world,'uv_px':uv}},scene_state='layout')
-    folder=c.root/'inference';folder.mkdir();mask=folder/'mask.png';Image.new('L',(80,60),255).save(mask)
+    folder=c.root/'.cache/inference';folder.mkdir(parents=True);mask=folder/'mask.png';Image.new('L',(80,60),255).save(mask)
     depth=folder/'depth.npz';np.savez(depth,depth=np.full((1,30,40),2.),intrinsics=np.array([[[30,0,20],[0,30,15],[0,0,1]]]),
         extrinsics=np.eye(4)[None],original_to_processed=np.diag([.5,.5,1.])[None])
     report={'scene_state_id':'layout','depth_batches':[{'path':str(depth),'image_ids':[row['id']],'metadata':{'sha256':sha(depth)}}],
@@ -156,12 +156,6 @@ def test_shared_prompt_runs_sam_once_without_overwriting_object_ids(tmp_path,mon
                     masks.append({'path':str(file),'sha256':sha(file)})
                 write(path/'result.json',{'image_id':task['image_id'],'object_id':task['object_id'],'source_image_sha256':task['source_sha256'],'masks':masks,'status':'AMBIGUOUS'})
                 (path/'COMPLETE').touch()
-        else:
-            path=__import__('pathlib').Path(request['output']);path.mkdir(parents=True,exist_ok=True)
-            n=len(request['images']);file=path/'depth.npz'
-            np.savez(file,depth=np.ones((n,30,40)),intrinsics=np.repeat(np.array([[30,0,20],[0,30,15],[0,0,1.]])[None],n,axis=0),
-                extrinsics=np.repeat(np.eye(4)[None],n,axis=0),original_to_processed=np.repeat(np.eye(3)[None],n,axis=0))
-            write(path/'result.json',{'sha256':sha(file)})
     monkeypatch.setattr(inference,'_run_worker',worker)
     config={'objects':{'cup1':{'prompt':'paper cup'},'cup2':{'prompt':'paper cup'}}}
     report=inference.run_models(c,config,scene_state='layout')

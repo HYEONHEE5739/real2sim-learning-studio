@@ -1,3 +1,4 @@
+from scene_contract.naming import numbered_path
 """Defaults and file semantics for the existing pipeline Recipe contract."""
 from pathlib import Path
 import uuid
@@ -27,7 +28,7 @@ def default_script(stage,workspace,engine):
     }[stage]
     data=dict(schema_version=1,stage=stage)
     if stage in ('annotation','datagen','simulation_evaluation'):data['engine']=engine
-    output=Path(workspace)/'dataset'/(stage+'-'+uuid.uuid4().hex[:8])if stage in('hub_download','hub_upload')else output_path(workspace,stage)
+    output=Path(workspace)/'dataset'/numbered_path(Path(workspace)/'dataset',stage).name if stage in('hub_download','hub_upload')else output_path(workspace,stage)
     data.update(inputs={key:''for key in INPUTS[stage]},execution=execution,output={'directory':str(output)})
     if stage in ('annotation','datagen'):
         data['functions']={'acceptance':{'function':'pick_place.annotation'if stage=='annotation'else'pick_place.v8_datagen','params':{'object':'','target':''}}}

@@ -48,7 +48,49 @@ def measured_geometry(scene, measurements):
     return result
 
 
-def apply_geometry_constraints(scene, config):
+def project_supports(scene,supports=None,root=None,*,allow_incomplete=False):
+    """Initialize/update declared contacts in parent-first order; no World flattening."""
+    from .scene import support_relations,supported_pose,support_metrics,world_pose,frame_world
+    result=copy.deepcopy(scene);relations=support_relations(result,supports)
+    if relations:
+        config=result.setdefault('geometry_constraints',{'schema':'real2sim.geometry-constraints/1','units':'m','distances':[]})
+        config['supports']=relations
+    for name,row in relations.items():
+        if row['status']!='CONFIRMED':continue
+        nodes={o['id']:o for o in result['objects']};obj=nodes.get(name)
+        record=obj['pose']if obj is not None else result['frames'][name]['transform']
+        pose=None if record['value']is None else world_pose(result,obj)if obj is not None else frame_world(result,name)
+        if pose is None:
+            if allow_incomplete:continue
+            raise ValueError(name+': initialize a candidate XY/yaw before contact projection')
+        parent=nodes[row['support']]
+        if parent['pose']['value']is None and allow_incomplete:continue
+        try:
+            if not row['parallel']and 'relative_rotation'not in row:
+                from .scene import support_binding
+                row['relative_rotation']=(support_binding(result,name,row,root)['basis'].T@pose[:3,:3]).tolist()
+            if 'yaw_bound_rad'in row and 'yaw_reference_rad'not in row:
+                from .scene import support_binding
+                binding=support_binding(result,name,row,root);relative=binding['basis'].T@pose[:3,:3]@binding['relative_rotation'].T
+                row['yaw_reference_rad']=float(np.arctan2(relative[1,0],relative[0,0]))
+            expected=supported_pose(result,name,row,pose,root)
+        except ValueError as error:
+            if allow_incomplete and 'CONSTRAINT_CONFLICT'not in str(error):continue
+            raise
+        if record['provenance']in('measured','calibrated'):
+            if not np.allclose(expected,pose,atol=min(row['tolerance_m'],row['angle_tolerance_rad']),rtol=0):raise ValueError('CONSTRAINT_CONFLICT: protected support pose '+name)
+            continue
+        if np.allclose(expected,pose,atol=1e-14,rtol=0):continue
+        if obj is not None:
+            from .calibration.hybrid import assign_pose
+            result=assign_pose(result,name,expected)
+        else:
+            parent=result['frames'][name]['parent'];local=np.linalg.inv(frame_world(result,parent))@expected
+            result['frames'][name]['transform']=value(local.tolist(),'optimized',row['evidence'])
+    return result,support_metrics(result,root=root)
+
+
+def apply_geometry_constraints(scene, config,root=None):
     """Project independent measured pairs, retaining their centroid and prior direction.
 
     No scan objective or global scaling. Overlapping pairs require a coupled solver
@@ -67,8 +109,10 @@ def apply_geometry_constraints(scene, config):
                 if key in row:
                     row[key] *= 0.001
     rows = normalized.get('distances', [])
-    if not rows:
-        raise ValueError('Measured distances required')
+    if not rows and not normalized.get('supports'):
+        raise ValueError('Measured distances or support relations required')
+    if normalized.get('supports'):
+        result,_=project_supports(result,normalized['supports'],root)
     occupied = set()
     changes = []
     for row in rows:
@@ -120,7 +164,11 @@ def apply_geometry_constraints(scene, config):
                     child['pose'] = value((np.linalg.inv(frame_world(result, child['frame'])) @ child_world).tolist(), 'estimated', obj['pose']['evidence'])
         after = geometry_constraint_metrics(result, row)
         changes.append({'before': before, 'after': after, 'prior_conflict': abs(before['distance_residual_m']) > max(1e-08, row.get('uncertainty_m', 0)), 'pose_delta_m': {o['id']: (corrected[i] - positions[i]).tolist() for i, o in enumerate(pair)}, 'gauge': 'preserved pair centroid and prior direction' if not any(locked) else 'existing measured pose anchor'})
-    result['geometry_constraints'] = {k: normalized[k] for k in ('schema', 'units', 'distances')}
+    result['geometry_constraints'] = {k: normalized[k] for k in ('schema', 'units')}
+    result['geometry_constraints']['distances']=rows
+    if normalized.get('supports'):
+        result['geometry_constraints']['supports']=normalized['supports']
+        result,_=project_supports(result,root=root)
     for name in config.get('measured_visuals', []):
         obj = next((o for o in result['objects'] if o['id'] == name))
         if obj['dimensions']['provenance'] not in ('measured', 'calibrated') or obj['collision']['type'] not in ('box', 'container', 'cylinder', 'sphere'):
@@ -139,7 +187,7 @@ def constrain(candidate, config_path):
         candidate.require_open()
         config = read(config_path)
         try:
-            scene, report = apply_geometry_constraints(candidate.scene, config)
+            scene, report = apply_geometry_constraints(candidate.scene, config,root=candidate.project.root)
             validate(scene, candidate.project.root)
             from real2sim_builder.editing import preserve
             preserve(candidate.scene, scene)

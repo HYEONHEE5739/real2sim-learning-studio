@@ -27,7 +27,9 @@ def save_profile(session,profile,path,overwrite):
     old=path.read_bytes()if path.exists()else None
     source=session.source_profile
     if source:
-        history=workspace/'calibration/history'/(session.source_hash+'.json');history.parent.mkdir(parents=True,exist_ok=True)
+        from scene_contract.naming import numbered_path
+        folder=workspace/'calibration/history';folder.mkdir(parents=True,exist_ok=True)
+        history=next((p for p in folder.glob('precision_*.json')if file_sha256(p)==session.source_hash),None)or numbered_path(folder,'precision',suffix='.json')
         if history.exists():
             if file_sha256(history)!=session.source_hash:raise ValueError('Previous Precision history changed')
         else:_replace_bytes(history,source.read_bytes())

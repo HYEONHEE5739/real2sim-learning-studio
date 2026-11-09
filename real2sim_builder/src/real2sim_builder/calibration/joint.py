@@ -1,4 +1,5 @@
 """Bounded landmark and raw-depth Camera/Object fitting; no control or physics."""
+from scene_contract.naming import numbered_path
 import copy
 from collections import Counter
 
@@ -23,27 +24,18 @@ def _mounted(scene, frame):
     return False
 
 
-def _support(scene, obj, explicit):
-    """Use an explicit support or an already coincident horizontal box surface."""
-    objects = {o['id']: o for o in scene['objects']}
-    pose = world_pose(scene, obj)
-    size = obj['dimensions']['value']
-    if size is None or not np.allclose(pose[:3, 2], [0, 0, 1], atol=1e-7):
-        return None
-    candidates = [objects[explicit]] if explicit else [o for o in objects.values()
-                  if o['role'] == 'support_surface' and o['id'] != obj['id']]
-    found = []
-    for support in candidates:
-        dims = support['dimensions']['value']
-        t = world_pose(scene, support)
-        if (dims is None or support['collision']['type'] != 'box'
-                or not np.allclose(t[:3, 2], [0, 0, 1], atol=1e-7)):
-            continue
-        height = t[2, 3] + dims[2]/2 + size[2]/2
-        error = abs(pose[2, 3]-height)
-        if explicit or error <= .002:
-            found.append((error, support['id'], height))
-    return min(found) if found else None
+def _support(scene, obj, explicit=None,root=None):
+    """Bind declared contact independently of the initial pose; never auto-confirm proximity."""
+    from ..scene import support_relations,supported_pose
+    name=obj['id'];relations=support_relations(scene,{name:explicit}if explicit is not None else None)
+    row=relations.get(name)
+    if row is None or row['status']!='CONFIRMED':return None
+    pose=world_pose(scene,obj)if 'pose'in obj else frame_world(scene,name)
+    if 'yaw_bound_rad'in row and 'yaw_reference_rad'not in row:
+        from ..scene import support_binding
+        binding=support_binding(scene,name,row,root);relative=binding['basis'].T@pose[:3,:3]@binding['relative_rotation'].T
+        row['yaw_reference_rad']=float(np.arctan2(relative[1,0],relative[0,0]))
+    return {'relation':row,'pose':supported_pose(scene,name,row,pose,root),'root':root}
 
 
 def _posed(candidate, cached):
@@ -57,10 +49,10 @@ def _posed(candidate, cached):
     return result
 
 
-def parameter_blocks(scene,observations,options):
+def parameter_blocks(scene,observations,options,*,root=None):
     """One parameter definition for raw-depth and native-render optimization."""
     blocks=[];bounds=[];cams={c['id']:c for c in scene['cameras']};nodes={o['id']:o for o in scene['objects']}
-    train=[r for r in observations if r['split']=='train'];observed={r['camera']for r in train}
+    train=[r for r in observations if r['split']=='train'];observed={r['camera']for r in train};observed_objects={r.get('object_id')for r in train}&nodes.keys()
     translation=float(options.get('translation_bound_m',.08));angle=float(options.get('rotation_bound_rad',.35))
     if not np.isfinite([translation,angle]).all()or min(translation,angle)<=0:raise ValueError('Positive fitting bounds required')
     def add(kind,name,seed,size,radius):blocks.append((kind,name,seed,len(bounds),size));bounds.extend(radius)
@@ -78,24 +70,25 @@ def parameter_blocks(scene,observations,options):
             r=scene['view_registrations'][key]
             if r['status']!='REGISTERED_CALIBRATED':add('view',key,np.asarray(r['T_world_camera']),6,[translation]*3+[angle]*3)
     if options.get('robot_base')and 'robot_base'in scene['frames']and scene['frames']['robot_base']['transform']['provenance']not in('measured','calibrated'):
-        add('base','robot_base',np.asarray(scene['frames']['robot_base']['transform']['value']),6,[translation]*3+[angle]*3)
-    default=[n for n in sorted({r['object_id']for r in train})if nodes[n]['role']not in('support_surface','fixture')]
+        support=_support(scene,{'id':'robot_base'},options.get('supports',{}).get('robot_base'),root)
+        add('base_support'if support else'base','robot_base',(support['pose'],support)if support else frame_world(scene,'robot_base'),(2 if support['relation'].get('yaw_bound_rad')==0 else 3)if support else 6,([translation]*2+([]if support['relation'].get('yaw_bound_rad')==0 else[min(angle,support['relation'].get('yaw_bound_rad',angle))]))if support else[translation]*3+[angle]*3)
+    default=[n for n in sorted(observed_objects)if nodes[n]['role']not in('support_surface','fixture')]
     for name in options.get('objects',default):
         obj=nodes[name]
         if name not in{r['object_id']for r in train}or obj.get('link')or obj['role']=='reference_robot'or obj['pose']['value']is None or obj['pose']['provenance']in('measured','calibrated'):continue
-        support=_support(scene,obj,options.get('supports',{}).get(name))
-        add('object_support'if support else'object',name,(world_pose(scene,obj),support),3 if support else 6,[translation]*2+[angle]if support else[translation]*3+[angle]*3)
+        support=_support(scene,obj,options.get('supports',{}).get(name),root)
+        add('object_support'if support else'object',name,(support['pose']if support else world_pose(scene,obj),support),(2 if support['relation'].get('yaw_bound_rad')==0 else 3)if support else 6,([translation]*2+([]if support['relation'].get('yaw_bound_rad')==0 else[min(angle,support['relation'].get('yaw_bound_rad',angle))]))if support else[translation]*3+[angle]*3)
     if options.get('optimize_dimensions',False):
         from .geometry import dimension_axes
         radius=float(options.get('dimension_log_bound',.2))
         if not np.isfinite(radius) or not 0<radius<=.5:raise ValueError('dimension_log_bound must be in (0, .5]')
-        for name in sorted({r['object_id']for r in train}):
+        for name in sorted(observed_objects):
             obj=nodes[name];axes=dimension_axes(obj)
             if axes:add('dimensions',name,(np.asarray(obj['dimensions']['value']),axes),len(axes),[radius]*len(axes))
     if options.get('optimize_depth_scale',False):
         for key in sorted({r.get('depth_batch',r['image_id'])for r in train}):add('scale',key,0.,1,[.25])
     if options.get('optimize_appearance',False):
-        for name in sorted({r['object_id']for r in train}):
+        for name in sorted(observed_objects):
             obj=nodes[name]
             # Library assets keep one immutable shared material identity. Scene
             # lighting can change without silently editing the asset's bytes.
@@ -114,7 +107,7 @@ def parameter_blocks(scene,observations,options):
     return blocks,np.asarray(bounds)
 
 
-def select_parameters(scene,observations,options,*,stage='geometry'):
+def select_parameters(scene,observations,options,*,stage='geometry',root=None):
     """Conservative training-only eligibility, not a calibration certificate.
 
     Keep parameter definitions in parameter_blocks. Select their coordinates
@@ -125,7 +118,7 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
     for key in('optimize_intrinsics','optimize_depth_scale','robot_base'):requested.setdefault(key,True)
     requested.setdefault('optimize_dimensions',True)
     rows=[r for r in observations if r['split']=='train']
-    blocks,radius=parameter_blocks(scene,rows,requested)
+    blocks,radius=parameter_blocks(scene,rows,requested,root=root)
     nodes={o['id']:o for o in scene['objects']};cameras={c['id']:c for c in scene['cameras']}
     images={r['image_id']:r for r in rows};frozen=[];needs=[];indices=[]
     report={'stage':stage,'training_images':sorted(images),'frozen':frozen,'needs':needs,
@@ -146,7 +139,7 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
     moving={b[1]for b in blocks if b[0].startswith('object')}
     moving_cameras={b[1]for b in blocks if b[0]=='camera'}
     moving_views={b[1]for b in blocks if b[0]=='view'}
-    moving_base=any(b[0]=='base'for b in blocks)
+    moving_base=any(b[0]in('base','base_support')for b in blocks)
     def moves_with_base(frame):
         while frame is not None:
             if frame=='robot_base':return moving_base
@@ -175,12 +168,12 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
                 reason='unanchored_camera_object_gauge';required=True
             if any(r.get('camera_type')=='wrist'for r in related)and(not all(r.get('measured_q')for r in related)or not motion(related)):
                 reason='insufficient_wrist_motion';required=True
-            if not all(r.get('has_raw_depth')for r in related):reason='raw_camera_rays_required';required=True
+            if not all(r.get('has_raw_depth')or r.get('has_image_observation')for r in related):reason='raw_camera_rays_required';required=True
         elif kind=='intrinsics':
             if len(diverse(related))<3 or not any(r.get('cloud_rank',0)==3 for r in related):reason='insufficient_lens_view_geometry'
             elif not any(r['image_id']in anchored_images for r in related):reason='unanchored_lens_pose_gauge'
             elif not all(r.get('has_raw_depth')for r in related):reason='raw_camera_rays_required'
-        elif kind=='base':
+        elif kind in('base','base_support'):
             wrist=[r for r in rows if r.get('camera_type')=='wrist'and r.get('measured_q')]
             if not motion(wrist)or not any(r['image_id']in anchored_images for r in wrist)or not all(r.get('has_raw_depth')for r in wrist):reason='insufficient_world_hand_eye_constraints'
         elif kind=='scale':
@@ -224,7 +217,7 @@ def select_parameters(scene,observations,options,*,stage='geometry'):
     return blocks,radius,np.asarray(indices,dtype=int),report
 
 
-def apply_parameters(scene,blocks,x):
+def apply_parameters(scene,blocks,x,*,root=None):
     from .hybrid import assign_pose
     result=copy.deepcopy(scene);scales={}
     for kind,name,seed,start,count in blocks:
@@ -247,23 +240,25 @@ def apply_parameters(scene,blocks,x):
         if kind=='intrinsics':
             k=seed.copy();k[0,0]*=np.exp(delta[0]);k[1,1]*=np.exp(delta[1]);k[0,2]+=delta[2];k[1,2]+=delta[3]
             next(c for c in result['cameras']if c['id']==name)['K']=value(k.tolist(),'optimized',['joint image/depth fit']);continue
-        pose=seed[0].copy()if kind.startswith('object')else seed.copy()
-        if kind=='object_support':
-            pose[:2,3]+=delta[:2];pose[2,3]=seed[1][2];pose[:3,:3]=Rotation.from_euler('z',delta[2]).as_matrix()@pose[:3,:3]
+        pose=seed[0].copy()if kind.startswith('object')or kind=='base_support'else seed.copy()
+        if kind in('object_support','base_support'):
+            from ..scene import support_binding
+            basis=support_binding(result,name,seed[1]['relation'],root)['basis']
+            pose[:3,3]+=basis[:,:2]@delta[:2]
+            pose[:3,:3]=Rotation.from_rotvec(basis[:,2]*(delta[2]if count==3 else 0.)).as_matrix()@pose[:3,:3]
         else:pose[:3,3]+=delta[:3];pose[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@pose[:3,:3]
         if kind.startswith('object'):result=assign_pose(result,name,pose)
         elif kind=='camera':next(c for c in result['cameras']if c['id']==name)['pose']=value(pose.tolist(),'optimized',['joint image/depth fit'])
-        elif kind=='base':result['frames'][name]['transform']=value(pose.tolist(),'optimized',['joint image/depth fit'])
+        elif kind in('base','base_support'):
+            parent=result['frames'][name]['parent'];local=np.linalg.inv(frame_world(result,parent))@pose
+            result['frames'][name]['transform']=value(local.tolist(),'optimized',['joint image/depth fit'])
         elif kind=='view':result['view_registrations'][name].update(T_world_camera=pose.tolist(),state='OPTIMIZED')
-    for kind,name,seed,_,_ in blocks:
-        if kind=='object_support':
-            obj=next(o for o in result['objects']if o['id']==name)
-            old=next(o for o in scene['objects']if o['id']==name)
-            pose=world_pose(result,obj).copy();pose[2,3]+= (obj['dimensions']['value'][2]-old['dimensions']['value'][2])/2
-            result=assign_pose(result,name,pose)
+    from ..initialization import project_supports
+    declared={name:seed[1]['relation']for kind,name,seed,_,_ in blocks if kind in('object_support','base_support')}
+    result,_=project_supports(result,declared,root)
     if result.get('geometry_constraints'):
         from ..initialization import apply_geometry_constraints
-        result,_=apply_geometry_constraints(result,result['geometry_constraints'])
+        result,_=apply_geometry_constraints(result,result['geometry_constraints'],root=root)
     return result,scales
 
 
@@ -279,7 +274,10 @@ def fit_depth_bundle(project,scene,options=None):
     from ..files import write
     from ..scene import camera_calibration_signature
     import uuid
-    options=options or{};observations=scene.get('reconstruction_observations',{}).get('clouds',[])
+    options=options or{}
+    from ..initialization import project_supports
+    scene,physical=project_supports(scene,options.get('supports'),project.root)
+    observations=scene.get('reconstruction_observations',{}).get('clouds',[])
     images={i.get('id'):i for i in project.evidence['images']};rows=[];needs=[]
     if {r['group_id']for r in observations if r['split']=='train'}&{r['group_id']for r in observations if r['split']=='validation'}:
         raise ValueError('Train/holdout observation group leakage')
@@ -300,12 +298,12 @@ def fit_depth_bundle(project,scene,options=None):
         raw={k:(v[take]if k in('points_camera_relative','uv_original','depth_relative')else v)for k,v in raw.items()}
         rows.append((row,raw,camera,image))
     training=[r for r in rows if r[0]['split']=='train']
-    report={'status':'NEEDS_MORE_DATA','needs':needs,'physical_verified':False,'scope':'OPTIMIZED_UNVERIFIED_DRAFT'}
+    report={'status':'NEEDS_MORE_DATA','needs':needs,'physical_verified':False,'scope':'OPTIMIZED_UNVERIFIED_DRAFT','physical_constraints':physical}
     if not training:return scene,{**report,'needs':['Raw optical depth observations with registered scale and visible object assets required']}
     observations=[{**r[0],'camera':r[2]}for r in training]
-    blocks,bounds=parameter_blocks(scene,observations,options)
+    blocks,bounds=parameter_blocks(scene,observations,options,root=project.root)
     if not blocks:return scene,{**report,'needs':['All observed variables are protected or no variable was selected']}
-    def assign(x):return apply_parameters(scene,blocks,x)
+    def assign(x):return apply_parameters(scene,blocks,x,root=project.root)
     def world_points(trial,scales,row,raw,camera,image):
         posed=observation_scene(trial,image,project.root,complete=False)if image else trial
         cam=next(c for c in posed['cameras']if c['id']==camera);optical=raw['points_camera_relative']
@@ -342,7 +340,7 @@ def fit_depth_bundle(project,scene,options=None):
     if held and report['holdout_after_rmse_m']>report['holdout_before_rmse_m']+.001:return scene,{**report,'status':'NOT_IMPROVED','needs':['Independent view residual regressed']}
     preserve(scene,trial);validate(trial,project.root)
     # Publish new clouds, not edits of previous inference files.
-    folder=project.root/'scratch/depth_bundle'/uuid.uuid4().hex;folder.mkdir(parents=True)
+    folder=numbered_path(project.root/'scratch/depth_bundle','fit');folder.mkdir(parents=True)
     for index,(row,raw,camera,image)in enumerate(rows):
         current=next(r for r in trial['reconstruction_observations']['clouds']if r['image_id']==row['image_id']and r['object_id']==row['object_id'])
         with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:full={k:v.copy()for k,v in data.items()}
@@ -355,6 +353,8 @@ def fit_depth_bundle(project,scene,options=None):
     for image_id,binding in trial.get('view_registrations',{}).items():
         image=images.get(image_id)
         if image:binding['camera_signature']=camera_calibration_signature(trial,next(c for c in trial['cameras']if c['id']==image['camera']))
+    from ..scene import support_metrics
+    report['physical_constraints']=support_metrics(trial,root=project.root)
     report['status']='IMPROVED';write(folder/'report.json',report)
     return trial,report
 
@@ -409,98 +409,41 @@ def fit_joint_scene(project, scene, options=None):
         if (uv.shape != (2,) or not np.isfinite(uv).all() or not np.isfinite(sigma) or sigma <= 0
                 or not np.isfinite(confidence) or not 0 < confidence <= 1):
             raise ValueError('Finite pixel/confidence and positive pixel uncertainty required')
-    candidate = copy.deepcopy(scene)
-    nodes = {o['id']: o for o in candidate['objects']}
-    camera_nodes = {c['id']: c for c in candidate['cameras']}
-    cached = {i['id']: observation_scene(scene, i, project.root, complete=False) for i in images}
-    blocks = []
-    lower, upper = [], []
-    translation = float(options.get('translation_bound_m', .05))
-    angle = float(options.get('rotation_bound_rad', .3))
-    if not np.isfinite([translation, angle]).all() or min(translation, angle) <= 0:
-        raise ValueError('Positive finite pose bounds required')
-    observed_cameras = {by_id[r['observation']]['camera'] for r in train}
-    for name in options.get('cameras', sorted(observed_cameras)):
-        if name not in observed_cameras:
-            continue
-        if name not in camera_nodes:
-            continue
-        cam = camera_nodes[name]
-        if cam['pose']['value']is None:continue  # External views have separate registered poses.
-        if cam['pose']['provenance'] in ('measured', 'calibrated'):
-            continue
-        if (name == 'wrist') != _mounted(scene, cam['frame']):
+    from ..initialization import project_supports
+    scene,physical=project_supports(scene,options.get('supports'),project.root)
+    candidate=copy.deepcopy(scene);nodes={o['id']:o for o in scene['objects']}
+    cached={i['id']:observation_scene(scene,i,project.root,complete=False)for i in images}
+    observed_cameras={by_id[r['observation']]['camera']for r in train}
+    for name in observed_cameras:
+        cam=cameras[name]
+        if (name=='wrist')!=_mounted(scene,cam['frame']):
             raise ValueError('Side must be fixed and Wrist must use a shared robot-link mount')
-        blocks.append(('camera', name, np.asarray(cam['pose']['value'], float), len(lower), 6, None))
-        lower.extend([-translation]*3 + [-angle]*3)
-        upper.extend([translation]*3 + [angle]*3)
-    observed_objects = {r.get('object') for r in train}
-    selected = options.get('objects', [o['id'] for o in scene['objects']
-                                     if o['id'] in observed_objects and o['role'] in ('manipulable_object', 'receptacle')])
+    observed_objects={r.get('object')for r in train}&nodes.keys()
+    selected=options.get('objects',[n for n in observed_objects if nodes[n]['role']in('manipulable_object','receptacle')])
     for name in selected:
-        obj = nodes[name]
-        if obj['pose']['provenance'] in ('measured', 'calibrated'):
-            continue
-        if obj.get('link') or _mounted(scene, obj['frame']):
-            raise ValueError('Joint Scene objects must have static world poses, not robot-link poses')
-        if obj['pose']['value'] is None:
-            report['needs'] = ['Initialize a metric object pose: ' + name]
-            return scene, report
-        support = _support(scene, obj, options.get('supports', {}).get(name))
-        count = 3 if support else 6
-        blocks.append(('object', name, world_pose(scene, obj), len(lower), count, support))
-        lower.extend([-translation]*2 + [-angle] if support else [-translation]*3 + [-angle]*3)
-        upper.extend([translation]*2 + [angle] if support else [translation]*3 + [angle]*3)
-    if not blocks:
-        report['needs'] = ['All requested variables are measured/calibrated or no variable was selected']
-        return scene, report
-    moving = {name for kind, name, *_ in blocks if kind == 'object'}
-    constraints = copy.deepcopy(scene.get('geometry_constraints'))
-    if constraints:
-        for row in constraints['distances']:
-            pair = set(row['objects'])
-            if pair & moving and any(n not in moving and nodes[n]['pose']['provenance'] not in ('measured', 'calibrated') for n in pair):
-                raise ValueError('Select both members of a constrained pair or retain a measured pose anchor')
+        obj=nodes[name]
+        if obj.get('link')or _mounted(scene,obj['frame']):raise ValueError('Joint Scene objects must have static world poses, not robot-link poses')
+        if obj['pose']['value']is None:
+            return scene,{**report,'needs':['Initialize a metric object pose: '+name]}
+    records=[dict(split='train',camera=by_id[r['observation']]['camera'],image_id=r['observation'],object_id=r.get('object'))for r in train]
+    translation=float(options.get('translation_bound_m',.05))
+    settings={**options,'objects':selected,'translation_bound_m':translation,'rotation_bound_rad':options.get('rotation_bound_rad',.3),
+        'optimize_dimensions':False,'optimize_intrinsics':False,'optimize_appearance':False,'optimize_lighting':False,'optimize_depth_scale':False}
+    blocks,radius=parameter_blocks(scene,records,settings,root=project.root)
+    lower=(-radius).tolist();upper=radius.tolist()
+    if not blocks:return scene,{**report,'needs':['All requested variables are measured/calibrated or no variable was selected']}
+    moving={name for kind,name,*_ in blocks if kind.startswith('object')}
+    for row in scene.get('geometry_constraints',{}).get('distances',[]):
+        pair=set(row['objects'])
+        if pair&moving and any(n not in moving and nodes[n]['pose']['provenance']not in('measured','calibrated')for n in pair):
+            raise ValueError('Select both members of a constrained pair or retain a measured pose anchor')
     def assign(x):
         nonlocal candidate
-        candidate = copy.deepcopy(scene)
-        current = {o['id']: o for o in candidate['objects']}
-        cams = {c['id']: c for c in candidate['cameras']}
-        for kind, name, seed, offset, count, support in blocks:
-            delta = x[offset:offset+count]
-            pose = seed.copy()
-            if support:
-                a = delta[2]
-                rotation = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
-                pose[:3, :3] = rotation @ seed[:3, :3]
-                pose[:2, 3] += delta[:2]
-                pose[2, 3] = support[2]
-            else:
-                pose[:3, :3] = Rotation.from_rotvec(delta[3:]).as_matrix() @ seed[:3, :3]
-                pose[:3, 3] += delta[:3]
-            target = cams[name] if kind == 'camera' else current[name]
-            if kind == 'object':
-                pose = np.linalg.inv(frame_world(candidate, target['frame'])) @ pose
-            target['pose'] = value(pose.tolist(), 'optimized', ['bounded joint:scene image-derived draft'])
-            if kind == 'camera':
-                target['calibration_quality'] = {'state': 'ESTIMATED', 'physical_verified': False,
-                                                 'scope': 'joint image-derived draft; no independent calibration'}
-        if constraints and moving:
-            from ..initialization import apply_geometry_constraints
-            active = {'schema': constraints['schema'], 'units': constraints['units'],
-                      'distances': [r for r in constraints['distances'] if set(r['objects']) & moving]}
-            if active['distances']:
-                candidate, _ = apply_geometry_constraints(candidate, active)
-                candidate['geometry_constraints'] = copy.deepcopy(constraints)
-        # Preserve each dependent fixture's object-relative pose (decals, etc.).
-        current = {o['id']: o for o in candidate['objects']}
-        original = {o['id']: o for o in scene['objects']}
-        for obj in candidate['objects']:
-            parent = obj.get('parent_object')
-            if parent in moving and obj['id'] not in moving:
-                relative = np.linalg.inv(world_pose(scene, original[parent])) @ world_pose(scene, original[obj['id']])
-                world = world_pose(candidate, current[parent]) @ relative
-                obj['pose'] = value((np.linalg.inv(frame_world(candidate, obj['frame'])) @ world).tolist(), 'optimized', ['parent object joint fit'])
+        candidate,_=apply_parameters(scene,blocks,x,root=project.root)
+        for kind,name,*_ in blocks:
+            if kind=='camera':
+                next(c for c in candidate['cameras']if c['id']==name)['calibration_quality']={
+                    'state':'ESTIMATED','physical_verified':False,'scope':'joint image-derived draft; no independent calibration'}
     def errors(rows_to_measure):
         posed = {}
         result = []
@@ -543,7 +486,7 @@ def fit_joint_scene(project, scene, options=None):
         if prior:
             values.extend(x/radius*float(options.get('pose_prior', .2)))
         return np.asarray(values)
-    # Baseline is the supplied Scene, before support projection or constraints.
+    # Measure after physical initialization; optimizing pixels cannot undo contact.
     candidate = copy.deepcopy(scene)
     before = summarize(train)
     held_before = summarize(held)
@@ -571,7 +514,7 @@ def fit_joint_scene(project, scene, options=None):
                   independent_verification=False, coverage={'eligible_images': len(images), 'images': len(used_images),
                                                           'poses': len({tuple(i.get('q_measured')or[])for i in used_images}),
                                                           'cameras': sorted(observed_cameras), 'layout': state},
-                  changed_variables=[{'kind': b[0], 'id': b[1], 'mode': 'xy_yaw_on_support' if b[5] else 'pose6'} for b in blocks],
+                  changed_variables=[{'kind': b[0], 'id': b[1], 'mode': 'xy_yaw_on_support' if b[0]in('object_support','base_support') else 'pose6'} for b in blocks],
                   bounds={'lower': lower, 'upper': upper}, bound_hits=np.flatnonzero(np.isclose(abs(solution.x), radius, atol=1e-6)).tolist(),
                   jacobian_rank=rank, parameter_count=len(lower), condition_number=condition,
                   scaled_jacobian_singular_values=singular.tolist(), group_regressions=regressions,
@@ -593,13 +536,15 @@ def fit_joint_scene(project, scene, options=None):
     held_regressions = [r for r in held_after['groups']
                         if r['rmse_px'] > held_groups[(r['camera'], r['pose'], r['object'])]+limit]
     report['holdout_group_regressions'] = held_regressions
-    for kind, name, seed, _, _, support in blocks:
-        target = next(n for n in candidate['cameras' if kind == 'camera' else 'objects'] if n['id'] == name)
-        pose = np.asarray(target['pose']['value'], float) if kind == 'camera' else world_pose(candidate, target)
-        if np.any(abs(pose[:3, 3]-seed[:3, 3]) > translation+1e-9):
-            return scene, {**report, 'status': 'NOT_IMPROVED', 'reason': 'Support/distance projection exceeded pose bounds: '+name}
-        if support and not np.isclose(pose[2, 3], support[2], atol=1e-9, rtol=0):
-            return scene, {**report, 'status': 'NOT_IMPROVED', 'reason': 'Object support height changed: '+name}
+    from ..scene import support_metrics
+    report['physical_constraints']=support_metrics(candidate,root=project.root)
+    for kind,name,seed,_,_ in blocks:
+        if kind not in('object','camera','base'):continue
+        target=next(n for n in candidate['cameras'if kind=='camera'else'objects']if n['id']==name)if kind!='base'else None
+        pose=frame_world(candidate,name)if kind=='base'else np.asarray(target['pose']['value'])if kind=='camera'else world_pose(candidate,target)
+        initial=seed[0]if kind=='object'else seed
+        if np.any(abs(pose[:3,3]-initial[:3,3])>translation+1e-9):
+            return scene,{**report,'status':'NOT_IMPROVED','reason':'Support/distance projection exceeded pose bounds: '+name}
     if after['behind_camera'] or regressions or held_regressed or held_regressions or after['rmse_px'] >= before['rmse_px']-1e-6:
         return scene, {**report, 'status': 'NOT_IMPROVED', 'reason': 'No aggregate improvement or a camera/pose/object regressed'}
     return candidate, {**report, 'status': 'IMPROVED'}

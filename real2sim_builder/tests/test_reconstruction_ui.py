@@ -2,152 +2,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
-def test_shared_form_preserves_advanced_configuration_and_requires_no_model_import(tmp_path):
-    code='''
-import sys
-from pathlib import Path
-from PyQt6.QtWidgets import QApplication
-from real2sim_builder.project import Project
-from real2sim_builder.files import write
-from real2sim_builder.ui_reconstruction import ReconstructionDialog
-app=QApplication([]);p=Project.create(Path(sys.argv[1]),'form')
-write(p.root/'input/reconstruction.yaml',{'scene_state_id':'layout','anchors':{'photo':{'evidence':['board']}},
- 'objects':{'cube':{'category':'block','asset_group':'blocks','asset_group_relation':{'status':'PROPOSED','provenance':'estimated','evidence':['notes']},'prompt':'red cube','images':{'photo':{'box_xyxy':[1,2,30,40]}}}},
- 'measurements':[{'id':'cube','kind':'box','role':'manipulable_object','dimensions_m':[.03,.03,.03],'evidence':['caliper']}],
- 'fitting':{'max_evaluations':20},'da3':{'process_res':280}})
-d=ReconstructionDialog(p.root,sys.executable)
-config=d.configuration()
-commands=[]
-d.start_cli=lambda args:commands.append(args)
-d.run(run_modeling=True)
-assert '--run-modeling' in commands[-1] and commands[-1][0]=='reconstruct'
-d.refit=True;d.run(run_modeling=True)
-assert '--run-modeling' in commands[-1] and commands[-1][0]=='refit-pairs'
-d.refit=False
-assert d.objects.columnCount()==6
-assert all('mm'not in d.objects.horizontalHeaderItem(i).text()for i in range(6))
-assert 'Scene Memo'in d.tabs.tabText(0)
-assert config['anchors']=={'photo':{'evidence':['board']}}
-assert config['objects']['cube']['images']['photo']['box_xyxy']==[1,2,30,40]
-assert config['objects']['cube']['asset_group']=='blocks'and config['objects']['cube']['category']=='block'
-assert config['objects']['cube']['asset_group_relation']['provenance']=='estimated'
-d.objects.cellWidget(0,4).setCurrentIndex(d.objects.cellWidget(0,4).findData('__new_model__'))
-assert d.configuration()['objects']['cube']['modeling_action']=='new'
-request=d.configuration()['objects']['cube']['modeling_request_id']
-assert d.configuration()['objects']['cube']['modeling_request_id']==request
-d.add_object({'id':'cube2','kind':'box','role':'manipulable_object'})
-config=d.configuration()
-assert config['objects']['cube']['modeling_request_id']==request
-assert 'modeling_action'not in config['objects']['cube2']
-d.objects.cellWidget(1,4).setCurrentIndex(d.objects.cellWidget(1,4).findData('__new_model__'))
-assert d.configuration()['objects']['cube2']['modeling_request_id']!=request
-d.objects.cellWidget(1,4).setCurrentIndex(0)
-assert d.configuration()['objects']['cube']['modeling_request_id']==request
-assert 'modeling_action'not in d.configuration()['objects']['cube2']
-assert config['measurements'][0]['dimensions_m']==[.03]*3
-assert config['da3']['process_res']==280 and d.objects.rowCount()==2
-assert not any(name.split('.')[0]in('mujoco','torch','pxr','isaaclab')for name in sys.modules)
-d.close();print('shared form metadata retained without AI/engine imports')
-'''
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen');env.pop('PYTHONHOME',None)
-    python=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
-    result=subprocess.run([str(python),'-B','-c',code,str(tmp_path)],env=env,capture_output=True,text=True)
-    assert result.returncode==0,result.stdout+result.stderr
-
-
-def test_actual_form_saves_configuration_runs_cli_and_displays_missing_data(tmp_path):
-    code='''
-import sys
-from pathlib import Path
-from PyQt6.QtWidgets import QApplication
-from real2sim_builder.project import Project
-from real2sim_builder.files import read
-from real2sim_builder.ui_reconstruction import ReconstructionDialog
-app=QApplication([]);p=Project.create(Path(sys.argv[1]),'actual form')
-d=ReconstructionDialog(p.root,'/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python')
-d.show();app.processEvents();d.run()
-assert d.process.waitForFinished(10000),d.summary.toPlainText()
-app.processEvents()
-assert d.process.exitCode()==2,d.summary.toPlainText()
-assert 'WAITING_FOR_CODEX_ANALYSIS' in d.summary.toPlainText()
-assert (p.root/'input/reconstruction.yaml').is_file()
-assert (p.root/'scratch/agent'/d.candidate.text()/'reconstruction.json').is_file()
-assert not (p.root/'working/current_scene.yaml').exists()
-assert not any(name.split('.')[0]in('mujoco','torch','pxr','isaaclab')for name in sys.modules)
-from real2sim_builder.candidate import Candidate
-Candidate(p,d.candidate.text()).reject()
-d.run();assert d.process.waitForFinished(10000);app.processEvents()
-assert d.process.exitCode()==1 and '실행 실패' in d.summary.toPlainText(),d.summary.toPlainText()
-d.close();print('actual Qt to CLI, missing data preserved, no model/hardware launch')
-'''
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen');env.pop('PYTHONHOME',None)
-    python=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
-    result=subprocess.run([str(python),'-B','-c',code,str(tmp_path)],env=env,capture_output=True,text=True)
-    assert result.returncode==0,result.stdout+result.stderr
-
-
-def test_unmeasured_analysis_objects_and_model_requests_survive_dialog_reopen(tmp_path):
-    code='''
-import sys
-from pathlib import Path
-from PyQt6.QtWidgets import QApplication
-from real2sim_builder.project import Project
-from real2sim_builder.files import read,write
-from real2sim_builder.ui_reconstruction import ReconstructionDialog
-app=QApplication([]);existing=list(Path(sys.argv[1]).glob('*/project.yaml'))
-p=Project(existing[0].parent)if existing else Project.create(Path(sys.argv[1]),'reopen')
-config={'scene_state_id':'layout','objects':{
- 'cup1':{'category':'cup','role':'receptacle','prompt':'paper cup','asset_group':'cups','modeling_action':'new','modeling_request_id':'request_cups'},
- 'cup2':{'category':'cup','role':'receptacle','prompt':'paper cup','asset_group':'cups','asset_manifest':'input/object_assets/cups/missing/manifest.json'},
- 'red_block':{'category':'cube','role':'manipulable_object','prompt':'red cube'}},
- 'selections':{'side':{'cup1':1}},'candidate':'unfinished_candidate'}
-if not(p.root/'input/reconstruction.yaml').exists():write(p.root/'input/reconstruction.yaml',config)
-for _ in range(2):
- d=ReconstructionDialog(p.root,sys.executable)
- assert d.objects.rowCount()==3
- actual=d.configuration();assert actual['objects']==config['objects'],actual
- assert actual['selections']==config['selections']
- assert d.candidate.text()=='unfinished_candidate'
- write(p.root/'input/reconstruction.yaml',actual);d.close()
-assert not any(n.split('.')[0]in('mujoco','torch','pxr','isaaclab')for n in sys.modules)
-'''
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen');env.pop('PYTHONHOME',None)
-    python=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
-    result=subprocess.run([str(python),'-B','-c',code,str(tmp_path)],env=env,capture_output=True,text=True)
-    assert result.returncode==0,result.stdout+result.stderr
-    restarted=subprocess.run([str(python),'-B','-c',code,str(tmp_path)],env=env,capture_output=True,text=True)
-    assert restarted.returncode==0,restarted.stdout+restarted.stderr
-
-
-def test_second_scene_menu_reads_shared_library_and_explicit_delete_is_local(tmp_path):
-    from real2sim_builder.project import Project
-    from real2sim_builder.object_assets import register_object_asset
-    from real2sim_builder.files import write
-    from test_object_assets import asset_fixture
-    a=Project.create(tmp_path/'scenes','A');b=Project.create(tmp_path/'scenes','B')
-    asset=register_object_asset(a,asset_fixture(tmp_path/'asset'),asset_id='cups')
-    write(b.root/'input/reconstruction.yaml',{'objects':{n:{'role':'receptacle','category':'cup','asset_group':'cups','asset_manifest':asset['manifest']}for n in('cup1','cup2')}})
-    code='''
-import sys
-from PyQt6.QtWidgets import QApplication
-from real2sim_builder.ui_reconstruction import ReconstructionDialog
-app=QApplication([]);d=ReconstructionDialog(sys.argv[1],sys.executable)
-assert d.asset_list.count()==1 and 'Workspace' in d.asset_list.itemText(0)
-assert d.objects.rowCount()==2
-assert all(d.objects.cellWidget(r,4).currentData()==d.asset_list.itemData(0)for r in range(2))
-d.objects.selectRow(1);d.remove_objects()
-assert set(d.configuration()['objects'])=={'cup1'}
-assert d.asset_list.count()==1
-assert not any(n.split('.')[0]in('mujoco','torch','pxr','isaaclab')for n in sys.modules)
-d.close()
-'''
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen');env.pop('PYTHONHOME',None)
-    python=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
-    result=subprocess.run([str(python),'-B','-c',code,str(b.root)],env=env,capture_output=True,text=True)
-    assert result.returncode==0,result.stdout+result.stderr
-
-
 def test_scene_prepare_literal_prompt_to_fake_codex_and_fresh_ui_restore(tmp_path):
     """Real Qt save/reopen and Backend handoff; only the CLI answer is Fake."""
     from real2sim_builder.project import Project,Candidate
@@ -194,7 +48,7 @@ else:
 assert not any(n.split('.')[0]in('mujoco','torch','pxr','isaaclab')for n in sys.modules)
 panel.close()
 '''
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen');env.pop('PYTHONHOME',None)
+    env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path/'qt-settings'));env.pop('PYTHONHOME',None)
     qt=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
     result=subprocess.run([str(qt),'-B','-c',ui_code,str(p.root),'save',str(image)],env=env,capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stdout+result.stderr
@@ -211,3 +65,152 @@ panel.close()
     assert (p.root/'input/scene_memo.txt').read_bytes()==text.encode()
     assert before=={f.relative_to(c.root).as_posix():sha(f)for f in (c.root/'modeling/codex').rglob('*')if f.is_file()}
     assert (other.root/'input/scene_memo.txt').read_text()=='Other Scene: blue block only.'
+
+
+
+def qt_check(tmp_path,code):
+    setup='''
+import sys
+from pathlib import Path
+from PyQt6.QtWidgets import QApplication,QTabWidget,QTableWidget
+from real2sim_builder.project import Project
+from real2sim_builder.files import read,write
+from real2sim_builder import ui_reconstruction as ui
+app=QApplication([])
+p=Project.create(Path(sys.argv[1]),'simple UI')
+# No external account/network access in UI regression fixtures.
+ui.ReconstructionDialog.refresh_account=lambda self:None
+'''
+    env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path/'qt-settings'));env.pop('PYTHONHOME',None)
+    python=Path('workbench_runs/runtime/qt/bin/python3.11').absolute()
+    result=subprocess.run([str(python),'-B','-c',setup+code,str(tmp_path)],env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_single_screen_retains_config_and_no_heavy_imports(tmp_path):
+    qt_check(tmp_path,'''
+config={'candidate':'existing','scene_state_id':'layout','objects':{'cup':{'prompt':'cup','asset_manifest':'input/asset.json'}},
+ 'measurements':[{'id':'cup','dimensions_m':[.1,.1,.1]}],'fitting':{'supports':{'cup':{'support':'table','status':'PROPOSED','source':'estimated','evidence':['photo']}}},'sam':{'python':'saved','model':'saved'}}
+write(p.root/'input/reconstruction.yaml',config)
+d=ui.ReconstructionDialog(p.root,sys.executable)
+assert d.configuration()==config
+assert not d.findChildren(QTabWidget)and not d.findChildren(QTableWidget)
+assert d.candidate.text()=='existing' and not hasattr(d,'export_button')
+assert not any(n.split('.')[0]in('mujoco','torch','pxr','isaaclab')for n in sys.modules)
+d.close()
+''')
+
+
+def test_model_and_effort_popups_are_readable_inside_workbench(tmp_path):
+    qt_check(tmp_path,'''
+from robot_learning_workbench.ui.theme import STYLE
+from PyQt6.QtGui import QPalette
+app.setStyleSheet(STYLE)
+d=ui.ReconstructionDialog(p.root,sys.executable)
+d.model.addItems(['model-a','model-b','model-c'])
+d.effort.clear();d.effort.addItems(['low','medium','high'])
+d.show();app.processEvents()
+for combo in (d.model,d.effort):
+ combo.showPopup();app.processEvents()
+ view=combo.view();palette=view.palette()
+ base=palette.color(QPalette.ColorRole.Base)
+ text=palette.color(QPalette.ColorRole.Text)
+ assert base.lightness()>200 and text.lightness()<80,(base.name(),text.name())
+ # Check the actual unselected row background, not only the declared stylesheet.
+ image=view.viewport().grab().toImage()
+ rect=view.visualRect(combo.model().index(1,0))
+ assert image.pixelColor(min(rect.right(),image.width()-1)-12,min(rect.center().y(),image.height()-1)).lightness()>200
+ combo.hidePopup()
+d.close()
+''')
+
+
+def test_usage_refresh_clears_old_account_and_displays_real_periods(tmp_path):
+    qt_check(tmp_path,'''
+d=ui.ReconstructionDialog(p.root,sys.executable)
+models=[{'model':'test','isDefault':True,'defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':'high'}]}]
+snapshot={'version':'test cli','logged_in':True,'account':{'planType':'pro'},'models':models,
+ 'usage':[{'name':'codex','bucket':'codex','model':None,'minutes':300,'remaining':46,'resets_at':2000000000}]}
+d.account_result({'snapshot':snapshot},0)
+assert d.model.currentText()=='test' and d.effort.currentData()=='high'
+assert any('46%'in label.text()for label in d.findChildren(ui.QLabel))
+d.account_result({'error':'조회 실패'},0)
+assert d.account is None and d.usage_rows.count()==1
+assert d.usage_rows.itemAt(0).widget().text()=='사용량 · 조회 불가'
+d.generation=2;d.account_result({'snapshot':snapshot},1);assert d.account is None
+d.close()
+''')
+
+
+def test_launch_always_continuous_and_passes_same_auth_and_model(tmp_path):
+    qt_check(tmp_path,'''
+d=ui.ReconstructionDialog(p.root,sys.executable)
+models=[{'model':'test','defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':'high'}]}]
+d.account_result({'snapshot':{'version':'test','logged_in':True,'account':{},'models':models,'usage':[]}},0)
+ui.runtime_needs=lambda config,**kwargs:[]
+commands=[];d.start_cli=lambda args:commands.append(args)
+d.launch();assert '--run-modeling'in commands[0] and '--candidate'in commands[0]
+assert read(Path(commands[0][commands[0].index('--config')+1]))['candidate']==d.candidate.text()
+d.refit=True;d.launch();assert commands[1][0]=='refit-pairs'
+assert read(p.root/'working/control.json')if (p.root/'working/control.json').exists()else True
+d.close()
+''')
+
+
+def test_failure_does_not_show_old_success_and_runtime_missing_is_actionable(tmp_path):
+    qt_check(tmp_path,'''
+d=ui.ReconstructionDialog(p.root,sys.executable)
+missing=ui.runtime_needs({})
+assert all(any(label in item for item in missing)for label in ('SAM3.1','MASt3R','COLMAP'))
+assert not any('DA3'in item for item in missing)
+d.show_report({'status':'FAILED','error_code':'USAGE_LIMIT'})
+assert '계정 전환'in d.summary.toPlainText()
+d.show_report({'status':'STOPPED'});assert '이어서 실행'in d.summary.toPlainText()
+d.close()
+''')
+
+
+def test_account_switch_uses_official_processes_and_same_private_home(tmp_path):
+    qt_check(tmp_path,'''
+import os,time
+home=Path(sys.argv[1])/'private-auth';os.environ['REAL2SIM_CODEX_HOME']=str(home)
+program=Path(sys.argv[1])/'codex'
+program.write_text('#!'+sys.executable+'\\nimport os,sys\\nfrom pathlib import Path\\nh=Path(os.environ["CODEX_HOME"]);h.mkdir(exist_ok=True)\\nwith (h/"calls").open("a") as f:f.write(sys.argv[1]+"\\\\n")\\n')
+program.chmod(0o700)
+ui.codex_cli.executable=lambda:str(program);ui.codex_cli.capabilities=lambda p:{}
+d=ui.ReconstructionDialog(p.root,sys.executable);d.account={'logged_in':True}
+refreshed=[];d.refresh_account=lambda:refreshed.append(True)
+d.authenticate();assert d.account is None
+until=time.monotonic()+5
+while d.auth_guard is not None and time.monotonic()<until:app.processEvents();time.sleep(.01)
+assert d.auth_guard is None and refreshed
+assert (home/'calls').read_text().splitlines()==['logout','login']
+assert not list(p.root.rglob('auth.json'))
+d.close()
+''')
+
+
+def test_failed_launch_never_reuses_previous_success_report(tmp_path):
+    qt_check(tmp_path,'''
+d=ui.ReconstructionDialog(p.root,sys.executable)
+path=p.root/'scratch/agent'/d.candidate.text()/'reconstruction.json';write(path,{'status':'VISUAL_DRAFT_REVIEWED'})
+d.report_mtime=path.stat().st_mtime_ns;d.finished(1)
+assert '실행 실패'in d.summary.toPlainText()and '완료'not in d.summary.toPlainText()
+d.close()
+''')
+
+
+def test_pair_screen_uses_latest_saved_layout_and_resumes_its_candidate(tmp_path):
+    qt_check(tmp_path,'''
+from real2sim_builder.candidate import Candidate
+c=Candidate.create(p,'earlier');p.update(candidate='earlier')
+write(p.root/'input/reconstruction.yaml',{'candidate':'earlier','scene_state_id':'old'})
+evidence=p.evidence;evidence['images']=[{'scene_state_id':'new','runtime_baseline':{'revision':'rev'}}];write(p.root/'input/evidence.yaml',evidence)
+d=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
+name=d.candidate.text();assert name!='earlier'and d.configuration()['scene_state_id']=='new'
+c=Candidate.create(p,name);info=c.info;info['source_revision']='rev';write(c.root/'candidate.json',info)
+scene=c.scene;scene['reconstruction_state']={'id':'new'};write(c.root/'candidate_scene.yaml',scene);p.update(candidate=name)
+d.close();again=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
+assert again.candidate.text()==name
+again.close()
+''')

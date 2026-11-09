@@ -46,3 +46,20 @@ def test_saved_phone_batch_is_reconstruction_input_without_camera_or_dimensions(
     save_inputs(root,[third],'later capture')
     assert input_images(Project(root))[0]==[]  # Distinct uploads never imply the same layout.
     assert len(input_images(Project(root),state)[0])==2
+
+
+def test_scene_and_model_inputs_keep_names_roles_and_distinct_unknown_lenses(tmp_path):
+    from PIL import Image
+    from robot_learning_workbench.scene_preparation import create_scene,save_inputs
+    from real2sim_builder.project import Project
+    from real2sim_builder.observations import input_images
+    root=tmp_path/'workbench';details=create_scene(root,'Auto Version');sources=[]
+    for name,color in [('scene_img1.jpg','red'),('wrist_camera_img1.jpg','blue')]:
+        p=tmp_path/name;Image.new('RGB',(40,30),color).save(p);sources.append(p)
+    save_inputs(details['project'],[{'path':str(sources[0]),'role':'scene_photo'},{'path':str(sources[1]),'role':'model_reference'}],'Keep my memo')
+    project=Project(details['project']);rows=project.evidence['images']
+    assert [r['path']for r in rows]==['input/scene_photos/scene_img1.jpg','input/model_references/wrist_camera_img1.jpg']
+    assert [r['role']for r in rows]==['scene_photo','model_reference']
+    assert all(r['physical_camera_id']is None for r in rows)
+    assert rows[0]['camera']!=rows[1]['camera']and not rows[0]['camera'].startswith('phone_')
+    assert [r['id']for r in input_images(project)[0]]==[rows[0]['id']]

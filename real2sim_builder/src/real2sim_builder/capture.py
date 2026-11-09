@@ -29,7 +29,7 @@ def register_unbound(project, destination, manifest, samples):
         for image in sample['images']:
             relative=(destination/image['path']).relative_to(project.root).as_posix()
             quality=image_quality_reasons(sample,image)
-            row=dict(id=manifest['session_id']+'_'+sample['id']+'_'+image['camera'],path=relative,camera=image['camera'],
+            row=dict(role='capture',id=manifest['session_id']+'_'+sample['id']+'_'+image['camera'],path=relative,camera=image['camera'],
                      split=sample.get('split',manifest['split']),group_id=sample.get('group_id',manifest['group_id']),session_id=manifest['session_id'],
                      sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
                      scene_state_id=manifest.get('scene_state_id'),snapshot_id=sample['id'],joint_units=manifest['joint_units'],
@@ -173,7 +173,9 @@ def _capture_destination(project,root,session_id):
     base=(project.root/'input/captures').resolve();source=Path(root).resolve()
     # A closed dataset may already belong to a run folder in this Project.
     # Register it in place rather than copying the images/model a second time.
-    return source if source.is_relative_to(base)and source.name==session_id else base/session_id
+    if source.is_relative_to(base):return source
+    from scene_contract.naming import numbered_path
+    return numbered_path(base,'capture')
 
 
 def _import_session(project, root, max_skew_ns=100000000, loaded=None):
@@ -281,7 +283,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
                 reasons.append(str(exc))
                 q = None
             relative = (destination / image['path']).relative_to(project.root).as_posix()
-            observation = {'id': m.get('source_dataset_id', m['session_id']) + '_' + sample['id'] + '_' + image['camera'], 'path': relative, 'camera': image['camera'], 'split': sample.get('split', m['split']), 'snapshot_id': sample['id'] if m['purpose'] == 'snapshot' else None, 'scene_state_id': m.get('scene_state_id'), 'resolution': image['resolution'], 'sha256': sha(project.root / relative), 'timestamp_ns': t, 'group_id': sample.get('group_id', m['group_id']), 'session_id': m['session_id'], 'q_measured': q, 'joint_names': m['joint_names'], 'eligible': not reasons or bool(m.get('quality_override')), 'exclusion_reasons': [] if m.get('quality_override') else reasons, 'capture_quality_reasons': reasons, 'quality_override': m.get('quality_override'), 'capture_manifest': (destination / 'capture_manifest.yaml').relative_to(project.root).as_posix()}
+            observation = {'role':'capture','id': m.get('source_dataset_id', m['session_id']) + '_' + sample['id'] + '_' + image['camera'], 'path': relative, 'camera': image['camera'], 'split': sample.get('split', m['split']), 'snapshot_id': sample['id'] if m['purpose'] == 'snapshot' else None, 'scene_state_id': m.get('scene_state_id'), 'resolution': image['resolution'], 'sha256': sha(project.root / relative), 'timestamp_ns': t, 'group_id': sample.get('group_id', m['group_id']), 'session_id': m['session_id'], 'q_measured': q, 'joint_names': m['joint_names'], 'eligible': not reasons or bool(m.get('quality_override')), 'exclusion_reasons': [] if m.get('quality_override') else reasons, 'capture_quality_reasons': reasons, 'quality_override': m.get('quality_override'), 'capture_manifest': (destination / 'capture_manifest.yaml').relative_to(project.root).as_posix()}
             if image.get('runtime_baseline'):
                 observation['runtime_baseline'] = copy.deepcopy(image['runtime_baseline'])
                 observation['runtime_baseline']['path'] = (destination / image['runtime_baseline']['path']).relative_to(project.root).as_posix()
@@ -543,7 +545,7 @@ def load_snapshots(root, validation=(), scene_state=None):
                 image['runtime_baseline'].update({key:pair[key] for key in ('scene_identity','source_scene','physics_steps','total_physics_steps','simulation_time_s','state_application','sim_target_joint_rad','sim_joint_delta_rad','sim_object_poses_world')if key in pair})
             images.append(image)
         samples.append({'id': row['id'], 'timestamp_ns': state['timestamp_ns'], 'q_measured': state['q_measured'], 'measured_history': history, 'quality': {'eligible_for_calibration': all((i.get('runtime_baseline', {}).get('quality', {}).get('eligible', True) for i in images))}, 'images': images, 'metadata_path': (folder / 'metadata.json').relative_to(root).as_posix(), 'split': 'validation' if row['id'] in validation else 'train', 'group_id': manifest['dataset_id'] + '_' + row['id']})
-    normalized = {**manifest, 'source_dataset_id': manifest['dataset_id'], 'session_id': manifest['dataset_id'] + '_' + sha(root / 'capture_manifest.yaml')[:12], 'group_id': manifest['dataset_id'], 'scene_state_id': scene_state, 'purpose': 'snapshot', 'split': 'train'}
+    normalized = {**manifest, 'source_dataset_id': manifest['dataset_id'], 'session_id': manifest.get('session_id',manifest['dataset_id'] + '_' + sha(root / 'capture_manifest.yaml')[:12]), 'group_id': manifest['dataset_id'], 'scene_state_id': scene_state, 'purpose': 'snapshot', 'split': 'train'}
     return (normalized, samples, [])
 
 

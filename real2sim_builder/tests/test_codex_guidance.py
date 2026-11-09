@@ -14,9 +14,10 @@ from pathlib import Path
 args=sys.argv;root=Path(args[args.index('--cd')+1]);prompt=args[-1]
 guide=root/'BUILDER_GUIDE.md';assert guide.is_file()
 assert 'Read BUILDER_GUIDE.md' in prompt and 'before' in prompt
-assert 'sandbox_workspace_write.network_access=false' in args
-assert args[args.index('--sandbox')+1]=='workspace-write'
-assert 'sandbox_workspace_write.writable_roots=[]' in args
+assert 'same representative_view.image_id' in prompt
+assert 'permissions.builder.network.enabled=false' in args
+assert 'default_permissions="builder"' in args
+assert any(v.startswith('permissions.builder.filesystem=')and '"deny"'in v for v in args)
 payload=json.loads((root/'tasks.json').read_text());guidance=payload['guidance']
 assert hashlib.sha256(guide.read_bytes()).hexdigest()==guidance['sha256']
 assert 'Object 1개 : 독립 USDA Asset 1개' in guide.read_text()
@@ -28,7 +29,7 @@ Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(reply))
     result=run_codex_modeling(c,executable=exe)
     folder=next((c.root/'modeling/codex').iterdir());manifest=read(folder/'input_manifest.json')
     assert manifest['guidance']['sha256']==sha(folder/'BUILDER_GUIDE.md')
-    assert manifest['guidance']['version']=='2026-11-06'
+    assert manifest['guidance']['version']=='2026-11-08'
     assert result['status']=='ANALYZED_OBJECT_PROPOSALS'
     assert read(p.root/'input/reconstruction.yaml')['scene_analysis']['guidance_sha256']==manifest['guidance']['sha256']
     assert 'BUILDER_GUIDE' in (c.root/'modeling/CODEX_MODELING.md').read_text()

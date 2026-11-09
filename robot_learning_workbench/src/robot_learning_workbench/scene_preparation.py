@@ -22,7 +22,7 @@ def scene_details(path):
     for kind,key in [('image','images'),('video','videos'),('document','documents'),('robot','robot_inputs'),('capture','capture_sessions')]:
         for row in evidence.get(key,[]):
             file=project.root/row['path'];status='MISSING'if not file.is_file()else'CHANGED'if row.get('sha256')and sha(file)!=row['sha256']else'REGISTERED'
-            inputs.append({'kind':kind,'path':row['path'],'sha256':row.get('sha256'),'status':status})
+            inputs.append({'kind':kind,'path':row['path'],'sha256':row.get('sha256'),'status':status,'role':row.get('role'),'name':row.get('original_name')or Path(row.get('source')or row['path']).name})
     from real2sim_builder.evidence import scene_memo
     memo=scene_memo(project)
     ready=False;needs=['Scene/Candidate not created; inputs may be saved independently']
@@ -39,7 +39,8 @@ def save_inputs(path,files,notes,*,scene_state=None):
     from real2sim_builder.evidence import add_image,add_video,copy_input,save_scene_memo
     project=Project(path);project.require_writable()
     if not isinstance(notes,str):raise ValueError('Scene notes must be text')
-    files=[Path(p).resolve()for p in files]
+    entries=[(Path(p['path']).resolve(),p.get('role','scene_photo'))if isinstance(p,dict)else(Path(p).resolve(),'scene_photo')for p in files]
+    files=[file for file,role in entries]
     for file in files:
         if not file.is_file():raise FileNotFoundError(file)
         if file.suffix.lower() in ('.glb','.gltf'):raise ValueError('LEGACY_UNSUPPORTED: GLB/glTF 입력은 제거되었습니다. 실측 치수와 RGB 또는 OBJ/STL을 사용하세요.')
@@ -49,16 +50,19 @@ def save_inputs(path,files,notes,*,scene_state=None):
     from real2sim_builder.observations import register_image
     from real2sim_builder.scene import identifier
     state=identifier(scene_state)if scene_state else 'photos_'+uuid4().hex[:12]
-    for file in files:
+    for file,role in entries:
         with exclusive(project):
             suffix=file.suffix.lower()
             if suffix in('.png','.jpg','.jpeg','.webp','.tif','.tiff'):
                 digest=sha(file)
-                existing=next((i for i in project.evidence['images']if i.get('sha256')==digest and i.get('scene_state_id')),None)
+                existing=next((i for i in project.evidence['images']if i.get('sha256')==digest and i.get('scene_state_id')and i.get('role')==role),None)
                 if existing:
                     if scene_state and existing['scene_state_id']!=scene_state:raise ValueError('Existing RGB belongs to another static layout')
                 else:
-                    register_image(project,file,camera='phone_'+digest[:16],camera_type='external',scene_state=state)
+                    row=register_image(project,file,camera='external_view_'+str(len(project.evidence['images'])+1).zfill(3),camera_type='external',scene_state=state,role=role)
+                    evidence=project.evidence
+                    next(i for i in evidence['images']if i['id']==row['id'])['physical_camera_id']=None
+                    write(project.root/'input/evidence.yaml',evidence)
             elif suffix in('.mp4','.mov','.avi'):add_video(project,file,camera='reference')
             else:
                 if suffix in('.urdf','.obj','.usd','.usda','.usdc'):

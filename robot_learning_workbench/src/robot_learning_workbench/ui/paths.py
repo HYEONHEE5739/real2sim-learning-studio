@@ -1,6 +1,5 @@
 """UI suggestions only. Explicit Recipe paths and Native layouts remain authoritative."""
 from pathlib import Path
-import uuid
 
 GROUPS={'teleoperation':'source','scene':'scenes','source':'source','annotation':'annotation','datagen':'datagen',
         'curation':'curation','convert':'dataset','merge':'dataset','train':'policy',
@@ -9,7 +8,8 @@ GROUPS={'teleoperation':'source','scene':'scenes','source':'source','annotation'
 
 
 def output_path(workspace,stage,name=None):
-    group=GROUPS[stage];name=name or stage+'-'+uuid.uuid4().hex[:8]
+    from scene_contract.naming import numbered_path
+    group=GROUPS[stage];name=name or numbered_path(Path(workspace)/group,stage).name
     if not isinstance(name,str) or not name.strip() or name in ('.','..') or Path(name).name!=name or '/' in name or '\\' in name:raise ValueError('One explicit Run name required')
     return Path(workspace).resolve()/group/name
 

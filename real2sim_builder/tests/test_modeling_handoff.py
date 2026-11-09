@@ -95,8 +95,9 @@ def test_opt_in_codegen_uses_nonrepo_sandbox_and_imports_validated_result(tmp_pa
     executable.write_text('#!'+sys.executable+'\n'+'''import json,sys
 from pathlib import Path
 args=sys.argv;root=Path(args[args.index('--cd')+1]);assert not (root/'.git').exists()
-assert args[args.index('--sandbox')+1]=='workspace-write'
-assert 'sandbox_workspace_write.writable_roots=[]' in args
+assert '--sandbox' not in args
+assert 'default_permissions="builder"' in args
+assert 'permissions.builder.network.enabled=false' in args
 (root/'author.py').write_text('import bpy\\nbpy.ops.mesh.primitive_cube_add(size=.03)\\nobj=bpy.context.object;obj["r2s_id"]="block"\\nbpy.ops.mesh.primitive_cube_add(size=.03)\\ncol=bpy.context.object;col.parent=obj;col["r2s_collision"]=True\\n')
 Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'script':'author.py'}))
 ''');executable.chmod(0o700)
@@ -242,7 +243,7 @@ def test_codex_failures_retain_candidate_tasks_and_do_not_publish_assets(tmp_pat
     p=Project.create(tmp_path/'projects','failure handling');c=Candidate.create(p,'retry')
     modeling_tasks(c,{'objects':{'new':{'prompt':'new object'}}},{'segments':[]})
     before=sha(c.root/'candidate_scene.yaml');executable=tmp_path/'fake_codex'
-    for message,code in [('authentication failed','AUTHENTICATION_FAILED'),('usage limit reached','USAGE_LIMIT'),('unexpected argument --bad','INVALID_CLI_OPTIONS')]:
+    for message,code in [('{"error":{"code":"unauthorized"}}','AUTHENTICATION_FAILED'),('{"error":{"code":"usage_limit_reached"}}','USAGE_LIMIT'),('unexpected argument --bad','MODELING_FAILED')]:
         executable.write_text('#!'+sys.executable+'\nimport sys\nprint('+repr(message)+')\nsys.exit(1)\n');executable.chmod(0o700)
         with pytest.raises(RuntimeError):run_codex_modeling(c,executable=executable)
         latest=max((c.root/'modeling/codex').glob('*/status.json'),key=lambda f:f.stat().st_mtime_ns)
@@ -543,8 +544,9 @@ def test_new_request_beats_same_fingerprint_and_completes_once(tmp_path):
     assert modeling_tasks(c,new,{})['pending']==['cup']
     assert read(c.root/'modeling/tasks.json')['groups']['cup']['request_id']==request
     created=register_object_asset(p,source,asset_id='cup',generation_id=request)
-    assert created['version']!=old['version']
-    record_modeling_results(c,[created]);assert attach_modeled_assets(c,new,{})['attached']==['cup']
+    assert created['version']==old['version']and created['content_sha256']==old['content_sha256']
+    record_modeling_results(c,[created],request_ids={'cup':request});assert attach_modeled_assets(c,new,{})['attached']==[]
+    assert next(o for o in c.scene['objects']if o['id']=='cup')['object_asset']['version']==created['version']
     assert modeling_tasks(c,new,{})['pending']==[]
     assert read(c.root/'modeling/results.json')['groups']['cup']['request_status']=='REGISTERED'
     assert sha(p.root/old['manifest'])==old_sha

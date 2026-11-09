@@ -1,3 +1,4 @@
+from scene_contract.naming import numbered_path
 """Native selections and existing Curation APIs; slow reads run outside Qt."""
 from pathlib import Path
 import uuid
@@ -353,11 +354,11 @@ class CurationPage(QWidget):
     def export(self):
         if not self.stable():return
         parent=QFileDialog.getExistingDirectory(self,'새 Export 출력 상위 폴더',str(self.workspace/'dataset'))
-        if parent:self.perform('materialize',source=self.source,output=str(Path(parent)/('lerobot-'+uuid.uuid4().hex[:8])))
+        if parent:self.perform('materialize',source=self.source,output=str(Path(parent)/numbered_path(parent,'lerobot').name))
     def merge(self):
         if self.busy:self.state.setText('현재 작업이 끝난 뒤 실행하세요');return
         dialog=DatasetMergeDialog(self.job.python,self.workspace,self.datasets.rows,self)
         if dialog.exec()!=QDialog.DialogCode.Accepted:return
         sources=dialog.paths
         parent=QFileDialog.getExistingDirectory(self,'새 Dataset Merge 출력 상위 폴더',str(self.workspace/'dataset'))
-        if parent:self.perform('merge',sources=sources,output=str(Path(parent)/('merged-'+uuid.uuid4().hex[:8])))
+        if parent:self.perform('merge',sources=sources,output=str(Path(parent)/numbered_path(parent,'merged').name))

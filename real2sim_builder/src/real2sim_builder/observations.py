@@ -22,7 +22,7 @@ def _scene_digest(scene):
 
 def input_images(project,scene_state=None):
     """Identity-checked RGB inputs, including unregistered external views."""
-    images=[i for i in project.evidence['images']if i.get('id')and i.get('scene_state_id')]
+    images=[i for i in project.evidence['images']if i.get('id')and i.get('scene_state_id')and i.get('role')!='model_reference']
     states = {i.get('scene_state_id') for i in images if i.get('scene_state_id')}
     if scene_state is None:
         if len(states) != 1:
@@ -64,9 +64,17 @@ def view_quality_reasons(image):
 
 
 def registered_images(project,scene_state=None,*,scene=None):
+    joint=scene_state is None
     scene_state=scene_state or(scene or{}).get('reconstruction_state',{}).get('id')
     images,state,needs=input_images(project,scene_state);result=[]
     registrations=(scene or{}).get('view_registrations',{})
+    if joint:
+        extra={key for key,r in registrations.items()if r.get('use_for_joint_fitting')}
+        for layout in sorted({i['scene_state_id']for i in project.evidence['images']if i.get('id')in extra}):
+            rows,_,_=input_images(project,layout)
+            images.extend(i for i in rows if i['id']in extra and i['id']not in{r['id']for r in images})
+        if {i['sha256']for i in images if i['split']=='train'}&{i['sha256']for i in images if i['split']=='validation'}or {i['group_id']for i in images if i['split']=='train'}&{i['group_id']for i in images if i['split']=='validation'}:
+            raise ValueError('Joint photo/sensor train/holdout leakage')
     for original in images:
         image=copy.deepcopy(original);registration=registrations.get(image['id'])
         if registration:
@@ -81,7 +89,7 @@ def registered_images(project,scene_state=None,*,scene=None):
     return result,state,needs or([]if result else['No World-registered eligible views in this layout'])
 
 
-def register_image(project,path,*,camera,camera_type,scene_state,split='train',timestamp=None,observed_objects=(),joint_record=None):
+def register_image(project,path,*,camera,camera_type,scene_state,split='train',timestamp=None,observed_objects=(),joint_record=None,role='scene_photo'):
     """Register RGB identity and its declared static layout; never synthesize q/pose."""
     from .evidence import add_image
     identifier(camera);identifier(scene_state)
@@ -109,7 +117,7 @@ def register_image(project,path,*,camera,camera_type,scene_state,split='train',t
         if joint_record and any(old.get(key)!=val for key,val in joint_record.items()):
             raise ValueError('Image already registered with different measured joints; retain original metadata')
         return copy.deepcopy(old)
-    row=add_image(project,path,camera,split,timestamp,context_only=True)
+    row=add_image(project,path,camera,split,timestamp,context_only=True,role=role)
     evidence=project.evidence;record=next(i for i in evidence['images']if i['path']==row['path']and i['camera']==camera)
     from PIL import Image
     with Image.open(path)as raw:orientation=raw.getexif().get(274,1)
@@ -185,7 +193,7 @@ def register_views(candidate,anchors=None,*,scene_state=None):
                 pose=None;status='REGISTERED_CALIBRATED';report={'source':'existing Camera calibration'}
             else:
                 if binding.get('source')not in('measured','calibrated')or not binding.get('evidence'):
-                    needs.append(image['id']+': metric World anchors are required; DA3 pose alone is not registration');continue
+                    needs.append(image['id']+': metric World anchors are required; Geometry pose alone is not registration');continue
                 pixels=np.asarray(binding.get('uv_px',[]),float).reshape(-1,2)
                 sensor=np.c_[pixels,np.ones(len(pixels))]@np.linalg.inv(pixel_affine).T
                 report=camera_from_anchors(binding.get('world_points_m',[]),(sensor[:,:2]/sensor[:,2:]).tolist(),cam['K']['value'],cam['distortion']['value'])
@@ -205,9 +213,9 @@ def register_views(candidate,anchors=None,*,scene_state=None):
 
 
 def predict_views(candidate,inferred,options=None):
-    """DA3 camera initialization without user-entered K, poses or board clicks.
+    """Geometry camera initialization without user-entered K, poses or board clicks.
 
-    Relative DA3 frames are joined only through overlapping depth observations.
+    Relative Geometry frames are joined only through overlapping depth observations.
     Metric alignment requires observable calibrated baselines or measured wrist
     motion. Predictions stay PREDICTED/UNRESOLVED until that evidence exists.
     """
@@ -219,7 +227,7 @@ def predict_views(candidate,inferred,options=None):
     options=options or{}
     with exclusive(candidate.project):
         scene=candidate.scene;images={i['id']:i for i in inferred.get('images',[])};predicted={}
-        alignment=align_depth_batches(inferred.get('depth_batches',[]));needs=[]
+        alignment=align_depth_batches(inferred.get('depth_batches',[]));needs=[];metric_attempts=[]
         for batch,binding in zip(inferred.get('depth_batches',[]),alignment['batches']):
             if binding['state']=='UNRESOLVED':needs.extend(binding['needs']);continue
             with np.load(batch['path'],allow_pickle=False)as data:
@@ -230,9 +238,10 @@ def predict_views(candidate,inferred,options=None):
                     affine=data['original_to_processed'][index];k=np.linalg.inv(affine)@data['intrinsics'][index]
                     predicted[name]={'K':k.tolist(),'T_relative_camera':pose.tolist(),'batch_scale':binding['scale'],
                         'depth_batch':batch.get('cache_key',batch['path']),'state':'PREDICTED','physical_verified':False}
+                    if 'distortion'in data:predicted[name]['distortion']=data['distortion'][index].tolist()
         cameras={c['id']:c for c in scene['cameras']};relative=[];metric=[];known=[]
         def physical_pose(image):
-            # DA3 sees upright RGB. A fixed lens/mount lives in one physical
+            # Geometry sees upright RGB. A fixed lens/mount lives in one physical
             # optical frame even when EXIF rotates individual photographs.
             from .cameras import camera_pixels
             reference=cameras.get(image['camera'])
@@ -287,14 +296,15 @@ def predict_views(candidate,inferred,options=None):
                     for image in wrist:
                         cam=cameras.get(image['camera'])
                         if cam is None:
-                            cam={'id':image['camera'],'frame':frame,'pose':value(None),'K':value(None),'resolution':image['resolution'],'reference_orientation':image.get('exif_orientation',1),'distortion':value([0.]*5,'estimated',['DA3 pinhole hypothesis'])};scene['cameras'].append(cam);cameras[cam['id']]=cam
+                            cam={'id':image['camera'],'frame':frame,'pose':value(None),'K':value(None),'resolution':image['resolution'],'reference_orientation':image.get('exif_orientation',1),'distortion':value([0.]*5,'estimated',['Geometry pinhole hypothesis'])};scene['cameras'].append(cam);cameras[cam['id']]=cam
                         if cam['pose']['provenance']not in('measured','calibrated','optimized'):cam.update(frame=frame,pose=value(motion['T_link_camera'],'optimized',['measured-q hand-eye initialization']))
             elif wrist:needs.append('Wrist attachment/motion is unresolved; capture distinct rotations/translations while objects stay fixed')
         if registration is None and options.get('measurements'):
             from .calibration.registration import metric_plane
             from .inference import object_points
             for measure in options['measurements']:
-                if measure.get('role')!='support_surface'or measure.get('kind')!='box'or not measure.get('evidence'):continue
+                if measure.get('role')not in('support_surface','workspace')or measure.get('kind')!='box'or not measure.get('evidence'):continue
+                if any(v is None for v in measure['dimensions_m'][:2]):continue
                 samples=[];centers=[];ids=[]
                 for segment in inferred.get('segments',[]):
                     if segment['object_id']!=measure['id']or images[segment['image_id']]['split']!='train':continue
@@ -302,22 +312,29 @@ def predict_views(candidate,inferred,options=None):
                     if assigned.get('status')!='ASSIGNED_ESTIMATED':continue
                     name=segment['image_id'];pred=predicted.get(name)
                     if not pred:continue
-                    batch=next(b for b in inferred['depth_batches']if name in b['image_ids']);index=batch['image_ids'].index(name)
+                    batch=next(b for b in inferred['depth_batches']if name in b['image_ids']and b.get('cache_key',b['path'])==pred['depth_batch']);index=batch['image_ids'].index(name)
                     if sha(assigned['mask_path'])!=assigned['mask_sha256']:raise ValueError('Metric support mask changed')
                     with np.load(batch['path'],allow_pickle=False)as data:
                         from PIL import Image
                         mask=np.asarray(Image.open(assigned['mask_path']).convert('L'))>0
-                        points,_=object_points(data['depth'][index],mask,data['intrinsics'][index],data['original_to_processed'][index],erode_px=0,max_points=10000)
+                        points,_=object_points(data['depth'][index],mask,data['intrinsics'][index],data['original_to_processed'][index],
+                            confidence=data['conf'][index]if 'conf'in data else None,
+                            distortion=data['distortion'][index]if 'distortion'in data else None,erode_px=0,max_points=10000)
                     pose=np.asarray(pred['T_relative_camera']);samples.append((points*pred['batch_scale'])@pose[:3,:3].T+pose[:3,3]);centers.append(pose[:3,3]);ids.append(name)
-                if not samples:continue
+                if not samples:
+                    metric_attempts.append({'object_id':measure['id'],'status':'UNRESOLVED','needs':['No assigned support Mask with registered relative Camera/depth'],'image_ids':ids});continue
                 reference=next((o for o in scene['objects']if o['id']==measure['id']and o['pose']['provenance']in('measured','calibrated')),None)
                 target=world_pose(scene,reference)if reference else None
-                if target is not None:target[:3,3]+=target[:3,2]*measure['dimensions_m'][2]/2
+                if target is not None:
+                    if measure['dimensions_m'][2]is None:continue  # Protected origin is not a known top surface.
+                    target[:3,3]+=target[:3,2]*measure['dimensions_m'][2]/2
                 fit=metric_plane(np.concatenate(samples),measure['dimensions_m'],target_pose=target,camera_centers=centers)
+                metric_attempts.append({'object_id':measure['id'],'image_ids':ids,'points':sum(len(p)for p in samples),**fit})
+                if fit['status']!='ESTIMATED':needs.extend(measure['id']+': '+reason for reason in fit.get('needs',[]))
                 if fit['status']=='ESTIMATED':
                     registration={**fit,'evidence':measure['evidence']+ids}
                     support=next((o for o in scene['objects']if o['id']==measure['id']),None)
-                    if support and support['pose']['value']is None:
+                    if support and support['pose']['value']is None and measure['dimensions_m'][2]is not None:
                         pose=np.eye(4);pose[2,3]=-measure['dimensions_m'][2]/2
                         support['pose']=value(pose.tolist(),'estimated',['support-centered coordinate gauge from visible plane; not measured World pose'])
                     break
@@ -328,7 +345,8 @@ def predict_views(candidate,inferred,options=None):
             if view_quality_reasons(image):needs.append(name+': original Capture quality exclusions retained');continue
             if cam is None:
                 cam={'id':image['camera'],'frame':'world','pose':value(None),'K':value(None),'resolution':image['resolution'],
-                    'reference_orientation':image.get('exif_orientation',1),'distortion':value([0.]*5,'estimated',['DA3 pinhole hypothesis; distortion not measured'])};scene['cameras'].append(cam);cameras[cam['id']]=cam
+                    'reference_orientation':image.get('exif_orientation',1),'distortion':value([0.]*5,'estimated',['Geometry pinhole hypothesis; distortion not measured'])};scene['cameras'].append(cam);cameras[cam['id']]=cam
+                if kind=='external':cam['purpose']='inspection'
             from .cameras import camera_pixels
             try:pixel_affine,optical_rotation=camera_pixels(cam,image)
             except ValueError as error:needs.append(name+': '+str(error));continue
@@ -340,7 +358,10 @@ def predict_views(candidate,inferred,options=None):
                     try:
                         affine,optical=camera_pixels(cam,images[key]);source.append((np.linalg.inv(affine)@np.asarray(p['K'])@optical).tolist())
                     except ValueError:continue
-                if source:cam['K']=value(np.median(source,axis=0).tolist(),'estimated',['DA3 predicted intrinsics in original pixels'])
+                if source:cam['K']=value(np.median(source,axis=0).tolist(),'estimated',['geometry predicted intrinsics in original pixels'])
+            if cam['distortion']['provenance']not in('measured','calibrated','optimized'):
+                lenses=[p['distortion']for key,p in predicted.items()if images[key]['camera']==image['camera']and images[key]['split']=='train'and 'distortion'in p]
+                if lenses:cam['distortion']=value(np.median(lenses,axis=0).tolist(),'estimated',['COLMAP lens estimate; not physical calibration'])
             if not registration:continue
             pose=np.asarray(pred['T_relative_camera']);pose[:3,3]*=registration['scale'];pose=np.asarray(registration['T_world_relative'])@pose
             if kind=='side':
@@ -352,7 +373,7 @@ def predict_views(candidate,inferred,options=None):
                 fixed=source[0].copy();fixed[:3,3]=np.median([t[:3,3]for t in source],axis=0)
                 from scipy.spatial.transform import Rotation
                 fixed[:3,:3]=Rotation.from_matrix(np.array(source)[:,:3,:3]).mean().as_matrix()
-                if cam['pose']['provenance']not in('measured','calibrated','optimized'):cam.update(frame='world',pose=value(fixed.tolist(),'estimated',['shared fixed camera DA3 initialization']))
+                if cam['pose']['provenance']not in('measured','calibrated','optimized'):cam.update(frame='world',pose=value(fixed.tolist(),'estimated',['shared fixed camera geometry initialization']))
             if kind=='wrist'and not cam['frame'].startswith('robot_link_'):
                 needs.append(name+': shared Wrist mount is unresolved');continue
             previous=registrations.get(name)
@@ -366,11 +387,145 @@ def predict_views(candidate,inferred,options=None):
         # Every registration must bind the final shared K, never a transient one.
         for name,binding in registrations.items():
             if name in images:binding['camera_signature']=camera_calibration_signature(scene,cameras[images[name]['camera']])
-        scene['camera_predictions']={'views':predicted,'batch_alignment':alignment,'metric_alignment':registration,'motion':motion,'state':'PREDICTED'if registration else'UNRESOLVED'}
+        scene['camera_predictions']={'views':predicted,'batch_alignment':alignment,'metric_alignment':registration,'metric_attempts':metric_attempts,'motion':motion,'state':'PREDICTED'if registration else'UNRESOLVED'}
         if inferred.get('scene_state_id'):scene['reconstruction_state']={'id':inferred['scene_state_id'],'static_layout_verified':False}
         candidate.save(scene)
         return {'status':'PREDICTED'if rows else'UNRESOLVED','views':rows,'scene_state_id':inferred.get('scene_state_id'),'needs':list(dict.fromkeys(needs)),
-            'physical_verified':False,'metric_alignment':registration,'motion':motion}
+            'physical_verified':False,'metric_alignment':registration,'metric_attempts':metric_attempts,'motion':motion}
+
+
+def register_sensor_views(candidate,config):
+    """Localize Captures against the metric photo Scene, without sensor SfM.
+
+    Existing package cameras are reused first. Otherwise original RGB features
+    are matched to the photo cloud's actual pixel/metric correspondences. One
+    Side pose or one FK-attached Wrist mount is published for each camera.
+    """
+    from .scene import value,world_pose,camera_calibration_signature,frame_world
+    from .calibration.registration import camera_from_correspondences,wrist_from_motion
+    from .calibration.geometry import link_transforms
+    from scipy.spatial import cKDTree
+    from scipy.spatial.transform import Rotation
+    from PIL import ImageOps
+    from .candidate import exclusive
+    with exclusive(candidate.project):
+        scene=candidate.scene;needs=[];diagnostics=[];rows=[]
+        cameras={c['id']:c for c in scene['cameras']}
+        layouts={r['scene_state_id']:r for r in config.get('capture_layouts',[])}
+        captures=[]
+        for layout in sorted({i['scene_state_id']for i in candidate.project.evidence['images']if i.get('capture_manifest')and i.get('scene_state_id')and i.get('id')}):
+            captures.extend(i for i in input_images(candidate.project,layout)[0]if i.get('capture_manifest')and not view_quality_reasons(i)
+                and(not config.get('image_ids')or i['id']in config['image_ids']))
+        if not captures:return {'status':'NOT_AVAILABLE','views':[],'needs':[]}
+        detector=cv2.SIFT_create(nfeatures=2500)
+        def features(image):
+            source=local_path(candidate.project.root,image['path'])
+            if sha(source)!=image['sha256']:raise ValueError('Sensor registration RGB changed')
+            rgb=np.asarray(ImageOps.exif_transpose(Image.open(source)).convert('L'));ratio=min(1.,1280/max(rgb.shape))
+            resized=cv2.resize(rgb,None,fx=ratio,fy=ratio)if ratio<1 else rgb
+            keys,desc=detector.detectAndCompute(resized,None)
+            return np.asarray([k.pt for k in keys]).reshape(-1,2)/ratio,desc
+        photo_features=[]
+        by_id={i.get('id'):i for i in candidate.project.evidence['images']}
+        for key in sorted({r['image_id']for r in scene.get('reconstruction_observations',{}).get('clouds',[])}):
+            image=by_id[key]
+            if image.get('role')!='scene_photo'or image['split']!='train':continue
+            uv,desc=features(image)
+            if desc is None:continue
+            for cloud in scene['reconstruction_observations']['clouds']:
+                if cloud['image_id']!=key:continue
+                node=next(o for o in scene['objects']if o['id']==cloud['object_id'])
+                path=local_path(candidate.project.root,cloud['path'])
+                if sha(path)!=cloud['sha256']:raise ValueError('Photo cloud changed before sensor registration')
+                with np.load(path,allow_pickle=False)as data:
+                    if 'uv_original'not in data or not len(data['points_world_m']):continue
+                    distance,index=cKDTree(data['uv_original']).query(uv)
+                    # Bound snapping to the actual depth grid, never fill holes.
+                    limit=max(image['resolution'])/1280*2
+                    keep=distance<=limit
+                    photo_features.append((cloud['object_id'],node['role'],desc[keep],data['points_world_m'][index[keep]]))
+        grouped={}
+        for image in captures:grouped.setdefault(image['camera'],[]).append(image)
+        for name,images in grouped.items():
+            candidate.project.checkpoint();kind=camera_type(images[0]);cam=cameras.get(name)
+            if any(camera_type(i)!=kind or i['resolution']!=images[0]['resolution']for i in images):
+                needs.append(name+': Camera identity/resolution differs within sensor group');continue
+            if cam and all(cam[f]['value']is not None for f in('K','pose','distortion'))and(kind!='wrist'or cam['frame'].startswith('robot_link_')):
+                diagnostics.append({'camera':name,'status':'EXISTING_SHARED_CAMERA','physical_verified':False})
+            else:
+                matches={}
+                for image in images:
+                    if image['split']!='train':continue
+                    uv,desc=features(image);points=[];pixels=[]
+                    if desc is None:continue
+                    same=layouts.get(image['scene_state_id'],{}).get('status')=='SAME_LAYOUT'
+                    for obj,role,source_desc,world in photo_features:
+                        # A furniture category alone does not prove that it
+                        # remained fixed between distinct physical layouts.
+                        if not same:continue
+                        if len(source_desc)<2:continue
+                        for pair in cv2.BFMatcher().knnMatch(source_desc,desc,k=2):
+                            if len(pair)==2 and pair[0].distance<.7*pair[1].distance:
+                                match=pair[0];points.append(world[match.queryIdx]);pixels.append(uv[match.trainIdx])
+                    matches[image['id']]=(points,pixels)
+                if not matches:
+                    needs.append(name+': no train photo-to-sensor metric feature correspondences');continue
+                known_k=cam['K']['value']if cam and cam['K']['value']is not None else None
+                dist=cam['distortion']['value']if cam else None
+                seeds=[]
+                for points,pixels in matches.values():
+                    result=camera_from_correspondences(points,pixels,resolution=images[0]['resolution'],k=known_k,distortion=dist)
+                    if result['status']=='ESTIMATED':seeds.append(result)
+                if not seeds:
+                    needs.append(name+': insufficient non-planar metric matches or failed PnP/cheirality; sensor images retained');continue
+                k=np.asarray(known_k)if known_k is not None else np.median([s['K']for s in seeds],axis=0)
+                if kind=='side':
+                    points=[p for xx,_ in matches.values()for p in xx];pixels=[p for _,pp in matches.values()for p in pp]
+                    result=camera_from_correspondences(points,pixels,resolution=images[0]['resolution'],k=k,distortion=dist)
+                    if result['status']!='ESTIMATED':needs.extend(name+': '+n for n in result['needs']);continue
+                    frame='world';pose=result['T_world_camera']
+                else:
+                    model=scene.get('robot_model');valid=[];poses=[]
+                    if not model:needs.append(name+': archived Robot model is required');continue
+                    for image in images:
+                        if image['id']not in matches:continue
+                        if image['joint_names']!=model['joint_names']or image.get('robot_model_sha256')!=model['model_sha256']or image.get('mapping_sha256')!=model.get('mapping',{}).get('sha256'):raise ValueError('Sensor q/model/mapping identity mismatch')
+                        result=camera_from_correspondences(*matches[image['id']],resolution=image['resolution'],k=k,distortion=dist)
+                        if result['status']=='ESTIMATED':valid.append(image);poses.append(result['T_world_camera'])
+                    if len(valid)<4:needs.append(name+': shared hand-eye requires four localized measured-q poses; '+str(len(valid))+' available');continue
+                    fk=[link_transforms(local_path(candidate.project.root,model['path']),dict(zip(i['joint_names'],i['q_measured'])))for i in valid]
+                    links=[cam['frame'].removeprefix('robot_link_')]if cam and cam['frame'].startswith('robot_link_')else sorted(fk[0])
+                    fits=[]
+                    for link in links:
+                        candidate.project.checkpoint();motion=wrist_from_motion([f[link]for f in fk],poses)
+                        if motion['status']=='OPTIMIZED'and abs(motion['scale']-1)<.05:fits.append((motion['rmse'],link,motion))
+                    if not fits:needs.append(name+': shared metric FK/mount constraints remain degenerate or inconsistent');continue
+                    _,link,motion=min(fits,key=lambda r:r[0]);frame='robot_link_'+link;pose=motion['T_link_camera']
+                    base=scene['frames']['robot_base']['transform']
+                    if base['provenance']in('measured','calibrated'):
+                        if not np.allclose(frame_world(scene,'robot_base'),motion['T_relative_base'],atol=.005):needs.append(name+': protected Robot Base disagrees with estimated hand-eye');continue
+                    else:scene['frames']['robot_base']['transform']=value(motion['T_relative_base'],'estimated',['photo metric features + shared measured-q FK; not physical calibration'])
+                    diagnostics.append({'camera':name,'motion':motion,'metric_scale_changed':False})
+                if cam is None:
+                    cam={'id':name,'resolution':images[0]['resolution'],'frame':frame,'pose':value(None),'K':value(None),'distortion':value([0.]*5,'estimated',['unverified zero-distortion initialization'])}
+                    scene['cameras'].append(cam);cameras[name]=cam
+                if cam['pose']['provenance']in('measured','calibrated'):
+                    if cam['frame']!=frame or not np.allclose(cam['pose']['value'],pose,rtol=0,atol=1e-6):
+                        needs.append(name+': estimated registration conflicts with protected Camera pose');continue
+                else:cam.update(frame=frame,pose=value(pose,'estimated',['derived photo-to-sensor metric feature registration']))
+                if cam['K']['provenance']not in('measured','calibrated'):cam['K']=value(k.tolist(),'estimated',['shared sensor focal estimate; not intrinsic calibration'])
+            for image in images:
+                if kind=='wrist'and not image.get('q_measured'):continue
+                pixel,rotation=__import__('real2sim_builder.cameras',fromlist=['camera_pixels']).camera_pixels(cam,image)
+                row={'image_id':image['id'],'camera':name,'camera_type':kind,'scene_state_id':image['scene_state_id'],
+                    'source_image_sha256':image['sha256'],'image_record_sha256':_digest(image),'status':'REGISTERED_ESTIMATED',
+                    'T_world_camera':None,'pixel_from_camera':pixel.tolist(),'optical_from_camera':rotation.tolist(),
+                    'camera_signature':camera_calibration_signature(scene,cam),'calibration_evidence':['shared sensor registration; original Capture identity retained'],
+                    'use_for_joint_fitting':True,'physical_verified':False,'metric_scale_verified':False}
+                scene.setdefault('view_registrations',{})[image['id']]=row;rows.append(row)
+        candidate.save(scene)
+        report={'status':'REGISTERED_ESTIMATED'if rows else'NEEDS_MORE_DATA','views':rows,'diagnostics':diagnostics,'needs':needs,'physical_verified':False}
+        write(candidate.root/'sensor-registration.json',report);return report
 
 
 def annotation_evidence(project, scene):

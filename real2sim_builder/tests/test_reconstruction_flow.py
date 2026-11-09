@@ -3,6 +3,47 @@ from real2sim_builder.project import Project, Candidate
 from real2sim_builder.files import read, write
 
 
+def test_photo_fit_then_sensor_joint_fit_keeps_the_same_candidate_and_photo_constraints(tmp_path,monkeypatch):
+    from test_multiview_pipeline import rendered_fixture
+    from real2sim_builder import automation,authoring,inference,observations,validation
+    from real2sim_builder.calibration import hybrid
+    import copy
+    p,truth,observed=rendered_fixture(tmp_path);c=Candidate(p,'fit');scene=c.scene
+    scene['reconstruction_observations']=observed['reconstruction_observations'];c.save(scene)
+    evidence=p.evidence;sensor={**evidence['images'][0],'id':'sensor','camera':'side','scene_state_id':'capture','capture_manifest':'input/capture_manifest.yaml'}
+    evidence['images'].append(sensor);write(p.root/'input/evidence.yaml',evidence)
+    events=[];base_ids={r['image_id']for r in scene['reconstruction_observations']['clouds']}
+    def models(candidate,config,**kwargs):
+        events.append(('segmentation'if kwargs.get('segmentation_only')else'photo_geometry',kwargs))
+        return {'status':'SEGMENTED'if kwargs.get('segmentation_only')else'INFERRED',
+            'images':[],'segments':[],'depth_batches':[],'scene_state_id':kwargs.get('scene_state')}
+    monkeypatch.setattr(inference,'run_models',models)
+    monkeypatch.setattr(observations,'predict_views',lambda *a,**k:{'views':[]})
+    monkeypatch.setattr(inference,'build_point_clouds',lambda *a,**k:scene['reconstruction_observations'])
+    monkeypatch.setattr(automation,'attach_modeled_assets',lambda *a:{'attached':[]})
+    monkeypatch.setattr(automation,'modeling_tasks',lambda *a:{'status':'ASSETS_READY'})
+    monkeypatch.setattr(observations,'register_sensor_views',lambda *a:{'views':[{'image_id':'sensor','scene_state_id':'capture'}],'needs':[]})
+    def append(candidate,*a,**k):
+        following=candidate.scene
+        row={**following['reconstruction_observations']['clouds'][0],'image_id':'sensor','render_only':True}
+        following['reconstruction_observations']['clouds'].append(row);candidate.save(following)
+        return {'clouds':[row],'needs':[]}
+    monkeypatch.setattr(inference,'build_render_observations',append)
+    def fit(project,scene,folder,options):
+        events.append(('fit',{r['image_id']for r in scene['reconstruction_observations']['clouds']}))
+        return scene,{'status':'BUDGET_EXHAUSTED','training_view_count':2,'after_loss':1.}
+    monkeypatch.setattr(hybrid,'fit_scene',fit)
+    monkeypatch.setattr(hybrid,'alignment_metrics',lambda *a:{'images':[]})
+    monkeypatch.setattr(authoring,'fitting_review',lambda *a:{'status':'NEEDS_MORE_DATA','wrist_observed':False})
+    monkeypatch.setattr(validation,'physics_probe',lambda *a:{'status':'NOT_TESTED'})
+    result=automation.reconstruct(p,candidate='fit',config={'objects':{'block':{'prompt':'block'}},'scene_state_id':'layout',
+        'capture_layouts':[{'scene_state_id':'capture','status':'SAME_LAYOUT','evidence':'same static placement'}]})
+    fits=[r[1]for r in events if r[0]=='fit']
+    assert fits==[base_ids,base_ids|{'sensor'}]
+    assert 'photo_fitting'in result['stages']and result['stages']['sensor_observations']['count']==1
+    assert [r[0]for r in events]==['photo_geometry','fit','segmentation','fit']
+
+
 def test_reconstruct_runs_analysis_modeling_and_resumes_same_candidate(tmp_path,monkeypatch):
     from real2sim_builder import automation, authoring
     p=Project.create(tmp_path,'connected'); calls=[]
@@ -125,3 +166,57 @@ def test_stop_in_review_preserves_checkpoint(tmp_path,monkeypatch):
     assert result['status']=='STOPPED' and result['failed_stage']=='CODEX_REVIEW'
     assert c.scene==before
     assert len(list((c.root/'fitting/reviews').glob('*/scene.yaml')))==1
+
+
+def test_quota_failure_retains_resume_record_and_same_candidate(tmp_path,monkeypatch):
+    import pytest
+    from real2sim_builder import automation,authoring
+    from real2sim_builder.codex_cli import CodexExecutionError
+    p=Project.create(tmp_path,'quota resume');c=Candidate.create(p,'same');before=c.scene
+    monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:{'status':'WAITING_FOR_CODEX','stages':{'inference':{'status':'INFERRED'}}})
+    def fail(*a,**k):raise CodexExecutionError('USAGE_LIMIT')
+    monkeypatch.setattr(authoring,'run_codex_modeling',fail)
+    with pytest.raises(CodexExecutionError):automation.reconstruct(p,candidate='same',config={},run_modeling=True)
+    report=read(c.root/'reconstruction.json')
+    assert report['error_code']=='USAGE_LIMIT' and report['resume']['candidate']=='same'
+    assert report['resume']['input_signature']==p.signature(c.scene) and report['resume']['available']
+    assert c.scene==before and not(p.root/'working/run.lock').exists()
+    monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:{'status':'NEEDS_MORE_DATA'})
+    result=automation.reconstruct(p,candidate='same',config={},run_modeling=True)
+    assert result['status']=='NEEDS_MORE_DATA'and c.scene==before
+
+
+def test_empty_analysis_requests_evidence_without_repeating_cached_codex(tmp_path,monkeypatch):
+    from real2sim_builder import automation,authoring
+    p=Project.create(tmp_path,'no photos');Candidate.create(p,'same');calls=[]
+    monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:{'status':'WAITING_FOR_CODEX_ANALYSIS'})
+    def analyze(*a,**k):
+        calls.append(1)
+        return {'status':'ANALYZED_OBJECT_PROPOSALS','objects':{},'needs':['Provide RGB'],'reused':True}
+    monkeypatch.setattr(authoring,'run_codex_modeling',analyze)
+    result=automation.reconstruct(p,candidate='same',config={},run_modeling=True,max_modeling_calls=2)
+    assert result['status']=='NEEDS_MORE_DATA' and result['needs']==['Provide RGB']
+    assert calls==[1] and result['modeling_calls']==0
+
+
+def test_later_geometry_failure_keeps_completed_codex_budget_for_resume(tmp_path,monkeypatch):
+    import pytest
+    from real2sim_builder import automation,authoring
+    from real2sim_builder.project import Project,Candidate
+    from real2sim_builder.files import write,read
+    p=Project.create(tmp_path,'later failure');c=Candidate.create(p,'same');rounds=[];calls=[]
+    def stage(*a,**k):
+        rounds.append(1)
+        if len(rounds)>1:
+            write(c.root/'reconstruction.json',{'status':'NEEDS_MORE_DATA','stages':{}})
+            raise RuntimeError('geometry child failed after modeling')
+        return {'status':'WAITING_FOR_CODEX','stages':{},'needs':[]}
+    monkeypatch.setattr(automation,'_reconstruct',stage)
+    monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:calls.append(1)or{'status':'ASSETS_READY'})
+    with pytest.raises(RuntimeError,match='geometry child failed'):
+        automation.reconstruct(p,candidate='same',config={},run_modeling=True,max_modeling_calls=1)
+    saved=read(c.root/'reconstruction.json')
+    assert saved['modeling_calls']==1
+    monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:{'status':'WAITING_FOR_CODEX','stages':{},'needs':[]})
+    resumed=automation.reconstruct(p,candidate='same',config={},run_modeling=True,max_modeling_calls=1)
+    assert resumed['stop_reason']=='max_modeling_calls'and calls==[1]

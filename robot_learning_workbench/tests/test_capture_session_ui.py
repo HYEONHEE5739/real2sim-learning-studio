@@ -2,6 +2,29 @@
 from test_ui_restoration import qt
 
 
+def test_project_selection_restores_saved_snapshots_and_clears_other_project(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.app import Window
+app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace');p=w.sessions['capture']
+row={'id':'shot','path':str(root/'capture'),'unix_ns':1000000000,'q_measured':[0.]*6,'images':{}}
+data={'project':str(root/'one'),'name':'one','snapshots':[row]}
+p.project_result({'ok':True,'result':data})
+assert p.rows==[row]and p.snapshot_table.rowCount()==1
+p.project_result({'ok':True,'result':data})
+assert p.snapshot_table.rowCount()==1
+p.settings.recipe=lambda:{'stage':'scene_capture','inputs':{}}
+p.client.connect_session=lambda path:None
+p.connect_session()
+assert p.rows==[row]and p.snapshot_table.rowCount()==1
+p.project_result({'ok':True,'result':{'project':str(root/'two'),'name':'two','snapshots':[]}})
+assert p.rows==[]and p.snapshot_table.rowCount()==0
+w.close();app.processEvents()
+''',tmp_path)
+
+
 def test_dedicated_capture_and_pair_tabs_follow_mockup_and_keep_sdk_out_of_qt(tmp_path):
     qt('''
 from pathlib import Path

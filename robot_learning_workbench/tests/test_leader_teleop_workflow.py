@@ -18,7 +18,7 @@ R=Path(__file__).resolve().parents[2]
 
 def configured_scene(tmp_path):
     path,project,data=observation_recipe(tmp_path)
-    config=yaml.safe_load((R/'workbench_runs/devices/so101-pickplace-0b794e7c/capture.yaml').read_text())
+    config=yaml.safe_load((R/'workbench_runs/devices/so101-pickplace/capture.yaml').read_text())
     config['execution'].update(device_source='memory')
     stored=save_configuration(tmp_path,'Reviewed Leader and Follower',config)
     bind_configuration(project.root,stored,tmp_path)
@@ -125,7 +125,7 @@ def test_started_leader_motion_reaches_follower_and_native_sim_then_four_image_c
         assert abs(s.history[-1]['q_measured'][0]-q['shoulder_pan'])<.005
         s.dispatch([{'kind':'session_snapshot','command_id':'pair','payload':{}}]);until(lambda:len(s.snapshots)==1)
         assert set(s.snapshots[0]['images'])=={'side','wrist','sim_side','sim_wrist'}
-        shot=next((Path(s.snapshots[0]['path'])/'shots').iterdir());pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
+        shot=Path(s.snapshots[0]['path']);pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
         np.testing.assert_array_equal(pair['measured_q_rad'],state['q_measured']);assert pair['physics_steps']>0
         s.dispatch([{'kind':'teleop_start','command_id':'late','payload':{}},{'kind':'cancel','command_id':'stop','payload':{}}]);assert s.terminal and not s.teleoperation.active
     finally:s.close()

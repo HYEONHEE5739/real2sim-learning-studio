@@ -354,9 +354,27 @@ def configure(mode):
         os.environ.pop('LIBGL_ALWAYS_SOFTWARE',None);os.environ.pop('__EGL_VENDOR_LIBRARY_FILENAMES',None)
 
 
+def render_scene(scene):
+    """Omit unresolved cameras only from the transient render description.
+
+    An uninitialized sensor must not block registered photo renders. Original
+    Candidate cameras and all object/geometry completeness checks remain intact.
+    """
+    import copy
+    result=copy.deepcopy(scene)
+    from .scene import value
+    for camera in result['cameras']:
+        if camera['pose']['value']is None:
+            binding=next((r for r in result.get('view_registrations',{}).values()if r.get('camera')==camera['id']and r.get('T_world_camera')is not None and r['status']in('REGISTERED_ESTIMATED','REGISTERED_CALIBRATED')),None)
+            if binding:camera.update(frame='world',pose=value(binding['T_world_camera'],'estimated',['transient external Virtual Camera; actual per-view registration overrides it']))
+    result['cameras']=[c for c in result['cameras']if all(c[k]['value']is not None for k in('K','pose','distortion'))]
+    return result
+
+
 class Renderer:
     def __init__(self,scene,root,scratch,mode='software-egl'):
         from .exporters.mjcf import export
+        scene=render_scene(scene)
         self.mode=mode
         configure(mode)
         import mujoco
@@ -374,6 +392,7 @@ class Renderer:
         from scipy.spatial.transform import Rotation
         from .calibration.geometry import parts
         from .exporters.mjcf import material_parameters
+        scene=render_scene(scene)
         if scene['assets']!=self.scene['assets']:raise ValueError('Renderer geometry changed; recompile explicitly')
         resized=False
         for obj in scene['objects']:
@@ -749,13 +768,14 @@ def author_object_assets(candidate,script,object_ids,measurements=None,*,request
     from .candidate import exclusive
     from .scene import identifier
     from pxr import Usd,UsdGeom,UsdPhysics
+    from scene_contract.naming import numbered_path
     import uuid
     names=[identifier(n)for n in object_ids]
     if not names or len(set(names))!=len(names):raise ValueError('Unique object IDs required')
     script=Path(script).resolve()
     if not script.is_file():raise FileNotFoundError(script)
     with exclusive(candidate.project):
-        candidate.require_open();folder=candidate.root/'blender/objects'/uuid.uuid4().hex
+        candidate.require_open();folder=numbered_path(candidate.root/'blender/objects','build')
         folder.mkdir(parents=True);owned=folder/'author.py';shutil.copyfile(script,owned)
         task=script.parent/'tasks.json'
         if task.is_file():

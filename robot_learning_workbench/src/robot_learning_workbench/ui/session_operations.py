@@ -2,6 +2,45 @@
 from pathlib import Path
 
 
+def saved_snapshots(project):
+    """Restore registered captures through the existing readers, without device IO."""
+    from real2sim_builder.capture import load_session
+    from real2sim_builder.files import read
+    from real2sim_builder.scene import local_path
+    rows=[];errors=[];seen=set()
+    for record in project.evidence.get('capture_sessions',[]):
+        try:
+            root=local_path(project.root,record['path']).parent
+            if root in seen:continue
+            seen.add(root);stored=read(root/'capture_manifest.yaml')
+            layouts={s.get('scene_state_id')for s in stored.get('snapshots',[])}
+            if stored.get('schema')=='real2sim.snapshot/1'and len(layouts)>1:
+                from real2sim_builder.capture import load_snapshots
+                batches=[load_snapshots(root,scene_state=layout)for layout in sorted(layouts)]
+                manifest=batches[0][0];samples=[sample for _,rows,_ in batches for sample in rows]
+            else:manifest,samples,_=load_session(root)
+            for sample in samples:
+                images={i['camera']:str(local_path(root,i['path']))for i in sample['images']}
+                for image in sample['images']:
+                    if image.get('runtime_baseline'):images['sim_'+image['camera']]=str(local_path(root,image['runtime_baseline']['path']))
+                state=read(local_path(root,sample['metadata_path']).parent/'state.json')if sample.get('metadata_path')else sample
+                unix_ns=state.get('timestamps',{}).get('follower',{}).get('end',{}).get('unix_ns',state.get('unix_ns'))
+                rows.append(dict(id=sample['id'],path=str(root),images=images,q_measured=sample['q_measured'],unix_ns=unix_ns,
+                    timestamp_ns=sample['timestamp_ns'],session_id=manifest.get('session_identity',manifest['session_id']),paired=any(n.startswith('sim_')for n in images)))
+        except (OSError,ValueError,KeyError,TypeError)as error:errors.append(record['path']+': '+str(error))
+    for record in project.evidence.get('documents',[]):
+        if record.get('role')!='unbound_sdk_camera_observation':continue
+        try:
+            path=local_path(project.root,record['path']);root=path.parent
+            if not(root/'COMPLETE').is_file():raise ValueError('Incomplete observation')
+            data=read(path);images={n:str(local_path(root,n+'.png'))for n in data['camera_timing']}
+            if any(not Path(p).is_file()for p in images.values()):raise ValueError('Missing observation image')
+            rows.append(dict(id=root.name,path=str(root),images=images,q_measured=[],unix_ns=data['camera_timing']['side']['read_end']['unix_ns'],
+                session_id=data['session_id'],paired=False,kind='scene_materials'))
+        except (OSError,ValueError,KeyError,TypeError)as error:errors.append(record['path']+': '+str(error))
+    return sorted(rows,key=lambda row:(row.get('unix_ns')or 0,row['path'],row['id'])),errors
+
+
 def catalog(path,workspace=None):
     from real2sim_builder.project import Project
     project=Project(path,read_only=True)
@@ -12,6 +51,7 @@ def catalog(path,workspace=None):
     capture_paths.update(row['path']for row in evidence.get('documents',[])if row.get('role')=='unbound_sdk_camera_observation')
     # The preparation sidebar edits supplied materials, not the capture archive.
     details['inputs']=[row for row in details['inputs']if row['kind']!='capture'and row['path']not in capture_paths]
+    details['snapshots'],details['snapshot_errors']=saved_snapshots(project)
     if workspace:
         from ..robot.registration import bound_configuration
         binding=bound_configuration(project.root,workspace);details['configuration_path']=str(binding)if binding else None

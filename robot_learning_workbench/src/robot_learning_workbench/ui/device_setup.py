@@ -1,5 +1,6 @@
+from scene_contract.naming import numbered_path
 """Basic device choices and an explicit advanced Recipe editor; no SDK in Qt."""
-import json,uuid
+import json
 from pathlib import Path
 import yaml
 from PyQt6.QtWidgets import QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLineEdit,QPushButton,QLabel,QComboBox,QFileDialog,QMessageBox,QInputDialog
@@ -102,7 +103,7 @@ class DeviceSetup(QDialog):
             if not ok:return
             answer=QMessageBox.warning(self,'현장 감독 SDK Calibration','공식 절차는 Torque를 끄고 Homing/Range 레지스터를 기록합니다. 팔을 지지하고 충돌 위험을 제거하세요. 직접 감독하며 수동 자세 이동과 각 SDK 지시에 응답할 준비가 됐습니까? 기존 Calibration은 덮어쓰지 않습니다.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Cancel)
             if answer!=QMessageBox.StandardButton.Yes:return
-            key='device_profile'if role=='follower'else'leader_device_profile';file=self.workspace/'devices'/('calibration_'+uuid.uuid4().hex+'.yaml');output=self.workspace/'calibration'/uuid.uuid4().hex
+            key='device_profile'if role=='follower'else'leader_device_profile';file=numbered_path(self.workspace/'devices','sdk_'+role,suffix='.yaml');output=numbered_path(self.workspace/'calibration','sdk_'+role)
             file.parent.mkdir(parents=True,exist_ok=True);file.write_text(yaml.safe_dump({'schema_version':1,'stage':'sdk_calibration','inputs':{'device_profile':data['inputs'][key]},'execution':{'confirm_on_site':True,'timeout_s':600},'output':{'directory':str(output)}}));self.calibration_client.connect_session(file)
         except Exception as error:self.status.setText(str(error))
     def calibration_progress(self,progress):

@@ -19,6 +19,34 @@ w.close();app.processEvents()
 ''',tmp_path)
 
 
+def test_existing_refit_button_sends_source_bound_memo_without_another_reconstruction_button(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication,QPushButton
+from robot_learning_workbench.ui.real_sim_page import RealSimPage
+from real2sim_builder.project import Project
+from real2sim_builder import evidence,ui_reconstruction
+app=QApplication([]);root=Path(sys.argv[1]);project=Project.create(root/'scenes','memo')
+page=RealSimPage('/no/worker',[],root);page.catalog_timer.stop();page.client.timer.stop()
+row={'project':str(project.root),'scene':str(project.root/'exports/source/scene.json'),'engines':['mujoco']}
+page.scene_combo.blockSignals(True);page.scene_combo.addItem('selected',row);page.scene_combo.blockSignals(False)
+page.project={'project':str(project.root),'name':'memo'}
+seen=[]
+evidence.save_reconstruction_memo=lambda p,text,source:seen.append((p.root,text,source))
+class Dialog:
+ def __init__(self,*args,**kwargs):assert kwargs['refit']is True
+ def exec(self):seen.append('opened existing refit dialog')
+ui_reconstruction.ReconstructionDialog=Dialog
+page.refinement_memo.setPlainText('The wrist gripper looks too small.')
+page.open_refinement()
+assert seen==[(project.root,'The wrist gripper looks too small.',row['scene']),'opened existing refit dialog']
+assert len([b for b in page.findChildren(QPushButton)if b.text()=='촬영 자료로 Scene 재정합'])==1
+assert not(project.root/'input/scene_memo.txt').exists()
+page.close();app.processEvents()
+''',tmp_path)
+
+
 def test_stop_during_preparation_does_not_start_a_late_session(tmp_path):
     qt('''
 from pathlib import Path

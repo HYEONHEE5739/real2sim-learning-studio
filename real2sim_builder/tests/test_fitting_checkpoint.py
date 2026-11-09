@@ -67,3 +67,21 @@ def test_improved_phone_cannot_replace_regressed_wrist(tmp_path):
     assert retain_fitting(c,best,{})==best
     report['images'][0]['mae']=.1;write(c.root/'metrics.json',report)
     assert retain_fitting(c,best,{})!=best
+
+
+def test_review_quota_resume_uses_validated_fitting_without_repeating_it(tmp_path,monkeypatch):
+    from real2sim_builder import automation,authoring,codex_cli
+    p=Project.create(tmp_path,'review resume');c=Candidate.create(p,'same')
+    config={'objects':{},'fitting':{'optimize_appearance':True,'optimize_lighting':True}}
+    write(c.root/'reconstruction-config.yaml',config)
+    write(c.root/'metrics.json',metrics(p,c,.1))
+    ready={'status':'NOT_VERIFIED','stages':{'codex_review':{'status':'WAITING_FOR_CODEX_REVIEW'}}}
+    best=retain_fitting(c,None,ready)
+    write(c.root/'reconstruction.json',{**ready,'status':'FAILED','failed_stage':'CODEX_REVIEW','error_code':'USAGE_LIMIT',
+        'selected_checkpoint':str(best),'modeling_calls':1,'review_calls':0})
+    monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:pytest.fail('completed fitting repeated'))
+    monkeypatch.setattr(automation,'modeling_tasks',lambda *a:None)
+    monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:{'decision':{'action':'complete','objects':[],'evidence':['w'],'reason':'ok'}})
+    result=automation.reconstruct(p,candidate='same',config=config,run_modeling=True)
+    assert result['status']=='VISUAL_DRAFT_REVIEWED' and result['review_calls']==1
+    assert Candidate(p,'same').scene==c.scene

@@ -49,7 +49,7 @@ def plane(points,tolerance=.005):
 
 
 def camera_from_anchors(world_points,uv,k,distortion,*,max_rmse_px=3.):
-    """Known-K PnP in optical axes; output is camera-to-World, never DA3 scale."""
+    """Known-K PnP in optical axes; output is camera-to-World, never Geometry scale."""
     import cv2
     points=np.asarray(world_points,float);pixels=np.asarray(uv,float);matrix=np.asarray(k,float);dist=np.asarray(distortion,float)
     if points.ndim!=2 or points.shape[1:]!=(3,)or pixels.shape!=(len(points),2)or len(points)<4:
@@ -70,10 +70,43 @@ def camera_from_anchors(world_points,uv,k,distortion,*,max_rmse_px=3.):
             'scope':'known-intrinsic metric-anchor PnP; independent validation is separate'}
 
 
+def camera_from_correspondences(world_points,uv,*,resolution,k=None,distortion=None):
+    """Robust PnP initialization on derived metric matches, not calibration approval.
+
+    Reuses OpenCV PnP/calibration and the existing anchor evaluator. Unknown
+    lenses require non-planar geometry; centered principal point, square pixels
+    and zero distortion stay explicit unverified hypotheses.
+    """
+    import cv2
+    points=np.asarray(world_points,float);pixels=np.asarray(uv,float)
+    missing={'status':'NEEDS_MORE_DATA','physical_verified':False,'needs':['At least twelve nondegenerate metric 3D/2D matches required for sensor initialization']}
+    if points.ndim!=2 or points.shape[1:]!=(3,)or pixels.shape!=(len(points),2)or len(points)<12:return missing
+    if not np.isfinite(points).all()or not np.isfinite(pixels).all():raise ValueError('Finite sensor correspondences required')
+    if k is None and np.linalg.matrix_rank(points-points.mean(0),tol=1e-6)<3:
+        return {**missing,'needs':['Unknown sensor focal/depth is ambiguous on a planar match set']}
+    w,h=resolution;dist=np.zeros(5)if distortion is None else np.asarray(distortion,float)
+    matrices=[np.asarray(k,float)]if k is not None else[np.array([[w/(2*np.tan(np.deg2rad(fov)/2)),0,w/2],[0,w/(2*np.tan(np.deg2rad(fov)/2)),h/2],[0,0,1]])for fov in(40.,60.,80.)]
+    solutions=[]
+    for matrix in matrices:
+        ok,rv,tv,inliers=cv2.solvePnPRansac(points,pixels,matrix,dist,iterationsCount=300,reprojectionError=3.,confidence=.999,flags=cv2.SOLVEPNP_EPNP)
+        if not ok or inliers is None or len(inliers)<12:continue
+        ids=inliers.ravel();xx=points[ids];pp=pixels[ids]
+        if k is None:
+            flags=cv2.CALIB_USE_INTRINSIC_GUESS|cv2.CALIB_FIX_PRINCIPAL_POINT|cv2.CALIB_FIX_ASPECT_RATIO|cv2.CALIB_ZERO_TANGENT_DIST|cv2.CALIB_FIX_K1|cv2.CALIB_FIX_K2|cv2.CALIB_FIX_K3
+            try:_,matrix,_,_,_=cv2.calibrateCamera([xx.astype('float32')],[pp.astype('float32')],(w,h),matrix,dist.copy(),flags=flags)
+            except cv2.error:continue
+            if not w/(2*np.tan(np.deg2rad(140)/2))<matrix[0,0]<w/(2*np.tan(np.deg2rad(15)/2)):continue
+        fitted=camera_from_anchors(xx,pp,matrix,dist)
+        if fitted['status']=='ESTIMATED':solutions.append({**fitted,'K':matrix.tolist(),'distortion':dist.tolist(),'inliers':ids.tolist(),
+            'intrinsic_source':'preserved'if k is not None else'estimated focal; principal point/aspect/distortion unverified',
+            'scope':'derived feature registration; no held-out accuracy or physical calibration claim'})
+    return min(solutions,key=lambda r:(-len(r['inliers']),r['rmse_px']))if solutions else missing
+
+
 def wrist_from_motion(link_poses,camera_poses):
     """Metric hand-eye/robot-world fit: s*C_i = X*FK(q_i)*Mount.
 
-    DA3 camera poses must already share one relative frame. Joint values and
+    Geometry camera poses must already share one relative frame. Joint values and
     model geometry are fixed. A full-rank multi-motion solve supplies scale;
     simply having a URDF does not. World is the robot-base gauge, not a measured
     tabletop/world registration.
@@ -109,16 +142,34 @@ def wrist_from_motion(link_poses,camera_poses):
 
 
 def align_depth_batches(batches):
-    """Align independent DA3 batches using actual shared-image depth points.
+    """Align independent Geometry batches using actual shared-image depth points.
 
     A shared camera center alone cannot determine scale. Matching pixels in the
-    shared depth view provide 3D correspondences; disconnected components stay
-    unresolved. Returned similarities map each batch into the first batch.
+    shared depth view provide 3D correspondences. Explicit SfM frames retain
+    the largest registered train component as the reference and leave other
+    components unresolved; they are never joined through unrelated origins.
+    Legacy overlapping depth batches map into their first batch.
     """
     from ..files import sha
+    frames=[b.get('metadata',{}).get('common_frame')for b in batches]
+    if any(frames):
+        # Identity is only a relative coordinate gauge, never a metre scale.
+        # Disjoint components are not aligned through unrelated camera origins.
+        if not all(frames):
+            return {'batches':[{'state':'UNRESOLVED','needs':['Disconnected/mixed SfM components need bridging observations']}for _ in batches],
+                    'metric_scale_verified':False,'physical_verified':False}
+        for batch in batches:
+            if sha(batch['path'])!=batch['metadata']['sha256']:raise ValueError('SfM geometry bytes changed')
+        counts={frame:len({image for batch,key in zip(batches,frames)if key==frame for image in batch.get('image_ids',[])})for frame in frames}
+        primary=max(dict.fromkeys(frames),key=lambda frame:counts[frame])
+        return {'batches':[{'state':'PREDICTED','scale':1.,'T_common_batch':np.eye(4).tolist(),
+                'scope':'selected relative SfM component; identity transform is not metric scale'}if frame==primary else
+                {'state':'UNRESOLVED','needs':['Separate SfM component retained; bridging evidence required before joining the selected component']}for frame in frames],
+                'selected_common_frame':primary,'selection':'largest registered train component; no held-out views or component merge',
+                'metric_scale_verified':False,'physical_verified':False}
     loaded=[]
     for batch in batches:
-        if sha(batch['path'])!=batch['metadata']['sha256']:raise ValueError('DA3 batch bytes changed')
+        if sha(batch['path'])!=batch['metadata']['sha256']:raise ValueError('Geometry batch bytes changed')
         with np.load(batch['path'],allow_pickle=False)as data:loaded.append({k:v.copy()for k,v in data.items()})
     def points(index,name):
         data=loaded[index];i=batches[index]['image_ids'].index(name);depth=data['depth'][i];k=data['intrinsics'][i]
@@ -154,7 +205,7 @@ def align_depth_batches(batches):
                     'overlap':sorted(common),'rmse':fit['rmse'],'scope':'overlap depth similarity; metric scale unresolved'}
                 progress=True;break
         if not progress:break
-    return {'batches':[resolved.get(i,{'state':'UNRESOLVED','needs':['Add overlapping views; independent DA3 frames were not merged']})for i in range(len(batches))],
+    return {'batches':[resolved.get(i,{'state':'UNRESOLVED','needs':['Add overlapping views; independent Geometry frames were not merged']})for i in range(len(batches))],
             'metric_scale_verified':False,'physical_verified':False}
 
 
@@ -166,7 +217,7 @@ def metric_plane(points,dimensions,*,target_pose=None,camera_centers=()):
     """
     from scipy.spatial import ConvexHull
     points=np.asarray(points,float);size=np.asarray(dimensions,float)
-    if points.ndim!=2 or points.shape[1]!=3 or len(points)<50 or size.shape!=(3,)or not np.isfinite(points).all()or np.any(size<=0):
+    if points.ndim!=2 or points.shape[1]!=3 or len(points)<50 or size.shape!=(3,)or not np.isfinite(points).all()or not np.isfinite(size[:2]).all()or np.any(size[:2]<=0):
         return {'status':'UNRESOLVED','needs':['Visible rectangular support and measured dimensions required']}
     center=np.median(points,axis=0);_,singular,vt=np.linalg.svd(points-center,full_matrices=False)
     if singular[1]<1e-9 or singular[2]>singular[1]*.08:return {'status':'UNRESOLVED','needs':['Measured support mask is not a visible plane']}

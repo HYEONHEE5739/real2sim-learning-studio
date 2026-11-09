@@ -1,6 +1,7 @@
+from scene_contract.naming import numbered_path
 """Guided reference-angle calibration; R03 owns Torque release and manual reference collection."""
 from pathlib import Path
-import math,time,uuid,yaml
+import math,time,yaml
 from PyQt6.QtCore import Qt,pyqtSignal
 from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,
     QComboBox,QPushButton,QLineEdit,QFileDialog,QDoubleSpinBox,QTableWidget,
@@ -119,7 +120,7 @@ class PrecisionPage(QWidget):
             inputs={'configuration':str(path),'device_profile':str((path.parent/data['inputs'][dk]).resolve()),'robot_model':str(Path(self.model.text()).resolve())}
             if self.profile_file.text():inputs['calibration_profile']=str(Path(self.profile_file.text()).resolve())
             if 'source_robot_model'in data['inputs']:inputs['source_robot_model']=str((path.parent/data['inputs']['source_robot_model']).resolve())
-            root=self.workspace/'calibration/sessions';root.mkdir(parents=True,exist_ok=True);key='precision_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
+            root=self.workspace/'calibration/sessions';root.mkdir(parents=True,exist_ok=True);key=numbered_path(self.workspace/'calibration/sessions','precision_'+time.strftime('%Y%m%d'),digits=2).name
             recipe={'schema_version':1,'stage':'precision_session','inputs':inputs,'execution':{'role':role,'device_source':data['execution']['device_source']},'output':{'directory':str(root/key)}}
             target=root/(key+'.yaml');target.write_text(yaml.safe_dump(recipe,sort_keys=False));self.saved_status.clear();self.results.clear();self.pending.clear();self.latest={};self.selection_sent=False;self.show_references()
             self.client.connect_session(target);self.state.setText('연결 중 · 선택 로봇의 토크를 해제합니다.');self.buttons()

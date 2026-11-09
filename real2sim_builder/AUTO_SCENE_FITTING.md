@@ -1,5 +1,13 @@
 # 자동 Scene Reconstruction
 
+> 2026-11-08 저장 정책: Scene/Model 이미지 역할·사람이 읽는 이름·Asset 순차 버전은 [최신 Codex 지침](CODEX_SCENE_GUIDE.md)의 저장 경로 절을 따른다. 이전 경로 예시는 당시 검증 이력이며, 실제 현재 경로와 이전 결과는 [저장 구조 이전 기록](../docs/storage-migration.md)를 따른다.
+
+2026-11-08 통합: 새 기본 Geometry는 **SAM3.1 → MASt3R → COLMAP SfM/BA → Dense 정합 → 기존 Metric 등록**이다. 최신 단일 UI·인증·Support 구현을 유지한다. DA3 제품 실행 경로는 제거했다. 과거 Cache·모델·환경·검증 이력은 보존한다. [통합 실행 기록](../docs/geometry-backend-integration.md)을 따른다.
+
+## 현재 단일 화면 — 2026-11-07
+
+Scene Prepare에서 입력을 저장하고 Auto Reconstruction에서 **로그인·모델/추론 강도·사용량 확인 → 생성 시작/이어서 실행 → 중단**만 사용한다. 기존 다섯 탭·수동 물체/Mask/USDA/환경 편집 UI는 삭제했다. 저장된 설정과 자료를 자동으로 읽으며 Backend CLI/API·Asset·Capture·비교 이미지·Checkpoint는 유지한다. [현재 사용법과 인증/재개 계약](../docs/auto-reconstruction-ui.md)을 먼저 따른다. 아래 날짜별 UI 설명은 당시 구현 이력이며 현재 화면의 사용 지시가 아니다.
+
 ## 단일 자유 메모 → Codex 구조화 해석 — 2026-11-04
 
 사용자는 Scene Prepare의 메모에 자유롭게 설명하고 **Scene 자료 저장**을 누른다. 별도 문법/단어 목록은 없다. 저장 경로는 `<workspace>/scenes/<project>/input/scene_memo.txt`다. 줄바꿈·언어·기호를 보존하며, Qt에서 원문을 수정하지 않고 다시 저장할 때도 원래 줄바꿈을 유지한다. 새 Project와 빈 메모는 빈 입력으로 남긴다.
@@ -26,7 +34,7 @@ python -m real2sim_builder.cli reconstruct PROJECT --candidate NAME
 python -m real2sim_builder.cli modeling-run PROJECT --candidate NAME
 ```
 
-새/변경된 메모가 미해석 상태면 `reconstruct`는 **SAM/DA3 실행 전에** `WAITING_FOR_CODEX_ANALYSIS`와 `modeling/tasks.json`을 만든다. 명시 `modeling-run` 또는 현재 Codex 대화가 원문과 사진을 읽는다. `tasks.json`에는 하나의 `scene_memo.text/sha256`, 등록 사진/선택 Capture 배치·q/시각/Camera metadata, 기존 Object/Group과 보존된 측정 자료가 전달된다. 미등록 참고 사진은 문맥 입력이며 metric View로 승인되지 않는다. 다음 재구성에서 기존 SAM→DA3→Blender/Library→정합을 계속한다. Pair 재정합은 기존 Revision geometry 보존 경로를 유지한다.
+새/변경된 메모가 미해석 상태면 `reconstruct`는 **SAM/Geometry 실행 전에** `WAITING_FOR_CODEX_ANALYSIS`와 `modeling/tasks.json`을 만든다. 명시 `modeling-run` 또는 현재 Codex 대화가 원문과 사진을 읽는다. `tasks.json`에는 하나의 `scene_memo.text/sha256`, 등록 사진/선택 Capture 배치·q/시각/Camera metadata, 기존 Object/Group과 보존된 측정 자료가 전달된다. 미등록 참고 사진은 문맥 입력이며 metric View로 승인되지 않는다. 다음 재구성에서 기존 SAM→MASt3R→COLMAP→Blender/Library→정합을 계속한다. Pair 재정합은 기존 Revision geometry 보존 경로를 유지한다.
 
 공식 Codex CLI 응답 Schema는 `authoring.scene_analysis_schema()`가 단일 정의다. 최상위 필드는 `scene_memo_sha256`, `objects`, `asset_groups`, `needs`다. Object는 `id/prompt/role/category/asset_group/material_variant/modeling_notes/observations/geometry`, Group은 `id/members/relation_source/evidence_quote/change_kind/evidence`를 모두 제공한다. 미제공 문자열은 빈 문자열, 미관측 Box는 null이다. 이 계약은 Codex용이며 사용자가 JSON을 작성할 필요는 없다.
 
@@ -133,13 +141,13 @@ objects:
 
 v3 검증은 Fake Codex CLI와 실제 Blender/OpenUSD/MuJoCo, 기존 회귀를 사용한다. 새 원격 Codex·실제 SAM/DA3 재추론·하드웨어 구동은 하지 않았다. 상세 결과·기존 실패 대조·실사진 미검증 범위는 [누적 기록](../docs/automated-reconstruction.md)의 v3 절을 따른다.
 
-## 현재 사용법 — 2026-11-04
+## 이전 사용법·검증 기록 — 2026-11-04
 
 기존 Scene Prepare의 Preview·Teleop·Capture·Input·메모 배치는 유지한다. Auto Reconstruction 안에서만 **촬영 배치 선택, USDA 자산 선택, Codex 작업자료/명시 CLI 실행, 재정합**을 확장했다.
 
 1. 사진·Side/Wrist Capture·메모를 Project에 모은다. 실제 물체 배치가 바뀌면 촬영 배치를 나눈다. Wrist q·시각·URDF·Mapping은 기존 관측을 그대로 쓴다.
 2. Codex가 메모/사진에서 Object ID·역할·SAM prompt를 구성한다. 신규 Project의 목록이 비어 있으면 최초 Auto Reconstruction이 분석 작업자료를 만든다. 현재 Codex 대화 또는 `USDA·Codex 모델링` 탭의 명시 CLI 버튼으로 목록을 만들고 다시 실행한다. AI가 제안한 물체 목록은 estimated이며 실측 치수/물성을 만들어 채우지 않는다.
-3. SAM 종료 → DA3 순차 추론 → 겹치는 DA3 Batch 정렬 → Camera/K 초기 추정 순서다. K·Extrinsic·Mount·보드 코너 입력은 필수가 아니다. 알려진 baseline 또는 충분히 다양한 측정 Wrist q/FK가 없으면 Scale/World는 UNRESOLVED다. 카메라만 추정된 상대 초안을 실제 미터 Scene으로 승인하지 않는다.
+3. SAM 종료 → MASt3R GPU 대응/Pointmap → COLMAP SfM/BA·Dense 정합 → Camera/K 초기 추정 순서다. K·Extrinsic·Mount·보드 코너 입력은 필수가 아니다. 알려진 baseline 또는 충분히 다양한 측정 Wrist q/FK가 없으면 Scale/World는 UNRESOLVED다. 카메라만 추정된 상대 초안을 실제 미터 Scene으로 승인하지 않는다.
 4. 실측 치수는 보존하며 새 Primitive Visual을 만들지 않는다. Asset/Object 이름 일치만으로 새 사진의 물체를 기존 USDA에 자동 연결하지 않는다. `ASSET_MATCH_UNRESOLVED` 작업자료에서 치수·역할·사진·후보 Metadata를 검토하고 `objects.<id>.asset_manifest`를 명시 선택하거나 새 모델링을 진행한다. 이미 Scene이 참조하는 유효한 자산은 배치 변경 시 그대로 쓴다. 기존 USDA를 선택하거나, `modeling/tasks.json`·`CODEX_MODELING.md`를 Codex가 읽고 필요한 물체만 기존 Blender로 작성한다. 그룹당 root `r2s_id=asset_group`, 별도 convex Collision Mesh `r2s_collision=True`, m/+Z·UV·Image/PreviewSurface Material 계약이다.
 5. `blender-object-author`는 격리된 Blender 출력의 USDA를 OpenUSD로 읽고 Mesh/Texture/상대 Closure·단위·원점·SHA·convex Collision을 확인한다. Library에 불변 버전으로 등록하고 `modeling/results.json`을 쓴다. Auto Reconstruction 재실행이 그룹 Fingerprint와 Manifest를 검증한 결과만 Import하고 추론 캐시를 재사용한다.
 6. 같은 자산으로 Object Pose를 초기화하고 Hybrid의 raw-depth Camera/Object 공동 정합을 수행한다. Camera·K·Scale이 변할 때 ray를 재투영하고 World 점군도 새로 게시한다. Side는 공유 Pose, Wrist는 공유 Link Mount, External은 이미지별 Pose다. 수치적으로 식별 불가능하거나 독립 View가 악화되면 보정을 적용하지 않는다.
@@ -189,7 +197,7 @@ Real/Sim은 중단 후 **촬영 자료로 Scene 재정합**에서 같은 Dialog�
 
 Scene Prepare에서 Project와 자료를 저장한 뒤 Auto Reconstruction을 연다. 사진의 정적 배치 ID, Camera/렌즈 ID와 유형, train/validation을 등록한다. 물체 표에는 ID·형상·역할·실측 크기(mm)·컵 벽 두께·Support·SAM 설명을 입력한다. 같은 색/모양의 물체를 하나의 ID로 추측하지 않는다. Wrist는 실제 q·단위·시각·Mapping이 있는 공식 Capture/Snapshot 입력을 사용한다.
 
-기존 모델 환경 탭에서 SAM Python/Checkpoint와 DA3 Python/로컬 Model snapshot 폴더를 선택한다. 파일 경로는 Project의 `input/reconstruction.yaml`에 저장된다. 모델 설치·다운로드·원격 API·새 Agent 런타임을 사용하지 않는다. SAM 종료 후 DA3를 실행한다. DA3 batch 1..4, process resolution 140..504 범위이며 기본은 2/280이다.
+현재 단일 UI는 저장된 SAM·MASt3R·COLMAP Runtime을 사용하며 환경 탭을 제공하지 않는다. 아래 과거 SAM/DA3 시험 기록은 당시 검증 이력이며 현재 실행 지시가 아니다.
 
 측정된 World 위치·치수가 있는 보드를 사진에서 선택하고 네 모서리를 지정할 수 있다. 순서는 보드 local `(-X,-Y), (+X,-Y), (+X,+Y), (-X,+Y)`다. 알려진 K와 대응점으로 External PnP를 수행한다. World 위치가 미측정인 보드에 임의 위치를 넣지 않는다. 현재 Side/Wrist 자동 경로는 기존 검증된 K/pose/distortion을 사용하며, 일반 자동 렌즈 Calibration은 별도 미완료다.
 
@@ -238,12 +246,15 @@ sam:
   device: cuda:0
   imgsz: 1024
   timeout_s: 900
-da3:
-  python: /path/to/existing/da3/python
-  model: /path/to/existing/DA3-SMALL/snapshot
+geometry:
+  backend: mast3r_colmap
+  python: /path/to/existing/sfm-mast3r/bin/python
+  source: /path/to/official/mast3r
+  model: /path/to/existing/MASt3R_checkpoint.pth
+  colmap_python: /path/to/existing/sfm-colmap/bin/python
   device: cuda:0
-  batch_size: 2
-  process_res: 280
+  process_res: 512
+  iterations: 100
   timeout_s: 900
 objects:
   block:
@@ -267,12 +278,14 @@ fitting:
 
 `anchors.<image_id>`는 `world_points_m`, `uv_px`, `source: measured|calibrated`, `evidence`다. `selections.<image_id>.<object_id>`는 Mask 후보 index 또는 수정 PNG 경로다. `objects.<id>.images.<image_id>.box_xyxy`는 원 해상도 Box hint다. 명시 `image_ids`로 같은 배치의 일부 사진만 모델 추론에 사용할 수 있다. 원본 이미지·관절 기록을 덮어쓰지 않는다.
 
+새 설정은 `geometry.backend: mast3r_colmap`을 사용한다. `da3`만 남아 있는 구성도 새 Backend를 선택하며, 실행에는 저장된 MASt3R/COLMAP Runtime 경로가 필요하다. 명시 `geometry.backend: da3`는 제거된 Backend로 거부한다. 현재 대상 Scene은 다른 필드를 보존한 채 새 설정으로 전환했다. 과거 DA3 Cache·모델·Conda 환경은 삭제하거나 새 Geometry로 재해석하지 않는다. train/validation·상대 Scale·Sim(3)·distortion·단계별 캐시 계약은 [Backend 구현 기록](../docs/mast3r-colmap-backend.md)을 따른다. 현재 단일 UI는 저장된 경로를 읽고 누락 항목만 안내한다.
+
 ## 좌표·근거·캐시
 
-- 원 해상도 Mask와 DA3의 실제 resize/center-crop 행렬을 결합한다. 모델의 예측 K를 실제 Calibration으로 부르지 않는다. 같은 물리 렌즈는 하나의 K를 공유하고 이미지별 resize/crop/EXIF optical 회전을 적용한다. 알 수 없는 crop·거울 반전은 추측하지 않는다.
+- 원 해상도 Mask와 MASt3R의 실제 resize/center-crop 행렬을 결합한다. 모델의 예측 K를 실제 Calibration으로 부르지 않는다. 같은 물리 렌즈는 하나의 K를 공유하고 이미지별 resize/crop/EXIF optical 회전을 적용한다. 알 수 없는 crop·거울 반전은 추측하지 않는다.
 - Metric 기준은 검증된 Camera baseline, 다양한 실제 q/FK의 hand-eye, 또는 실측 직사각형 지지면의 가시 Depth다. 지지면 기반 World 원점·축은 명시 좌표 gauge이며 측정된 Robot Base가 아니다. 부분/비평면/크기비 불일치로 식별할 수 없으면 scale=1로 진행하지 않는다. 결과 점군은 derived/estimated다.
-- 유효 Depth·confidence·Mask 경계를 필터링하고 가시 점만 생성한다. 가려진 면을 관측으로 채우지 않는다. EXIF 방향은 원본을 보존한 Candidate-local upright RGB로 한 번만 변환하고 SAM/DA3/코너 지정에서 같은 좌표를 사용한다. Distortion 자동 제거는 아직 제공하지 않으며 undistorted calibration 자료가 필요하다.
-- `inference/sam/<digest>`는 이미지/Object/Prompt·모델·Runtime별 캐시, `inference/da3/<digest>`는 순서 있는 이미지 batch·설정·Calibration·모델별 캐시다. Measurement는 모델 추론 key에 넣지 않으며 바뀐 치수로 정합을 다시 수행한다.
+- 유효 Depth·confidence·Mask 경계를 필터링하고 가시 점만 생성한다. 가려진 면을 관측으로 채우지 않는다. EXIF 방향은 원본을 보존한 Candidate-local upright RGB로 한 번만 변환하고 SAM/Geometry/코너 지정에서 같은 좌표를 사용한다. Distortion 자동 제거는 아직 제공하지 않으며 undistorted calibration 자료가 필요하다.
+- `inference/sam/<digest>`는 이미지/Object/Prompt·모델·Runtime별 캐시, `inference/mast3r_colmap/<digest>`는 입력 SHA·정적 Mask·Camera·설정·Runtime·소스·모델별 캐시다. 과거 `inference/da3`는 기록으로 보존한다. Measurement는 모델 추론 key에 넣지 않으며 바뀐 치수로 정합을 다시 수행한다.
 - `reconstruction_observations`는 Candidate-local NPZ/PNG와 SHA·단위·World frame·scale/Camera 근거를 보존한다. Project signature가 이 파일을 포함한다. 실행 설정도 Candidate-local `reconstruction-config.yaml`에 고정한다. Project의 현재 설정 수정은 원본 Evidence 변경으로 취급하지 않으며, 실행에서 쓴 설정은 Candidate signature와 새 Export에 함께 보존한다. Camera/source가 바뀐 점군은 다시 만든다.
 - Current와 과거 Export는 자동으로 교체하지 않는다. 최종 패키지는 기존 `export`로 새 경로에 게시하며 파생 NPZ/Mask도 소유 경로로 재배치한다.
 
@@ -324,3 +337,18 @@ fitting:
 이 선택은 보수적인 기하 조건 검사다. 자세 중복 기준은 이동 5mm·회전 약 2도 미만이고, Wrist 두 축 회전은 기준 자세 대비 회전 벡터의 두 번째 특잇값 0.05rad 초과를 사용한다. 이는 실측 정확도 보증이나 전체 수치 Jacobian의 rank/불확실성 분석을 대체하지 않는다.
 
 Isaac 렌더는 반복 중 Physics Step 없이 RGB/semantic mask/optical depth를 읽는다. 센서 초기화와 정합의 물리 준비/Task 검증은 별개다. 실행 중 Camera 해상도를 바꾸려면 재초기화한다. 중단/예산 초과는 성공으로 기록하지 않으며 완료된 체크포인트를 보존한다.
+
+### 확정 Support와 접촉 (2026-11-07)
+
+Codex 분석의 `support_relation`은 `geometry`의 치수와 별도 근거를 가진 같은 Object 출력 필드다. `support`, `source: user_memo|visual_inference`, `evidence_quote`, `evidence`, `parallel`을 사용한다. 사용자 설치 관계 인용은 CONFIRMED, 영상만의 추정은 PROPOSED로 `fitting.supports`에 저장한다. 신규 응답은 `geometry.support=null`; 과거 별도 근거 없는 해당 필드는 제안으로만 읽는다.
+
+확정 관계는 Candidate의 기존 `geometry_constraints.supports`에 결합되어 Export에도 남는다. 초기 Pose와 관계없이 지지면 좌표의 접촉·상대 자세를 적용한다. Dimensions/새 Asset 연결·Pair 정합에도 같은 계산을 재사용한다. 미확정 관계는 자동 수평화하지 않는다. 경사면·중첩 지지·Robot Mount와 진단의 필드는 [SCENE_RULES.md](SCENE_RULES.md)의 2026-11-07 절을 따른다. 새로운 실행 명령이나 별도 Support 설정 파일은 없다.
+
+
+## 2026-11-08 최신 연결 계약: Photo 정합 → 센서 정합 → Pair 개선
+
+Scene Prepare는 저장된 Scene Photos만 초기 MASt3R/COLMAP에 사용한다. Model References는 Codex가 실제 이미지 내용과 Scene Memo로 Object별 `model_references`에 연결하며 SfM/정합 Loss에는 넣지 않는다. `robot_attachment`는 실제 URDF Link와 추정 외형 pose이며 Optical Mount와 별개다.
+
+기존 `reconstruct PROJECT --candidate NAME --run-modeling`과 단일 UI는 Photo View별 추정 K/optical pose에서 native 렌더·공동 `fit_scene`을 실행한 뒤 센서 초기화와 Photo+Side/Wrist 공동 정합으로 이어진다. 사진의 픽셀 잔차는 학습 잔차이며 독립 정확도가 아니다. 실제 q·실측·Support·공유 고정 Side/공유 Wrist Mount를 유지한다. Capture는 초기 SfM에 넣지 않고 기존 Camera 또는 Photo metric feature PnP와 FK로 등록한다. 관측 부족/서로 다른 배치를 임의 합치지 않는다. `capture_layouts`의 SAME_LAYOUT 근거가 없으면 정적 물체 대신 Robot 관측만 허용한다.
+
+Real/Sim은 기존 `촬영 자료로 Scene 재정합` 버튼과 별도 Reconstruction Memo를 사용한다. source Package Identity와 Paired Capture를 같은 `refit-pairs`에 전달한다. 메모는 원본 Scene Memo와 분리되며 Source가 다르면 거부한다. 수정된 자산은 새 버전, Scene은 기존 Candidate에 보존하고 사용자의 검토 없이 Source/Export를 덮지 않는다. 센서 Mask-only 행에는 depth/물성을 만들어 넣지 않는다. 실제 Photo/센서/물리 실행 결과와 미실행 상태는 `docs/real2sim-multiview-architecture.md`의 최신 절에서 구분한다.

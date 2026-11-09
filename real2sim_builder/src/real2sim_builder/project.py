@@ -75,6 +75,8 @@ class Project:
 
     def __init__(self, root, *, read_only=None):
         self.root = Path(root).resolve()
+        from scene_contract.naming import check_storage_available
+        check_storage_available(self.root.parent.parent)
         self.info = read(self.root / 'project.yaml')
         if not isinstance(self.info, dict) or self.info.get('schema') != 'real2sim.project/1':
             raise ValueError('Expected an existing real2sim.project/1 project')
@@ -92,15 +94,15 @@ class Project:
     def create(cls, projects, name):
         if not name.strip():
             raise ValueError('Scene name required')
-        slug = re.sub('[^a-z0-9]+', '-', name.lower()).strip('-') or 'scene'
-        root = Path(projects).resolve() / (slug + '-' + uuid.uuid4().hex[:8])
-        root.mkdir(parents=True, exist_ok=False)
+        from scene_contract.naming import reserve_directory
+        root=reserve_directory(projects,name)
+        project_id='project_'+uuid.uuid4().hex
         for child in ('input', 'input/assets', 'working', 'scratch', 'exports'):
             (root / child).mkdir()
-        write(root / 'project.yaml', {'schema': 'real2sim.project/1', 'id': root.name, 'name': name, 'created_at': time.time()})
+        write(root / 'project.yaml', {'schema': 'real2sim.project/1', 'id': project_id, 'name': name, 'created_at': time.time()})
         write(root / 'input/evidence.yaml', {'images': [], 'videos': [], 'landmarks': [], 'masks': [], 'motions': []})
         write(root / 'working/state.json', {'status': 'DRAFT', 'stage': None, 'iteration': 0, 'decision': 'CONTINUE', 'metrics': {}, 'needs': []})
-        write(root/'working/owner.json', {'schema':'real2sim.builder-owner/1','project_id':root.name})
+        write(root/'working/owner.json', {'schema':'real2sim.builder-owner/1','project_id':project_id})
         return cls(root)
 
     @property

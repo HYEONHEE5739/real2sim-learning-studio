@@ -40,8 +40,15 @@ def _label(name):
 def _directory(workspace,original):
     workspace=Path(workspace).resolve();kind=_label(category(original));name=original.root.name
     expected=workspace/('dataset'if kind=='lerobot'else kind)
-    # Custom/nested locations may share a basename; keep their Dataset IDs apart.
-    if original.root.parent!=expected:name+='-'+digest(original.identity.dataset_id)[:8]
+    # Resolve ownership from saved revision metadata, not a hash in its label.
+    if original.root.parent!=expected:
+        base=workspace/'curation'/kind
+        for path in base.glob('*/*.json'):
+            try:record=read_json(path)
+            except (OSError,ValueError):continue
+            if record.get('source',{}).get('identity',{}).get('dataset_id')==original.identity.dataset_id:return path.parent
+        from scene_contract.naming import available_path
+        name=available_path(base,name).name
     folder=workspace/'curation'/kind/name
     if not folder.resolve().is_relative_to(workspace/'curation')or folder.resolve().is_relative_to(original.root):
         raise DataError('OUTPUT_CONFLICT','curation','Revision은 원본 밖의 Workspace curation 경로에 저장해야 합니다.')

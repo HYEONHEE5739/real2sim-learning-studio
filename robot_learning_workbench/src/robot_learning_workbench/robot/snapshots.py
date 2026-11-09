@@ -25,7 +25,7 @@ class SnapshotStore:
         sequences={r['camera']:r['sequence']for r in observed}
         if any(sequences[n]<=self.last_sequences.get(n,-1)for n in sequences):raise ValueError('Camera frame reused; wait for new Side/Wrist frames')
         staging=self.directory/('pending_'+identifier);staging.mkdir(parents=True,exist_ok=False)
-        model_relative,files=share_model(staging,self.model);shot=staging/'shots'/identifier;shot.mkdir(parents=True)
+        model_relative,files=share_model(staging,self.model);shot=staging
         measured.update(hardware_identity=state['hardware']['follower']['identity'],camera_metadata=state.get('camera_metadata',{}),device_source=state.get('device_source','unspecified'))
         atomic_json(shot/'state.json',measured);shot_files={'state.json':file_sha256(shot/'state.json')}
         for row in observed:
@@ -33,7 +33,7 @@ class SnapshotStore:
         layout_id='layout_'+self.project_id.replace('-','_')
         metadata=dict(id=identifier,scene_state_id=layout_id,files=shot_files,images=observed,quality_warnings=warnings)
         atomic_json(shot/'metadata.json',metadata);(shot/'COMPLETE').write_text('complete\n')
-        manifest=dict(schema='real2sim.snapshot/1',dataset_id=identifier,clock={'domain':'host_monotonic_ns','hardware_synchronized':False,'timestamp_kind':'host_receipt_not_exposure'},
+        manifest=dict(schema='real2sim.snapshot/1',dataset_id=identifier,session_id=identifier,clock={'domain':'host_monotonic_ns','hardware_synchronized':False,'timestamp_kind':'host_receipt_not_exposure'},
             joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',joint_mapping=self.mapping,
             source_robot_sha256=file_sha256(self.model),robot={'path':model_relative,'mapping_verified':False},cameras=[{'id':n,'resolution':[640,480]}for n in('side','wrist')],
             files=files,snapshots=[{'id':identifier,'scene_state_id':layout_id,'path':str(shot.relative_to(staging)),'metadata_sha256':file_sha256(shot/'metadata.json')}],
@@ -57,7 +57,8 @@ class SnapshotStore:
                     from .pairs import write_pair
                     write_pair(staging,manifest,pending,rendered)
                 write(staging/'capture_manifest.yaml',manifest);normalized,_,_=load_session(staging)
-                final=self.directory/normalized['session_id'];os.rename(staging,final);pending['path']=str(final)
+                from scene_contract.naming import numbered_path
+                final=numbered_path(self.directory,'capture');os.rename(staging,final);pending['path']=str(final)
             else:final=Path(pending['path'])
             manifest=read(final/'capture_manifest.yaml');metadata=read(final/manifest['snapshots'][0]['path']/'metadata.json')
             paired='pair.json'in metadata['files']

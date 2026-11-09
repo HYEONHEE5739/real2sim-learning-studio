@@ -126,6 +126,28 @@ def test_metric_plane_initialization_uses_partial_measurements_and_shared_phone_
     assert p.scene['cameras']==[]
 
 
+def test_metric_registration_uses_measured_workspace_xy_without_inventing_thickness(tmp_path):
+    from real2sim_builder.observations import register_image,predict_views
+    project=Project.create(tmp_path/'scenes','paper metric');images=[];segments=[]
+    for index in range(2):
+        file=tmp_path/f'{index}.png';Image.new('RGB',(100,80),(index,0,0)).save(file)
+        row=register_image(project,file,camera='phone',camera_type='external',scene_state='layout');images.append(row)
+        mask=np.zeros((80,100),np.uint8);mask[20:60,20:80]=255;path=tmp_path/f'mask{index}.png';Image.fromarray(mask).save(path)
+        segments.append({'image_id':row['id'],'object_id':'paper','masks':[{'path':str(path),'sha256':sha(path)}],
+                        'association':{'status':'ASSIGNED_ESTIMATED','mask_path':str(path),'mask_sha256':sha(path)}})
+    candidate=Candidate.create(project,'metric');path=candidate.root/'depth.npz'
+    np.savez(path,depth=np.full((2,80,100),2.),intrinsics=np.repeat(np.array([[[100.,0,50],[0,100,40],[0,0,1]]]),2,axis=0),
+             extrinsics=np.repeat(np.eye(4)[None],2,axis=0),original_to_processed=np.repeat(np.eye(3)[None],2,axis=0))
+    report={'images':images,'segments':segments,'scene_state_id':'layout','depth_batches':[{'path':str(path),'image_ids':[i['id']for i in images],'metadata':{'sha256':sha(path),'common_frame':'one'}}]}
+    options={'measurements':[{'id':'paper','kind':'box','role':'workspace','dimensions_m':[.6,.4,None],'evidence':['measured paper XY']}]}
+    before=copy.deepcopy(options);result=predict_views(candidate,report,options)
+    assert result['status']=='PREDICTED',result
+    assert abs(result['metric_alignment']['scale']-.5)<.04
+    assert options==before and candidate.scene['objects']==[]
+    assert result['metric_attempts'][0]['object_id']=='paper'
+    assert result['metric_attempts'][0]['status']=='ESTIMATED'
+
+
 def test_native_renderer_updates_camera_intrinsics_and_returns_optical_depth(tmp_path):
     from real2sim_builder.rendering import Renderer
     from test_builder_export import legacy_scene
@@ -405,3 +427,67 @@ def test_fit_evaluation_budget_is_global_across_iterations(tmp_path):
     assert report['stop_reason']=='max_evaluations' and not report['converged']
     assert report['after_loss']<=report['before_loss']
     assert read(report['best_scene'])==result
+def test_sensor_images_join_registered_photo_views_without_merging_source_layout_ids(tmp_path):
+    from real2sim_builder.observations import registered_images,register_image,source_record_digest
+    from real2sim_builder.scene import camera_calibration_signature
+    from PIL import Image
+    project,truth,observed=rendered_fixture(tmp_path)
+    path=tmp_path/'sensor.png';Image.new('RGB',(128,96),'blue').save(path)
+    sensor=register_image(project,path,camera='sensor',camera_type='side',scene_state='capture')
+    scene=observed;cam=__import__('copy').deepcopy(scene['cameras'][0]);cam['id']='sensor';scene['cameras'].append(cam)
+    scene['view_registrations'][sensor['id']]={'source_image_sha256':sensor['sha256'],
+        'image_record_sha256':source_record_digest(sensor),'camera_signature':camera_calibration_signature(scene,cam),
+        'status':'REGISTERED_ESTIMATED','scene_state_id':'capture','use_for_joint_fitting':True}
+    images,_,_=registered_images(project,scene=scene)
+    assert sensor['id']in{i['id']for i in images}
+    assert next(i for i in images if i['id']==sensor['id'])['scene_state_id']=='capture'
+
+
+def test_sensor_pnp_initializes_estimated_lens_without_sfm_or_fake_metric_scale():
+    import numpy as np
+    import cv2
+    from real2sim_builder.calibration.registration import camera_from_correspondences
+    rng=np.random.default_rng(42);points=rng.uniform([-.15,-.1,.4],[.15,.1,.8],(80,3))
+    k=np.array([[520.,0,320],[0,520.,240],[0,0,1]])
+    uv=cv2.projectPoints(points,np.zeros(3),np.zeros(3),k,np.zeros(5))[0].reshape(-1,2)
+    report=camera_from_correspondences(points,uv,resolution=[640,480])
+    assert report['status']=='ESTIMATED' and report['physical_verified']is False
+    assert report['rmse_px']<.1
+    assert abs(report['K'][0][0]-520)<1
+    assert camera_from_correspondences(points[:3],uv[:3],resolution=[640,480])['status']=='NEEDS_MORE_DATA'
+    planar=points.copy();planar[:,2]=.5
+    assert camera_from_correspondences(planar,uv,resolution=[640,480])['status']=='NEEDS_MORE_DATA'
+
+
+def test_registered_virtual_camera_renders_while_sensor_mount_remains_unknown(tmp_path):
+    from real2sim_builder.scene import value
+    from real2sim_builder.rendering import Renderer,render_scene
+    from real2sim_builder.capture import observation_scene
+    project,truth,observed=rendered_fixture(tmp_path)
+    unknown=copy.deepcopy(observed['cameras'][0]);unknown.update(id='unresolved_sensor',pose=value(None))
+    observed['cameras'].append(unknown)
+    original=copy.deepcopy(observed)
+    image=project.evidence['images'][0];posed=observation_scene(observed,image,project.root,complete=False)
+    with Renderer(posed,project.root,tmp_path/'render')as renderer:
+        assert renderer.rgb(image['camera']).shape==(*image['resolution'][::-1],3)
+    assert observed==original and 'unresolved_sensor'not in{c['id']for c in render_scene(observed)['cameras']}
+
+
+def test_mask_only_sensor_fitting_preserves_photo_clouds_and_does_not_invent_depth(tmp_path):
+    from real2sim_builder.inference import build_render_observations
+    from real2sim_builder.calibration.hybrid import fit_scene
+    from real2sim_builder.scene import camera_calibration_signature
+    from real2sim_builder.observations import source_record_digest
+    project,truth,observed=rendered_fixture(tmp_path);candidate=Candidate(project,'fit')
+    scene=candidate.scene;scene['reconstruction_observations']=observed['reconstruction_observations'];candidate.save(scene)
+    image=project.evidence['images'][0];row=observed['reconstruction_observations']['clouds'][0]
+    source=candidate.root/'sensor-mask.png'
+    __import__('shutil').copyfile(project.root/row['mask'],source)
+    report={'images':[image],'segments':[{'image_id':image['id'],'object_id':row['object_id'],
+        'association':{'status':'ASSIGNED_ESTIMATED','mask_path':str(source),'mask_sha256':sha(source)}}]}
+    count=len(observed['reconstruction_observations']['clouds'])
+    result=build_render_observations(candidate,report,same_layout=True)
+    assert result['depth_generated']is False and result['clouds'][0]['points']==0
+    assert len(candidate.scene['reconstruction_observations']['clouds'])==count
+    fitted,metrics=fit_scene(project,candidate.scene,candidate.root/'image-fit',{'max_iterations':1,'max_evaluations':2,'optimize_appearance':False})
+    assert np.isfinite(metrics['after_loss'])

@@ -11,6 +11,23 @@ import shutil
 PROVENANCE = {'user_measured': 'measured', 'model_asset': 'derived', 'derived': 'derived', 'numerically_fitted': 'optimized', 'provisional': 'estimated', 'unmeasured': 'unknown', 'measured': 'measured', 'calibrated': 'calibrated', 'optimized': 'optimized', 'estimated': 'estimated', 'unknown': 'unknown'}
 
 
+def save_reconstruction_memo(project,text,source_scene):
+    """A source-bound improvement request, separate from the original Scene Memo."""
+    from .candidate import exclusive
+    from .export import verify_package
+    import hashlib
+    if not isinstance(text,str):raise ValueError('Reconstruction Memo must be text')
+    path=Path(source_scene).resolve()
+    if path.is_file():path=path.parent
+    if not path.is_relative_to(project.root):raise ValueError('Memo source must belong to the selected Project')
+    package=verify_package(path)
+    from dataclasses import asdict
+    record={'text':text,'sha256':hashlib.sha256(text.encode('utf-8')).hexdigest(),
+        'source_identity':asdict(package.identity),'source_package':path.relative_to(project.root).as_posix()}
+    with exclusive(project):write(project.root/'working/reconstruction_memo.json',record)
+    return record
+
+
 def copy_input(project, path, category='media'):
     project.require_writable()
     path = Path(path).resolve()
@@ -18,27 +35,25 @@ def copy_input(project, path, category='media'):
         raise ValueError('LEGACY_UNSUPPORTED: GLB/glTF inputs are retired; use measured primitives or OBJ/STL assets')
     if not path.is_file():
         raise FileNotFoundError(path)
-    relative = Path('input') / category / (sha(path) + path.suffix.lower())
-    destination = project.root / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists():
-        shutil.copy2(path, destination)
-    return relative.as_posix()
+    from scene_contract.naming import copy_named
+    destination=copy_named(path,project.root/'input'/category)
+    return destination.relative_to(project.root).as_posix()
 
 
-def add_image(project, path, camera='side', split='train', timestamp=None, context_only=False):
+def add_image(project, path, camera='side', split='train', timestamp=None, context_only=False, role='scene_photo'):
     project.require_writable()
     identifier(camera)
     if split not in ('train', 'validation'):
         raise ValueError('Unknown evidence split')
-    relative = copy_input(project, path)
+    if role not in('scene_photo','model_reference'):raise ValueError('Unknown input image role')
+    relative = copy_input(project, path,'model_references'if role=='model_reference'else'scene_photos')
     with Image.open(project.root / relative) as im:
         im = ImageOps.exif_transpose(im)
         resolution = list(im.size)
     evidence = project.evidence
-    row = {'path': relative, 'camera': camera, 'split': split, 'timestamp': timestamp, 'resolution': resolution, 'sha256': sha(project.root / relative), 'source': str(Path(path).resolve())}
+    row = {'path': relative, 'camera': camera, 'split': split, 'timestamp': timestamp, 'resolution': resolution, 'sha256': sha(project.root / relative), 'source': str(Path(path).resolve()),'original_name':Path(path).name,'role':role}
     if context_only:
-        row.update(role='reference_context', eligible=False, exclusion_reasons=['reference_camera_not_calibrated_for_pixel_fitting'])
+        row.update(eligible=False, exclusion_reasons=['reference_camera_not_calibrated_for_pixel_fitting'])
     if not any((relative in (e['path'], e.get('original_path')) and e['camera'] == camera for e in evidence['images'])):
         evidence['images'].append(row)
     write(project.root / 'input/evidence.yaml', evidence)

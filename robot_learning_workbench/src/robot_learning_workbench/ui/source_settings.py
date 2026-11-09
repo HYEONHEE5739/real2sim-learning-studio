@@ -1,6 +1,7 @@
+from scene_contract.naming import numbered_path
 """Scene-name selection and one saved YAML buffer for Live Source collection."""
 from pathlib import Path
-import json,uuid,yaml
+import json,yaml
 from PyQt6.QtCore import Qt,pyqtSignal
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QPushButton,QLineEdit,QFileDialog
 from .recipe_editor import RecipeEditor
@@ -39,7 +40,7 @@ class SourceSettings(QWidget):
     def default_script(self):
         text=yaml.safe_dump({'schema_version':1,'stage':'source','engine':self.engine.currentText(),'inputs':{'scene':''},
             'execution':{'single_task':'','env_num':1,'num_episodes':10,'episode_time_s':60.0,'reset_time_s':0.0,'resume':False},
-            'output':{'directory':str(self.workspace/'source'/('demo-'+uuid.uuid4().hex[:8]))},'objects':{},'functions':{}},sort_keys=False,allow_unicode=True)
+            'output':{'directory':str(self.workspace/'source'/numbered_path(self.workspace/'source','demo').name)},'objects':{},'functions':{}},sort_keys=False,allow_unicode=True)
         return text.replace('env_num: 1','env_num: 1  # Live Leader Source는 현재 1-env').replace('num_episodes: 10','num_episodes: 10  # 이번에 추가로 저장할 Episode 수').replace('episode_time_s: 60.0','episode_time_s: 60.0  # Episode 최대 시간 (초)').replace('reset_time_s: 0.0','reset_time_s: 0.0  # 저장·폐기 후 대기 (초)').replace('resume: false','resume: false  # 같은 output.directory에 이어 수집하려면 true')
 
     def set_busy(self,busy):

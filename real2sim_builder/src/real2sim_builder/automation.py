@@ -4,6 +4,7 @@
     registration, fitting and reports remain local; Current and prior exports
     are never replaced by this entry point.
 """
+from scene_contract.naming import numbered_path
 from .files import read,write,sha
 from .candidate import Candidate,exclusive
 from .authoring import modeling_tasks,attach_modeled_assets,analysis_required
@@ -37,7 +38,8 @@ def fitting_scores(metrics):
         objects=sorted(row.get('objects',[]),key=lambda obj:obj['object_id'])
         key+=json.dumps([obj['object_id']for obj in objects])
         for obj in objects:
-            values.extend([1-obj['iou'],obj['center_error_px'],obj['observed_point_surface_rmse_m']])
+            values.extend([1-obj['iou'],obj['center_error_px']])
+            if obj.get('observed_point_surface_rmse_m')is not None:values.append(obj['observed_point_surface_rmse_m'])
         if key in scores or any(isinstance(v,bool)or not isinstance(v,(int,float))or not math.isfinite(v)for v in values):return {}
         scores[key]=values
     return scores
@@ -46,6 +48,8 @@ def fitting_scores(metrics):
 def retain_fitting(candidate,best,report):
     """Retain a valid non-regressing round and its mutable Candidate closure."""
     import shutil,uuid
+    from .scene import validate
+    validate(candidate.scene,candidate.project.root)
     metrics=read(candidate.root/'metrics.json');scores=fitting_scores(metrics)
     if not scores:return best
     signature=candidate.project.signature(candidate.scene)
@@ -60,7 +64,7 @@ def retain_fitting(candidate,best,report):
         if scores.keys()!=old.keys():return best
         pairs=[(value,prior)for key in scores for value,prior in zip(scores[key],old[key])]
         if any(len(scores[k])!=len(old[k])for k in scores)or any(a>b for a,b in pairs)or not any(a<b for a,b in pairs):return best
-    folder=candidate.root/'fitting/checkpoints'/uuid.uuid4().hex
+    folder=numbered_path(candidate.root/'fitting/checkpoints','checkpoint')
     folder.mkdir(parents=True)
     write(folder/'scene.yaml',candidate.scene);write(folder/'report.json',report)
     paths=set()
@@ -107,10 +111,31 @@ def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=Fa
     """Keep the best comparable round even on Stop, child failure or budget exit."""
     best=[None];result=None;failure=None
     with exclusive(project):
+        prior_path=project.root/'scratch/agent'/candidate/'reconstruction.json'
+        prior=read(prior_path)if prior_path.is_file()else{}
+        checkpoint=prior.get('selected_checkpoint')
+        if checkpoint:
+            from pathlib import Path
+            saved=Path(checkpoint).resolve()
+            if not saved.is_relative_to(project.root/'scratch/agent'/candidate/'fitting/checkpoints'):
+                raise ValueError('Checkpoint is outside this Candidate')
+            if saved.is_dir():
+                manifest=read(saved/'manifest.json')
+                if project.signature(Candidate(project,candidate).scene)==manifest['signature']:best[0]=saved
+        # A completed Stop can leave a late control message. Clear it only under the lock.
+        project.control('resume')
+        initial_result=None
+        if best[0] is not None and prior.get('failed_stage')=='CODEX_REVIEW':
+            selected=Candidate(project,candidate)
+            frozen=selected.root/'reconstruction-config.yaml'
+            requested=config if config is not None else read(project.root/'input/reconstruction.yaml')
+            if frozen.is_file()and _fitting_configuration(requested,refit_only)==read(frozen)and scene_state in(None,requested.get('scene_state_id')):
+                restore_fitting(selected,best[0])
+                initial_result=read(best[0]/'report.json')
         try:
             result=_reconstruct_loop(project,candidate=candidate,config=config,scene_state=scene_state,
                 run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,modeling_timeout_s=modeling_timeout_s,
-                max_review_calls=max_review_calls,refit_only=refit_only,best=best)
+                max_review_calls=max_review_calls,refit_only=refit_only,best=best,initial_result=initial_result)
             return result
         except Exception as error:
             failure=error
@@ -131,18 +156,37 @@ def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=Fa
                     final.pop('visual_review',None)
                     if final.get('status')=='VISUAL_DRAFT_REVIEWED':final['status']='BEST_RESTORED_UNVERIFIED'
                 write(path,final)
+            path=project.root/'scratch/agent'/candidate/'reconstruction.json'
+            if (path.parent/'candidate.json').is_file():
+                final=read(path)if path.is_file()else(result or {'status':'FAILED'})
+                if failure is not None:final.update(status='STOPPED'if isinstance(failure,InterruptedError)else'FAILED',error=str(failure),error_code=getattr(failure,'code',None))
+                selected=Candidate(project,candidate)
+                if project.state.get('candidate')==candidate:
+                    final.setdefault('modeling_calls',project.state.get('codex_calls',0))
+                    final.setdefault('review_calls',project.state.get('review_calls',0))
+                final['resume']={'candidate':candidate,'available':selected.info['status']=='OPEN',
+                    'input_signature':project.signature(selected.scene),'stage':project.state.get('stage'),
+                    'completed_stages':[k for k,v in final.get('stages',{}).items()if v.get('status')in('INFERRED','ASSETS_READY')],
+                    'incomplete_stage':final.get('failed_stage')or project.state.get('stage')}
+                write(path,final)
+                if result is not None:result.update(final)
 
 
-def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False,best=None):
+def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False,best=None,initial_result=None):
     """Hold the existing Project lock across every pipeline stage."""
     with exclusive(project):
         if isinstance(max_modeling_calls,bool)or not isinstance(max_modeling_calls,int)or max_modeling_calls<0:
             raise ValueError('Nonnegative integer max_modeling_calls required')
         if isinstance(max_review_calls,bool)or not isinstance(max_review_calls,int)or max_review_calls<0:
             raise ValueError('Nonnegative integer max_review_calls required')
-        calls=0;reviews=0;history=[]
+        previous_path=project.root/'scratch/agent'/candidate/'reconstruction.json'
+        previous=read(previous_path)if previous_path.is_file()else{}
+        calls=previous.get('modeling_calls',0);reviews=previous.get('review_calls',0);history=previous.get('review_history',[])
+        project.update(codex_calls=calls,review_calls=reviews,candidate=candidate)
+
         while True:
-            result=_reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=refit_only)
+            result=initial_result if initial_result is not None else _reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=refit_only)
+            initial_result=None
             if not run_modeling:return result
             result['modeling_calls']=calls
             if result.get('stages',{}).get('codex_review',{}).get('status')=='WAITING_FOR_CODEX_REVIEW' and result['status']not in('FAILED','STOPPED'):
@@ -162,20 +206,21 @@ def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_model
                 # Retain each evaluated Scene before a structural replacement.
                 # This is a resumable checkpoint, not a claim of global optimum.
                 import uuid
-                folder=selected.root/'fitting/reviews'/uuid.uuid4().hex
+                folder=numbered_path(selected.root/'fitting/reviews','review')
                 write(folder/'scene.yaml',selected.scene)
                 write(folder/'metrics.json',read(selected.root/'metrics.json'))
                 try:
                     project.checkpoint()
                     modeling_tasks(selected,config or read(project.root/'input/reconstruction.yaml'),None)
+                    project.update(status='RUNNING',stage='CODEX_REVIEW',codex_calls=calls,review_calls=reviews,task='Codex comparison judgment')
                     judged=run_codex_modeling(selected,timeout_s=modeling_timeout_s,review_fitting=True)
                 except Exception as error:
                     result.update(status='STOPPED'if isinstance(error,InterruptedError)else'FAILED',
-                        failed_stage='CODEX_REVIEW',error=str(error))
+                        failed_stage='CODEX_REVIEW',error=str(error),error_code=getattr(error,'code',None),modeling_calls=calls,review_calls=reviews,review_history=history)
                     write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
                     if isinstance(error,InterruptedError):return result
                     raise
-                reviews+=1;decision=judged['decision'];history.append(decision)
+                reviews+=1;project.update(review_calls=reviews);decision=judged['decision'];history.append(decision)
                 write(folder/'decision.json',judged)
                 result.update(review_calls=reviews,review_history=history,visual_review=decision)
                 action=decision['action']
@@ -191,7 +236,7 @@ def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_model
                         result.update(status='WAITING_FOR_CODEX',stop_reason='max_modeling_calls')
                         write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
                         return result
-                    refit_only=False  # Explicit structural diagnosis: new Candidate asset versions, never source Export edits.
+                    if refit_only:config['refit_structural']=True  # Stay in Pair mode; never restart initial Scene SfM.
                     config['fitting_feedback']=judged.get('feedback',{})
                     for name in decision['objects']:
                         if name not in config.get('objects',{}):raise ValueError('No modeling configuration for '+name)
@@ -209,15 +254,22 @@ def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_model
             from .authoring import run_codex_modeling
             try:
                 project.checkpoint()
+                project.update(status='RUNNING',stage='CODEX_MODELING'if result['status']=='WAITING_FOR_CODEX'else'CODEX ANALYSIS',codex_calls=calls,review_calls=reviews,task='Codex execution')
                 modeled=run_codex_modeling(Candidate(project,candidate),timeout_s=modeling_timeout_s)
             except Exception as error:
                 status='STOPPED'if isinstance(error,InterruptedError)else'FAILED'
-                result.update(status=status,error=str(error),failed_stage='CODEX_MODELING',modeling_calls=calls)
+                result.update(status=status,error=str(error),error_code=getattr(error,'code',None),failed_stage='CODEX_MODELING',modeling_calls=calls,review_calls=reviews,review_history=history)
                 write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
                 project.update(status=status,stage='CODEX_MODELING',error=str(error),task='Candidate retained; resume reconstruction')
                 if isinstance(error,InterruptedError):return result
                 raise
-            calls+=1
+            if not modeled.get('reused'):calls+=1
+            project.update(codex_calls=calls,review_calls=reviews)
+            if modeled['status']=='ANALYZED_OBJECT_PROPOSALS'and modeled.get('objects')=={}:
+                result.update(status='NEEDS_MORE_DATA',needs=modeled.get('needs',[]),modeling_calls=calls,modeling=modeled)
+                write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
+                project.update(status='NEEDS_MORE_DATA',needs=result['needs'],task='Scene analysis requires additional evidence')
+                return result
             if modeled['status']not in('REGISTERED_UNVALIDATED','ASSETS_READY','ANALYZED_OBJECT_PROPOSALS'):
                 result.update(status=modeled['status'],modeling_calls=calls,modeling=modeled)
                 write(project.root/'scratch/agent'/candidate/'reconstruction.json',result)
@@ -225,7 +277,12 @@ def _reconstruct_loop(project,*,candidate,config=None,scene_state=None,run_model
             # Analysis writes the typed plan through the existing configuration
             # owner. Continue with that plan, never the stale caller snapshot.
             saved=project.root/'input/reconstruction.yaml'
-            if saved.is_file() and not reviews:config=read(saved)
+            if modeled.get('configuration'):
+                from pathlib import Path
+                response=Path(modeled['configuration']).resolve()
+                if not response.is_relative_to(project.root):raise ValueError('Modeled configuration is outside Project')
+                saved=response
+            if saved.is_file() and(not reviews or modeled['status']=='ANALYZED_OBJECT_PROPOSALS'):config=read(saved)
 
 
 def captured_robot(candidate,images):
@@ -355,6 +412,20 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
                 import_paired(project,dataset,scene_state=scene_state,include_flagged_reason=include_flagged_reason)
         images,_,needs=input_images(project,scene_state)
         paired=[i for i in images if i.get('runtime_baseline')]
+        capture_ids=(config or{}).get('refit_capture_ids')
+        if capture_ids:paired=[i for i in paired if i.get('snapshot_id')in capture_ids]
+        expected=(config or{}).get('refit_source_identity')
+        if expected:
+            matched=[]
+            for image in paired:
+                baseline=image['runtime_baseline'];identity=baseline.get('scene_identity')
+                if identity is None and baseline.get('pair_path'):
+                    from .scene import local_path
+                    path=local_path(project.root,baseline['pair_path'])
+                    if sha(path)!=baseline.get('pair_sha256'):return unavailable('PAIR_SOURCE_MISMATCH',['Recorded Pair SHA mismatch'])
+                    identity=read(path).get('scene_identity')
+                if identity==expected:matched.append(image)
+            paired=matched
         if not paired:return unavailable('PAIR_SOURCE_UNRESOLVED',needs+['Select a completed registered Real/Sim Pair session in this layout'])
         if any(i.get('scene_state_id')!=scene_state for i in paired):
             return unavailable('PAIR_LAYOUT_MISMATCH',['Select one physical layout per refit'])
@@ -368,8 +439,25 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
         else:
             selected=Candidate.create(project,candidate,source_scene=source,source_revision=revision)
             scene=selected.scene;scene['reconstruction_state']={'id':scene_state,'static_layout_verified':False};selected.save(scene)
-        config=copy.deepcopy(read(project.root/'input/reconstruction.yaml')if config is None else config);config['scene_state_id']=scene_state
+        config=copy.deepcopy(read(project.root/'input/reconstruction.yaml')if config is None and(project.root/'input/reconstruction.yaml').is_file()else config or{})
+        from .authoring import runtime_configuration
+        config=runtime_configuration(project,config);config['scene_state_id']=scene_state
+        memo_path=project.root/'working/reconstruction_memo.json'
+        if memo_path.is_file():
+            import hashlib
+            memo=read(memo_path)
+            if hashlib.sha256(memo['text'].encode('utf-8')).hexdigest()!=memo['sha256']:raise ValueError('Reconstruction Memo SHA mismatch')
+            if memo['source_identity']!=revision['identity']:return unavailable('PAIR_MEMO_SOURCE_MISMATCH',['Reconstruction Memo belongs to a different source Revision'])
+            write(selected.root/'reconstruction_memo.json',memo)
+            config['reconstruction_memo']=memo
         config['image_ids']=[i['id']for i in paired]
+        # Each requested Capture set is explicit. Do not silently keep the
+        # previous attempt's observations just because its layout label matches.
+        scene=selected.scene;ids=set(config['image_ids'])
+        scene['view_registrations']={key:r for key,r in scene.get('view_registrations',{}).items()if key in ids}
+        if scene.get('reconstruction_observations'):
+            scene['reconstruction_observations']['clouds']=[r for r in scene['reconstruction_observations']['clouds']if r['image_id']in ids]
+        selected.save(scene)
         result=reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=True,
             run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,max_review_calls=max_review_calls)
         result['source_revision']=revision
@@ -387,12 +475,29 @@ def draft_readiness(project,scene,comparison):
     from .scene import validate
     import math
     needs=list(comparison.get('observability',{}).get('needs',[]))
-    try:validate(scene,project.root,complete=True)
+    from .rendering import render_scene
+    try:validate(render_scene(scene),project.root,complete=True)
     except ValueError as error:needs.append(str(error))
+    rendered={c['id']for c in render_scene(scene)['cameras']}
+    unresolved=[c['id']for c in scene['cameras']if c['id']not in rendered]
+    if unresolved:needs.append('Unresolved sensor cameras: '+', '.join(unresolved))
     if not scene.get('cameras'):needs.append('Usable Camera required for a rendered draft')
     if comparison.get('status')!='OPTIMIZED_UNVERIFIED'or not comparison.get('converged')or not comparison.get('training_view_count')or not math.isfinite(comparison.get('after_loss',float('inf'))):
         needs.append('Native multiview fitting must finish with finite training loss; exhausted budget is not convergence')
     return {'status':'DRAFT_READY'if not needs else'NEEDS_MORE_DATA','needs':needs,'physical_verified':False}
+
+
+def _fitting_configuration(config,refit_only):
+    config=copy.deepcopy(config)
+    fitting=config.setdefault('fitting',{})
+    fitting.setdefault('optimize_appearance',not refit_only)
+    fitting.setdefault('optimize_lighting',not refit_only)
+    if refit_only:
+        config['refit_mode']=True
+        # Pair refitting preserves the source Revision's geometry and materials.
+        fitting['optimize_dimensions']=False
+        fitting['optimize_appearance']=False;fitting['optimize_lighting']=False
+    return config
 
 
 def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=False):
@@ -403,25 +508,31 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
     from .validation import physics_probe
     configuration=project.root/'input/reconstruction.yaml'
     config=read(configuration)if config is None else config
-    config=copy.deepcopy(config)
-    fitting=config.setdefault('fitting',{})
-    fitting.setdefault('optimize_appearance',not refit_only)
-    fitting.setdefault('optimize_lighting',not refit_only)
-    if refit_only:
-        # Pair refitting preserves the source Revision's geometry and materials.
-        fitting['optimize_dimensions']=False
-        fitting['optimize_appearance']=False;fitting['optimize_lighting']=False
+    config=_fitting_configuration(config,refit_only)
+    fitting=config['fitting']
     selected=Candidate(project,candidate)if(project.root/'scratch/agent'/candidate/'candidate.json').exists()else Candidate.create(project,candidate)
     selected.require_open()
     frozen=selected.root/'reconstruction-config.yaml';write(frozen,config)
     scene=selected.scene;scene['reconstruction_configuration']={'path':frozen.relative_to(project.root).as_posix(),'sha256':sha(frozen),'provenance':'derived'}
+    if not refit_only:
+        for binding in scene.get('view_registrations',{}).values():binding.pop('use_for_joint_fitting',None)
     selected.save(scene)
     report={'candidate':candidate,'status':'NEEDS_MORE_DATA','physical_verified':False,'stages':{},'needs':[]}
     def progress(stage,task):
-        project.checkpoint();project.update(status='RUNNING',stage=stage,task=task,candidate=candidate)
+        project.checkpoint();write(selected.root/'reconstruction.json',report)
+        project.update(status='RUNNING',stage=stage,task=task,candidate=candidate)
     try:
         from .evidence import scene_memo
-        if not refit_only and analysis_required(config,scene_memo(project)['sha256']):
+        if refit_only and not config.get('objects'):
+            progress('CODEX ANALYSIS','Associate Pair images with existing Source Object IDs and improvement Memo')
+            modeling=modeling_tasks(selected,config,{})
+            report.update(status=modeling['status'],needs=modeling['needs'],input_signature=project.signature(selected.scene))
+            report['stages']['modeling']=modeling;write(selected.root/'reconstruction.json',report)
+            return report
+        if not refit_only and analysis_required(config,scene_memo(project)['sha256'],project=project):
+            from .observations import input_images
+            available=[i for i in project.evidence['images']if i.get('capture_manifest')and i.get('q_measured')is not None]
+            report['stages']['robot_reference']=captured_robot(selected,available)
             progress('CODEX ANALYSIS','Interpret the current literal Scene memo and photos')
             modeling=modeling_tasks(selected,config,{})
             report.update(status=modeling['status'],needs=modeling['needs'],input_signature=project.signature(selected.scene))
@@ -431,40 +542,54 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
             return report
         from .authoring import geometry_specs
         geometry=geometry_specs(config,selected.scene)
-        progress('ANALYZE','SAM segmentation followed by DA3 depth')
-        inferred=run_models(selected,config,scene_state=scene_state or config.get('scene_state_id'))
-        report['stages']['inference']={'status':inferred['status'],'report':str(selected.root/'inference/results.json')}
+        progress('ANALYZE','SAM segmentation followed by configured geometry backend')
+        inference_args={'scene_state':scene_state or config.get('scene_state_id'),'sensor_alignment':refit_only}
+        if refit_only:inference_args['segmentation_only']=True
+        inferred=run_models(selected,config,**inference_args)
+        report['stages']['inference']={'status':inferred['status'],'report':str(selected.root/'.cache/inference/results.json')}
         report['stages']['inference']['needs']=inferred.get('needs',[])
+        if inferred.get('geometry'):report['stages']['geometry_backend']=inferred['geometry']
         if inferred['status']=='INFERRED':
-            progress('CAMERA & SCALE','Estimate cameras from DA3 overlap and observable robot motion')
+            progress('Metric Registration','Register relative cameras/geometry using measured references and robot motion')
             report['stages']['robot_reference']=captured_robot(selected,inferred['images'])
             if not refit_only:selected.save(measured_geometry(selected.scene,geometry))
-            report['stages']['camera_predictions']=predict_views(selected,inferred,{**config.get('camera_initialization',{}),'measurements':[s for s in geometry if s.get('provenance','measured')in('measured','calibrated')and all(v is not None for v in s['dimensions_m'])]})
+            report['stages']['camera_predictions']=predict_views(selected,inferred,{**config.get('camera_initialization',{}),'measurements':[s for s in geometry if s.get('provenance','measured')in('measured','calibrated')and all(v is not None for v in s['dimensions_m'][:2])]})
         # Existing audited calibration / explicit advanced anchors remain usable;
         # they are not required user inputs for the automatic path.
-        registration=register_views(selected,config.get('anchors'),scene_state=scene_state or config.get('scene_state_id'))
+        registration={'status':'DEFERRED_TO_SENSOR_REGISTRATION','needs':[]}if refit_only and inferred['status']=='SEGMENTED'else register_views(selected,config.get('anchors'),scene_state=scene_state or config.get('scene_state_id'))
         if not report['stages'].get('camera_predictions',{}).get('views'):report['stages']['registration']=registration
         clouds={'clouds':[]}
         if inferred['status']=='INFERRED':
             progress('OBSERVATIONS','Backproject and associate all usable metric views before authoring')
             clouds=build_point_clouds(selected,inferred,selections=config.get('selections'))
             report['stages']['clouds']=clouds
+        elif refit_only and inferred['status']=='SEGMENTED':
+            from .observations import register_sensor_views
+            from .inference import build_render_observations
+            report['stages']['sensor_registration']=register_sensor_views(selected,config)
+            clouds=build_render_observations(selected,inferred,same_layout=True)
+            report['stages']['clouds']=clouds
         progress('GEOMETRY','Preserve measurements; attach reusable object assets')
-        if refit_only:
+        if refit_only and not config.get('refit_structural'):
             report['stages']['assets']={'attached':[],'scope':'Source Revision geometry/material/collision preserved'}
             report['stages']['modeling']={'status':'ASSETS_READY','pending':[]}
         else:
             if inferred['status']!='INFERRED':selected.save(measured_geometry(selected.scene,geometry))
             report['stages']['assets']=attach_modeled_assets(selected,config,inferred)
             report['stages']['modeling']=modeling_tasks(selected,config,inferred)
-        if inferred['status']=='INFERRED'and report['stages']['modeling']['status']=='ASSETS_READY':
+        if report['stages']['modeling']['status']=='ASSETS_READY':
+            from .initialization import project_supports
+            supported,physical=project_supports(selected.scene,config.get('fitting',{}).get('supports'),project.root,allow_incomplete=True)
+            selected.save(supported);report['stages']['physical_constraints']=physical
+        if inferred['status']in('INFERRED','SEGMENTED')and report['stages']['modeling']['status']=='ASSETS_READY':
             if clouds['clouds']:
                 from .calibration.hybrid import fit_clouds
                 from .scene import validate
                 if any(o['pose']['value']is None for o in selected.scene['objects']):
                     initialized,initial_report=fit_clouds(project,selected.scene,config.get('fitting'))
                     selected.save(initialized);report['stages']['pose_initialization']=initial_report
-                try:validate(selected.scene,project.root,complete=True)
+                from .rendering import render_scene
+                try:validate(render_scene(selected.scene),project.root,complete=True)
                 except ValueError as error:
                     report['stages']['completeness']={'status':'NEEDS_MORE_DATA','needs':[str(error)]}
                     clouds['clouds']=[]
@@ -476,6 +601,37 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
                         if hasattr(error,'best_scene'):selected.save(error.best_scene)
                         raise
                     selected.save(scene)
+                    if not refit_only and any(i.get('capture_manifest')for i in project.evidence['images']):
+                        # Preserve the photo-only comparison before adding any
+                        # sensor constraints. All later fitting keeps these rows.
+                        photo_metrics=alignment_metrics(project,scene,selected.root/'fitting/photos',fitting)
+                        write(selected.root/'fitting/photo-metrics.json',photo_metrics)
+                        report['stages']['photo_fitting']=comparison
+                        progress('SENSOR_REGISTRATION','Localize Side and shared FK/Wrist sensors against the metric Scene')
+                        from .observations import register_sensor_views
+                        from .inference import build_render_observations
+                        sensors=register_sensor_views(selected,config);report['stages']['sensor_registration']=sensors
+                        additions=[]
+                        layouts={r['scene_state_id']:r['status']for r in config.get('capture_layouts',[])}
+                        for layout in sorted({r['scene_state_id']for r in sensors['views']}):
+                            sensor_config=copy.deepcopy(config)
+                            sensor_config['image_ids']=[r['image_id']for r in sensors['views']if r['scene_state_id']==layout]
+                            # Different layouts can still constrain reference
+                            # Robot geometry through measured q, not static props.
+                            if layouts.get(layout)!='SAME_LAYOUT':
+                                sensor_config['objects']={}
+                            for obj in selected.scene['objects']:
+                                if obj.get('link')and obj['role']=='reference_robot':
+                                    sensor_config['objects'].setdefault(obj['id'],{'prompt':'robot '+obj['link']})
+                            segmented=run_models(selected,sensor_config,scene_state=layout,segmentation_only=True)
+                            added=build_render_observations(selected,segmented,same_layout=layouts.get(layout)=='SAME_LAYOUT')
+                            additions.extend(added['clouds'])
+                        report['stages']['sensor_observations']={'count':len(additions),'needs':[]if additions else['Sensor constraints unavailable; photo fitting retained']}
+                        if additions:
+                            progress('JOINT_SENSOR_FITTING','Joint photo + Side/Wrist fitting with recorded q and shared cameras')
+                            scene,comparison=fit_scene(project,selected.scene,selected.root/'fitting/joint-sensors',fitting)
+                            selected.save(scene)
+                        else:scene=selected.scene
                     metrics=alignment_metrics(project,scene,selected.root/'fitting/final',fitting)
                     write(selected.root/'metrics.json',{**metrics,'scope':'train render only','passed':False,
                         'needs':['Unvalidated automated draft; independent reconstruction/physics review required']})
@@ -483,9 +639,22 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
                 review=fitting_review(selected)
                 report['stages']['codex_review']={'status':review['status'],'path':str(selected.root/'fitting/codex-review.json'),'wrist_observed':review['wrist_observed']}
                 report['stages']['camera_quality']=metrics.get('camera_quality',{'status':'NOT_VERIFIED','needs':['Per-camera quality not evaluated']})
+                from .scene import support_metrics
+                report['stages']['physical_constraints']=support_metrics(selected.scene,root=project.root)
                 report['stages']['fitting']=comparison
                 progress('PHYSICS','Passive object collision/gravity probe')
                 with exclusive(project):report['stages']['physics']=physics_probe(project,selected.scene,selected.root/'physics')
+        if refit_only and inferred['status']=='SEGMENTED'and not clouds['clouds']:
+            # Even failed semantic association must retain a same-q native RGB
+            # comparison for diagnosis; never fabricate a foreground/depth mask.
+            progress('FITTING','Render source cameras at measured q for Pair diagnostics')
+            metrics=alignment_metrics(project,selected.scene,selected.root/'fitting/final',fitting)
+            write(selected.root/'metrics.json',metrics)
+            report['stages']['pair_comparison']={'views':len(metrics['images']),'needs':metrics['needs'],'scope':'RGB only; no geometric fitting performed'}
+            if metrics['images']:
+                from .authoring import fitting_review
+                review=fitting_review(selected)
+                report['stages']['codex_review']={'status':review['status'],'path':str(selected.root/'fitting/codex-review.json'),'wrist_observed':review['wrist_observed']}
         for stage in report['stages'].values():report['needs'].extend(stage.get('needs',[]))
         if not report['stages'].get('clouds',{}).get('clouds'):report['needs'].append('Metric cloud/identity inputs incomplete; no pose was invented')
         report['needs']=list(dict.fromkeys(report['needs']))
@@ -504,5 +673,5 @@ def _reconstruct(project,*,candidate,config=None,scene_state=None,refit_only=Fal
         report.update(status='STOPPED');write(selected.root/'reconstruction.json',report)
         project.update(status='STOPPED',task='Reconstruction stopped; Candidate/cache retained');return report
     except Exception as error:
-        report.update(status='FAILED',error=str(error));write(selected.root/'reconstruction.json',report)
+        report.update(status='CONSTRAINT_CONFLICT'if 'CONSTRAINT_CONFLICT'in str(error)else'FAILED',error=str(error));write(selected.root/'reconstruction.json',report)
         project.update(status='FAILED',error=str(error),task='Candidate retained; inspect stage logs');raise

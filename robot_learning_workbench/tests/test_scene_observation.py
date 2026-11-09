@@ -16,6 +16,10 @@ def test_camera_only_material_capture_owns_original_rgb_without_robot_state(tmp_
     assert row['q_measured']==[]and row['images'].keys()=={'side','wrist'}
     record=read(row['path']+'/observation.json');assert record['model_state']is None and record['action']is None and not record['eligible_for_calibration']
     assert len(project.evidence['images'])==2 and len(project.evidence['documents'])==1
+    from robot_learning_workbench.ui.session_operations import catalog
+    saved=catalog(project.root)['snapshots']
+    assert len(saved)==1 and saved[0]['id']==row['id']and saved[0]['unix_ns']==row['unix_ns']
+    assert saved[0]['q_measured']==[]and all(__import__('pathlib').Path(p).is_file()for p in saved[0]['images'].values())
     packets['wrist']['read_end']['monotonic_ns']-=300000000
     with pytest.raises(ValueError,match='stale|skew'):save_materials(project,'run_one','shot_two',packets,None,now_ns=now)
 

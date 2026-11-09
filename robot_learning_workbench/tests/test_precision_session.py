@@ -33,7 +33,7 @@ class MemoryCalibrationDevice:
 def precision_fixture(tmp_path):
     """Own the small SDK/Profile/URDF inputs; don't depend on deleted USD/weights."""
     from robot_learning_workbench.robot.precision import PrecisionSession
-    source=R/'workbench_runs/devices/so101-pickplace-0b794e7c/capture.yaml';source_data=yaml.safe_load(source.read_text())
+    source=R/'workbench_runs/devices/so101-pickplace/capture.yaml';source_data=yaml.safe_load(source.read_text())
     workspace=tmp_path/'workspace';directory=workspace/'devices/original';directory.mkdir(parents=True)
     data=copy.deepcopy(source_data);data['inputs']={};data['execution']={'device_source':'memory'};data['output']={'directory':'unused'}
     model=directory/'source-model.urdf';model.write_bytes(Path(source_data['inputs']['source_robot_model']).read_bytes());data['inputs']['robot_model']=str(model)

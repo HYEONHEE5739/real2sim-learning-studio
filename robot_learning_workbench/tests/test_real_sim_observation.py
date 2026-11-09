@@ -10,9 +10,9 @@ def observation_recipe(tmp_path,engine='mujoco'):
     import shutil,os,copy
     from real2sim_builder.files import read,write
     project=Project.create(tmp_path/'projects','Scene observation')
-    config=yaml.safe_load((R/'workbench_runs/devices/so101-pickplace-0b794e7c/capture.yaml').read_text())
+    config=yaml.safe_load((R/'workbench_runs/devices/so101-pickplace/capture.yaml').read_text())
     inputs={k:v for k,v in config['inputs'].items()if not k.startswith('leader')}
-    owned=R/'workbench_runs/scenes/pickplace-colorblock-b7a5592b'
+    owned=R/'workbench_runs/scenes/pickplace-colorblock'
     shutil.copytree(owned/'exports/scene-v8-native',project.root/'exports/scene-v8-native',copy_function=os.link)
     for key in('isaac','mujoco'):write(project.root/'configuration'/(key+'.json'),read(owned/'configuration'/(key+'.json')))
     info=read(project.root/'project.yaml');info['execution_packages']=copy.deepcopy(read(owned/'project.yaml')['execution_packages']);write(project.root/'project.yaml',info)
@@ -144,7 +144,7 @@ def test_follower_motion_updates_native_scene_and_pair_uses_four_images_without_
         s.dispatch([{'kind':'session_snapshot','command_id':'pair','payload':{}}]);until(lambda:len(s.snapshots)==1)
         saved=s.snapshots[0];assert set(saved['images'])=={'side','wrist','sim_side','sim_wrist'}
         manifest,rows,_=load_session(saved['path']);assert manifest['command_source']=='measured_observation_no_training_action'
-        shot=next((Path(saved['path'])/'shots').iterdir());pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
+        shot=Path(saved['path']);pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
         assert state['q_command']is None and pair['physics_steps']>0
         np.testing.assert_array_equal(pair['measured_q_rad'],saved['q_measured'])
         np.testing.assert_allclose(pair['sim_target_joint_rad'],saved['q_measured'],rtol=0,atol=1e-6)

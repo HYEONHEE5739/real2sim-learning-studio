@@ -1,5 +1,7 @@
 # Scene 제작 규칙 — 측정·기하·카메라·검토
 
+> 2026-11-08 저장 정책: Scene/Model 이미지 역할·사람이 읽는 이름·Asset 순차 버전은 [최신 Codex 지침](CODEX_SCENE_GUIDE.md)의 저장 경로 절을 따른다. 이전 경로 예시는 당시 검증 이력이며, 실제 현재 경로와 이전 결과는 [저장 구조 이전 기록](../docs/storage-migration.md)를 따른다.
+
 2026-10-31. 기존 Builder의 `AGENTS.md`와 `docs`의 Markdown 14개 전체를 읽고 제작 규칙을 현재 프로젝트용으로 정리했다. 실행 순서는 [SCENE_AUTHORING.md](SCENE_AUTHORING.md)를 따른다. 이 문서는 수학/입력/판정 원칙이며 새 검증 결과가 아니다. 문서의 예시 수치나 과거 Scene 성적을 현재 Scene의 실측·성공으로 사용하지 않는다.
 
 ## 2026-11-06 최신 정책과 과거 기록
@@ -55,6 +57,8 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 - 완료/Manifest에 게시된 자료와 pending을 구별한다. 원 촬영 품질 경고를 숨기거나 실패한 촬영을 정상 촬영 수로 세지 않는다.
 
 ## 4. RGB/Depth·실측 기하·접촉
+
+2026-11-08: 새 Geometry 기본 Backend는 `mast3r_colmap`이다. 아래 DA3 Batch 규칙은 명시 Legacy 선택에만 해당한다. MASt3R의 관측 Pointmap을 COLMAP Sparse 3D의 픽셀 대응으로 공통 Sim(3) 정합하고, 최적화된 Camera로 optical-Z를 재투영한다. 같은 상대 SfM frame을 다시 overlap 정렬하지 않는다. 서로 다른 Component를 근거 없이 합치거나 상대 단위를 미터로 바꾸지 않는다. 미관측/가림/재투영 불일치 픽셀은 invalid다. 정적 Object Mask에서 Robot·명시 제외 영역을 빼고, Validation을 train SfM/BA에 사용하지 않는다. 기존 Metric/FK/원본·Export 보호 규칙은 두 Backend에 동일하게 적용한다. 상세 설정과 미검증 범위는 [Backend 전환 기록](../docs/mast3r-colmap-backend.md)을 따른다.
 
 - GLB/glTF Import/Export 및 전용 Scan 경로는 제거했다. 기존 파일은 삭제하지 않으며 의존 Scene은 신규 fitting/export에서 `LEGACY_UNSUPPORTED`로 진단한다. 일반 OBJ/STL과 Robot 모델은 유지한다.
 - 실측 치수와 기존 CAD가 Geometry의 기준이다. SAM Mask·DA3 Depth/K/Extrinsic은 derived/estimated이며 measured로 승격하지 않는다.
@@ -173,3 +177,22 @@ Codex가 원문과 사진·기존 Scene을 함께 이해한다. Python은 `autho
 - Metric cloud를 만든 뒤 Camera를 움직이면 원 optical ray에서 재투영한다. 오래된 World 점군으로 Camera를 맞추지 않는다. 물리 Camera의 공통 K·Side pose·Wrist mount와 이미지별 EXIF/resize/crop을 구분한다.
 - 반복 예산 소진은 성공이 아니다. 수렴·개선·View별 회귀 한계를 기록하고 최선 유효 Candidate를 보존한다. Train과 독립 검증을 혼동하지 않는다. Appearance/실물 정확도/Task 성공은 RGB loss 감소로 승인하지 않는다.
 - 원본·측정·사용 자산 Version·Export는 보존한다. 미사용 캐시 자동 삭제는 기본 동작이 아니다.
+
+## 2026-11-07 지지·접촉 제약
+
+`geometry_constraints.supports`는 Object/기존 Frame ID를 Support Object ID에 연결한다. `source=user_declared|measured|calibrated`, `status=CONFIRMED`와 근거가 있는 관계만 강제한다. `estimated/PROPOSED`는 검토 대상으로 남긴다. 오래된 명시 `fitting.supports: {block: table}`는 사용자 선언으로 읽지만 Codex 분석의 별도 근거 없는 `geometry.support`는 확정하지 않는다.
+
+확정된 관계는 지지면의 접선 XY와 법선 주위 Yaw를 변수로 쓴다. 접촉 높이와 상대 Roll/Pitch는 Collision 또는 명시 Anchor로 결정한다. `parallel: false`이면 최초/명시 `relative_rotation`을 유지한다. `yaw_bound_rad`는 초기 Heading 대비 한계이며, 반복마다 누적 재설정하지 않는다(0이면 XY만). 이미 보호된 Pose는 이동하지 않으며 충돌하는 선언을 거절한다. 수치 기본 허용 오차 1e-6m/rad는 계산 잔차 기준이지 실측 정확도 인증이 아니다.
+
+Primitive는 Collision 치수, Compound/Mesh는 실제 Collision Part Transform/Vertex/Scale을 사용한다. Mesh의 Bounding Box 중심이나 Robot Frame 원점을 바닥으로 간주하지 않는다. 복잡한 Support Surface는 `support_anchor`, Geometry가 없는 Frame Mount는 `contact_anchor`를 명시해야 한다. Anchor의 `point_m`은 해당 Object/Frame의 로컬 m, `normal`은 단위 법선이다. 사용자 데이터로 검증되지 않은 Mount Offset을 채우지 않는다. Collision과 Visual을 혼동하거나 RGB 정합을 위해 Collision을 변형하지 않는다.
+
+초기화·ICP·raw-depth/landmark/native 공동 Solver·치수 변경·자산 교체·Pair·Checkpoint·Candidate/Export는 같은 관계를 사용한다. 확정 관계의 삭제·약화는 정합이 수행할 수 없다. Gap/침투/법선·상대 자세/Mount 오차/허용 DOF를 `physical_constraints`에 기록한다. 수치 접촉이 성립해도 중력·마찰·안정성·Grasp/Task 성공은 별도 검증이다. 명시 관계가 없는 물체는 자동으로 수평화하지 않으며 보고서의 `unconstrained_objects`에 구분한다.
+
+
+## 2026-11-08 최신 연결 계약: Photo 정합 → 센서 정합 → Pair 개선
+
+Scene Prepare는 저장된 Scene Photos만 초기 MASt3R/COLMAP에 사용한다. Model References는 Codex가 실제 이미지 내용과 Scene Memo로 Object별 `model_references`에 연결하며 SfM/정합 Loss에는 넣지 않는다. `robot_attachment`는 실제 URDF Link와 추정 외형 pose이며 Optical Mount와 별개다.
+
+기존 `reconstruct PROJECT --candidate NAME --run-modeling`과 단일 UI는 Photo View별 추정 K/optical pose에서 native 렌더·공동 `fit_scene`을 실행한 뒤 센서 초기화와 Photo+Side/Wrist 공동 정합으로 이어진다. 사진의 픽셀 잔차는 학습 잔차이며 독립 정확도가 아니다. 실제 q·실측·Support·공유 고정 Side/공유 Wrist Mount를 유지한다. Capture는 초기 SfM에 넣지 않고 기존 Camera 또는 Photo metric feature PnP와 FK로 등록한다. 관측 부족/서로 다른 배치를 임의 합치지 않는다. `capture_layouts`의 SAME_LAYOUT 근거가 없으면 정적 물체 대신 Robot 관측만 허용한다.
+
+Real/Sim은 기존 `촬영 자료로 Scene 재정합` 버튼과 별도 Reconstruction Memo를 사용한다. source Package Identity와 Paired Capture를 같은 `refit-pairs`에 전달한다. 메모는 원본 Scene Memo와 분리되며 Source가 다르면 거부한다. 수정된 자산은 새 버전, Scene은 기존 Candidate에 보존하고 사용자의 검토 없이 Source/Export를 덮지 않는다. 센서 Mask-only 행에는 depth/물성을 만들어 넣지 않는다. 실제 Photo/센서/물리 실행 결과와 미실행 상태는 `docs/real2sim-multiview-architecture.md`의 최신 절에서 구분한다.

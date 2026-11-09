@@ -11,7 +11,7 @@ def test_empty_inputs_keep_a_measured_draft_without_launching_models_or_export(t
     assert result['status']=='WAITING_FOR_CODEX' and result['needs']
     c=Candidate(p,'auto_1');assert c.scene['objects'][0]['pose']['value']is None
     assert not(p.root/'working/current_scene.yaml').exists() and not list((p.root/'exports').iterdir())
-    assert not(c.root/'inference/sam-job').exists()
+    assert not(c.root/'.cache/inference/sam-job').exists()
     assert p.state['status']=='WAITING_FOR_CODEX'
 
 
@@ -94,6 +94,10 @@ def test_pair_refit_uses_manifest_source_instead_of_current_and_rejects_mixed_re
     p=Project.create(tmp_path/'projects','revision source');source=legacy_scene();p.save_scene(source)
     write(p.root/'working/validation/report.json',{'passed':False,'input_signature':p.signature()})
     package=p.root/'exports/first';identity=export_revision(p,destination=package,allow_unvalidated=True)
+    from real2sim_builder.evidence import save_scene_memo,save_reconstruction_memo
+    save_scene_memo(p,'original scene description')
+    memo_before=sha(p.root/'input/scene_memo.txt')
+    memo=save_reconstruction_memo(p,'The simulated gripper looks too small.',package/'scene.json')
     current=copy.deepcopy(source);current['objects'][1]['color']['value']=[.1,.9,.2]
     # Current changed independently after capture. The Pair must keep the first material.
     write(p.root/'working/current_scene.yaml',current);before=sha(p.root/'working/current_scene.yaml')
@@ -114,6 +118,9 @@ def test_pair_refit_uses_manifest_source_instead_of_current_and_rejects_mixed_re
     automation.refit_pairs(p,candidate='refit',scene_state='layout',config={},run_modeling=True)
     assert seen[0]['run_modeling'] and seen[0]['refit_only']
     assert seen[0]['config']['image_ids']==['real1']
+    assert seen[0]['config']['reconstruction_memo']==memo
+    assert read(p.root/'scratch/agent/refit/reconstruction_memo.json')==memo
+    assert sha(p.root/'input/scene_memo.txt')==memo_before
     assert sha(p.root/'working/current_scene.yaml')==before
     import json
     archived=p.root/'input/pair.json';write(archived,{'scene_identity':asdict(identity),'joint_mapping':{}})
@@ -130,6 +137,9 @@ def test_pair_refit_uses_manifest_source_instead_of_current_and_rejects_mixed_re
     report=automation.refit_pairs(p,candidate='mixed',scene_state='layout',config={})
     assert report['status']=='NEEDS_MORE_DATA'and report['code']=='PAIR_SOURCE_MISMATCH'
     assert not(p.root/'scratch/agent/mixed').exists()
+    selected=automation.refit_pairs(p,candidate='refit',scene_state='layout',config={'refit_source_identity':asdict(identity)})
+    assert selected['source_revision']['identity']==asdict(identity)
+    assert seen[-1]['config']['image_ids']==['real1']
 
 
 def test_scene_memo_is_one_exact_text_with_legacy_read_only_restore(tmp_path):
@@ -162,7 +172,7 @@ def test_changed_memo_hands_off_to_codex_before_any_model_or_fitting(tmp_path,mo
     assert result['status']=='WAITING_FOR_CODEX_ANALYSIS'
     c=Candidate(p,'fresh');task=read(c.root/'modeling/tasks.json')
     assert task['scene_memo']['text']=='配置だけ変更。 Different cups now.'
-    assert 'inference'not in result['stages']and not(c.root/'inference').exists()
+    assert 'inference'not in result['stages']and not(c.root/'.cache/inference').exists()
 
 
 def test_pair_refit_disables_dimension_changes_even_when_requested(tmp_path):

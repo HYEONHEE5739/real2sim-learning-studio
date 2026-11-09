@@ -1,6 +1,6 @@
 # Builder 내부 Codex CLI — Scene 이해·모델링·정합 판단 지침
 
-> 개정판: 2026-11-06 · **표준 지침 원본**. `authoring.py`가 별도 sandbox의 Codex CLI 실행에 이 문서를 명시적으로 제공해야 적용된다.
+> 개정판: 2026-11-08 · **표준 지침 원본**. `authoring.py`가 별도 sandbox의 Codex CLI 실행에 이 문서를 명시적으로 제공해야 적용된다.
 > 기준 GitHub 리뷰 커밋 `6c90f776…`와 이후 사용자 결정에 맞춘 **목표 사양**이다. 실제 구현·테스트 완료 여부는 현재 로컬 코드와 실행 증거로 따로 판단한다.
 
 ## 0. 이 작업의 역할과 신뢰 경계
@@ -17,7 +17,7 @@
 
 | 입력 | 주된 역할 | 최종 완료 판정에서의 의미 |
 |---|---|---|
-| 휴대폰 다중 시점 | 개별 물체 식별, Mask/Crop, 가려진 형상 및 상대 Geometry/크기·배치 초기화 | 3D 복원 근거. 촬영 Camera Pose/K/Scale 추정치 때문에 **픽셀 평균 오차를 최종 목표로 삼지 않는다** |
+| 휴대폰 다중 시점 | 개별 물체 식별, Mask/Crop, 가려진 형상 및 상대 Geometry/크기·배치 초기화 | 초기 3D 복원과 여러 View의 Render-to-Real 공동 정합 근거. 추정 Pose/K/Scale과 학습 잔차를 독립 정확도로 표시하지 않는다 |
 | 고정 Side Camera | Robot Base·Workspace·테이블·물체 전역 정렬 | 전역 기하·가림 일관성을 만족해야 함 |
 | 로봇 Wrist Camera | Gripper·물체 상대 위치/크기·윤곽·가림·정책 RGB 관측 | **최우선 정밀 영상 정합 대상**, 단 Side/실측/FK를 희생하지 않음 |
 | 추가 Real/Sim Pair | 측정 q의 Real RGB vs 같은 q의 새로운 Candidate 렌더 | 추가 최적화와 후속 검증. 최적화에 사용한 Pair는 독립 평가로 부르지 않음 |
@@ -29,7 +29,7 @@ Wrist/Side의 각 시점에서 RGB·Mask·Edge·Object별 지표를 구분한다
 1. **Scene Memo 원문을 해석**하되, 말하지 않은 수량·치수·물성·카메라·q를 만들어 내지 않는다. 사용자의 수치와 요청 설계 치수를 구분하고 증거 인용·memo SHA를 보존한다. `100mm 높이`만 알면 높이 0.1m만 측정 축이다. 나머지는 null/unknown.
 2. **대표 사진**을 고른다. 물체의 분리 가능성·노출·가림·화질을 기준으로 한다. 모든 물체가 보이지 않으면 보조 대표 사진을 사용한다. 사진의 경로·SHA·camera_type·scene_state가 다르면 잘못 합치지 않는다.
 3. 대표 사진에서 **물체별 Instance**를 탐지한다. `cup_1`과 `cup_2`는 같은 종류여도 다른 ID다. 이미지상 좌/우 순서나 SAM Mask 순서를 신원으로 취급하지 않는다. 관측 근거가 있을 때 Object별 Text Prompt·Box/Point를 제안한다.
-4. SAM이 생성한 겹치거나 중복된 Mask는 해당 물체별 Crop·위치·비겹침 기하를 이용해 구분한다. 다른 사진으로 확장할 때 기존 DA3 상대 Camera/Depth와 3D 재투영, 공간 관계를 함께 본다. **식별 불가능한 Mask는 AMBIGUOUS로 남기고 임의 확정하지 않는다.** 반복 이미지 제거·생성 Inpainting은 기본 기능이 아니다.
+4. SAM이 생성한 겹치거나 중복된 Mask는 해당 물체별 Crop·위치·비겹침 기하를 이용해 구분한다. 다른 사진으로 확장할 때 MASt3R + COLMAP의 상대 Camera/Depth와 3D 재투영, 공간 관계를 함께 본다. **식별 불가능한 Mask는 AMBIGUOUS로 남기고 임의 확정하지 않는다.** 반복 이미지 제거·생성 Inpainting은 기본 기능이 아니다.
 5. 기본은 **Object 1개 : 독립 USDA Asset 1개**. 동일 제품인지 자동 판단해 Asset Group을 합치지 않는다. 사용자가 명시적으로 선택한 기존 Manifest/공유 Asset, 이전 불변 버전은 보존한다. Object Identity와 Asset Identity를 혼동하지 않는다.
 6. Robot, 고정 카메라, 사용자 실측·기존 Asset/Scene을 보존한다. `support`, 역할, 선택형 `spawn`, 공간 관계 및 Task 목적은 구조화된 결과가 지원하는 필드에만 넣는다. 현재 Scene 분석 Schema에 없는 Task 필드를 임의 추가하지 않는다.
 7. 출력은 실행에서 전달된 **현재 실제 `scene_analysis_schema()`**를 준수한다. 미관측 Object/구분 불가능한 대응/정보 부족은 명시 `needs`로 기록한다. Scheme나 Python에 사용자 자연어를 정규식으로 해석하는 보조 Parser를 새로 만들지 않는다.
@@ -86,3 +86,32 @@ Memo의 작업 목표(예: 빨간 블록을 왼쪽 컵에 넣는다)는 **Geomet
 5. 테스트: 임시 Codex 작업 폴더에 지침 Markdown이 복사됐는지, 그 SHA와 버전이 기록됐는지, 실제 실행 프롬프트가 명시적으로 해당 파일을 읽는지, 사용자 Memo가 지침 파일을 덮지 못하는지, 출력 Schema와 기존 Sandbox가 유지되는지 Fake CLI로 검증한다. 실제 원격 Codex 성공 여부는 별도로 증명한다.
 
 기존 정상 소스의 일부분을 중복한 새 Agent Framework나 독립 Runner는 만들지 않는다.
+
+## 8. 확정된 지지·접촉 관계 (2026-11-07)
+
+Memo의 치수와 설치 관계는 별개의 근거다. `scene_analysis_schema()`의 Object `support_relation`에 Support Object ID, `source`, 원문 인용 또는 영상 근거, `parallel`을 반환한다. `user_memo`는 해당 설치 관계의 인용이 필요하며, `visual_inference`는 제안 상태다. 치수 인용만으로 접촉을 확정하지 않는다. 신규 출력의 `geometry.support`는 null로 둔다. 기존의 별도 근거 없는 geometry.support는 PROPOSED로 읽는다.
+
+확정된 Support는 기존 `geometry_constraints.supports`/`fitting.supports`로 전달된다. 지지면 좌표의 XY/Yaw만 정합하고 실제 Collision/명시 Contact Anchor로 높이를 결정한다. World Roll/Pitch=0을 강제하지 않는다. 경사면과 명시 상대 회전, Robot Base Mount Offset을 보존한다. 접촉면이 불명확하면 진단을 반환하고 Offset을 발명하지 않는다. 설치 관계와 실측·q·FK를 훼손해 Camera/RGB 오차를 상쇄하거나, 허용 오차를 늘려 통과시키지 않는다. 새 자산 버전 제작 후에도 같은 관계를 적용한다. 이는 수치 배치 제약이며 동적 안정성이나 Grasp 물리 인증이 아니다.
+
+## 8. 사람이 읽는 저장 경로와 입력 역할 (2026-11-08)
+
+- 사용자가 입력한 Scene 이름을 실제 폴더 이름으로 사용한다. 충돌은 `-2`, `-3`; Project ID는 별도 내부 값이다. 경로 이름을 Identity/실측 근거로 사용하지 않는다.
+- `input/scene_photos/<원본 이름>`의 `scene_photo`가 초기 SAM/MASt3R/COLMAP 복원 입력이다. 동일 이름의 다른 내용은 `_2` 등으로 저장하고 SHA는 Evidence에 유지한다.
+- `input/model_references/<원본 이름>`의 `model_reference`는 Codex/Blender 외형 제작 문맥이다. Scene SfM, Camera Calibration, 정합 Loss에 넣지 않는다.
+- Side/Wrist Capture는 측정 q/Camera/시간/Mapping을 그대로 보존하는 Sensor/Real-Sim 관측이다. 초기 Scene SfM에 섞지 않는다. 별도 Sensor/Pair 정합 호출에서 사용한다.
+- 물리 카메라가 확인되지 않은 사진은 개별 view binding으로 구분한다. 사진 SHA를 물리 카메라 ID로 쓰거나 미확인 렌즈를 합치지 않는다.
+- Asset 경로는 `<asset_id>/v001`, `v002`이고 `content_sha256`는 별도 무결성 값이다. 같은 내용은 재사용하며 기존 버전의 bytes를 바꾸지 않는다.
+- Session/Capture/Codex/Blender/Checkpoint의 사용자 경로는 날짜·순번을 사용한다. Hash Cache는 Candidate의 `.cache`에 격리한다. 임시 원자적 파일, 내부 요청 ID, SHA 검사를 제거하지 않는다.
+- 불변 Package의 옛 내부 경로와 과거 진단 로그는 역사적 증거다. 새 Runtime이 구형 경로를 찾아 바꾸는 Converter나 Symlink를 만들지 않는다.
+
+
+## 10. 휴대폰 Scene → 센서 공동 정합과 개선 메모 (2026-11-08 후속)
+
+- Scene Photos만 초기 SAM/MASt3R/COLMAP의 정적 배치 복원에 넣는다. 복원된 각 optical W2C/K와 원 pixel affine으로 외부 Virtual Camera를 구성해 모든 등록 Photo를 동일 Scene에서 렌더·비교한다. 초기 Object Pose/Photo Camera는 추정값이며 기존 공동 Solver가 허용된 변수만 보정한다.
+- 분석 Schema의 `model_references`로 각 Object와 Model 이미지 ID를 실제 시각 근거로 연결한다. 파일명/순서/카테고리는 Identity가 아니다. 연결 불확실성은 AMBIGUOUS로 반환한다. Scene 관측과 Model Reference는 별도다. 모든 물체에 모든 Model 사진을 일괄 연결하지 않는다.
+- `robot_attachment`는 실제 scene_context.frames의 robot_link_ 뒤 URDF 링크 이름, 추정 T_link_object(미해결이면 null), 시각 근거를 전달한다. 외형 Mesh의 링크 부착이 optical mount/K 보정을 대신하지 않는다.
+- `capture_layouts`는 원 Evidence의 Capture scene_state_id와 SAME_LAYOUT/DIFFERENT_LAYOUT/AMBIGUOUS 및 실제 영상 근거를 반환한다. 다른/모호한 배치의 물체 Pose를 휴대폰 배치와 합치지 않는다. Robot q/FK 관측은 배치가 달라도 사용할 수 있다.
+- 센서는 초기 SfM에 넣지 않고 기존 Package Camera 또는 Photo metric 3D/센서 RGB 대응 PnP 및 공유 FK Hand-Eye로 초기화한다. 등록되지 않은 SfM Camera라는 이유로 Capture를 버리지 않는다. 대응·운동이 부족하면 정확한 Camera와 부족한 근거를 남긴다.
+- 휴대폰 렌더 정합 뒤 모든 유효 센서 관측을 추가하고 같은 fit_scene으로 공동 정합한다. Side의 한 고정 Pose, Wrist의 한 Link Mount, measured q와 실측을 보존한다. 센서 RGB/Mask만 있으면 depth/접촉력은 생성하지 않는다. Wrist를 우선하면서 Photo/Side View의 비퇴행도 검사한다.
+- Real/Sim의 Reconstruction Memo는 별도 source_identity에 연결된 개선 요청이다. 원본 Scene Memo를 덮어쓰지 않는다. 기존 Pair의 measured q, runtime Sim q/오차, 원본/새 렌더를 함께 보고 numeric/remodel/needs_data/complete를 판단한다. 충돌·질량·마찰의 관측 근거가 없으면 물리 검증 완료를 주장하지 않는다.
+- Pair의 구조적 수정도 같은 Source Revision에서 만든 Candidate와 새 Asset Version에 한정한다. 초기 Scene SfM이나 Scene Memo 분석을 다시 시작하지 않는다. 검토 전 자동 Promote/Export를 하지 않는다.

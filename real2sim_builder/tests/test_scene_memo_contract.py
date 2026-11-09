@@ -8,6 +8,23 @@ from real2sim_builder.authoring import modeling_tasks,run_codex_modeling,parse_s
 from test_modeling_handoff import semantic_reply
 
 
+def test_other_saved_photo_layouts_reach_codex_as_context_without_relabelling(tmp_path):
+    from PIL import Image
+    from real2sim_builder.observations import register_image
+    project=Project.create(tmp_path,'all saved inputs');rows=[]
+    for index,state in enumerate(('capture_layout','phone_reference')):
+        file=tmp_path/f'{index}.png';Image.new('RGB',(20,20),(index,0,0)).save(file)
+        rows.append(register_image(project,file,camera=f'camera{index}',camera_type='external',scene_state=state))
+    original=sha(project.root/'input/evidence.yaml');candidate=Candidate.create(project,'analysis')
+    modeling_tasks(candidate,{'scene_state_id':'capture_layout'}, {})
+    task=read(candidate.root/'modeling/tasks.json')
+    assert {r['image_id']for r in task['source_images']}=={r['id']for r in rows}
+    reference=next(r for r in task['source_images']if r['image_id']==rows[1]['id'])
+    assert reference['observation']['context_only']is True
+    assert reference['observation']['scene_state_id']=='phone_reference'
+    assert sha(project.root/'input/evidence.yaml')==original
+
+
 def test_memo_dimensions_flow_through_codex_plan_without_measurement_form(tmp_path):
     from real2sim_builder.authoring import geometry_specs
     from real2sim_builder.initialization import measured_geometry
@@ -27,7 +44,8 @@ def test_memo_dimensions_flow_through_codex_plan_without_measurement_form(tmp_pa
     scene=measured_geometry(c.scene,specs)
     assert next(o for o in scene['objects']if o['id']=='board')['dimensions']['value']==[.2,.15,.005]
     assert next(o for o in scene['objects']if o['id']=='cup')['dimensions']['value']is None
-    assert config['fitting']['supports']=={'cup':'board'}
+    assert config['fitting']['supports']['cup']['support']=='board'
+    assert config['fitting']['supports']['cup']['status']=='PROPOSED'
     job=modeling_tasks(c,config,{})
     task=read(c.root/'modeling/tasks.json')
     assert next(g for g in task['objects']if g['object_id']=='cup')['measurements']['dimensions_m']==[None,None,.1]
@@ -153,3 +171,89 @@ def test_codex_child_receives_only_runtime_and_existing_login_environment(tmp_pa
     fake=tmp_path/'check_env'
     fake.write_text('#!'+sys.executable+'\nimport os,sys,json\nfrom pathlib import Path\nassert "PRIVATE_UNUSED_TOKEN"not in os.environ and "AWS_SECRET_ACCESS_KEY"not in os.environ\nPath(sys.argv[sys.argv.index("--output-last-message")+1]).write_text('+repr(json.dumps(semantic_reply([],'one cup')))+')\n')
     fake.chmod(0o700);run_codex_modeling(c,executable=fake,timeout_s=10)
+
+
+def test_analysis_can_reference_existing_robot_support_but_not_unknown_or_self(tmp_path):
+    p=Project.create(tmp_path,'existing support');memo=save_scene_memo(p,'camera on robot')
+    answer=semantic_reply([{'id':'camera','prompt':'camera','role':'fixture'}],memo['text'])
+    answer['objects'][0]['support_relation']={'support':'robot_gripper_0','source':'visual_inference',
+        'evidence_quote':'','evidence':['visible bracket on existing gripper'],'parallel':False}
+    parsed=parse_scene_analysis(answer,memo,existing_objects=['robot_gripper_0'])
+    assert parsed['camera']['support']['support']=='robot_gripper_0'
+    assert parsed['camera']['support']['status']=='PROPOSED'
+    for bad in ('absent','camera'):
+        answer['objects'][0]['support_relation']['support']=bad
+        with pytest.raises(ValueError,match='Unknown/self support'):
+            parse_scene_analysis(answer,memo,existing_objects=['robot_gripper_0'])
+
+
+def test_model_references_reach_blender_handoff_without_geometry_observations(tmp_path):
+    from PIL import Image
+    from real2sim_builder.authoring import modeling_groups
+    from real2sim_builder.observations import register_image,input_images
+    p=Project.create(tmp_path/'scenes','model reference');file=tmp_path/'wrist_camera_img1.jpg'
+    Image.new('RGB',(40,30),'blue').save(file)
+    row=register_image(p,file,camera='unassigned_view_001',camera_type='external',scene_state='reference',role='model_reference')
+    c=Candidate.create(p,'same');groups,_=modeling_groups(c,{'objects':{'camera':{'prompt':'camera',
+        'model_references':[{'image_id':row['id'],'evidence':'same camera housing visible','status':'LINKED'}]}}},{})
+    reference=groups['camera']['references'][0]
+    assert reference['image_id']==row['id']and reference['role']=='model_reference'
+    assert reference['depth_batches']==[]and groups['camera']['geometry_observations']==[]
+    assert input_images(p,'reference')[0]==[]
+
+
+def test_model_reference_links_are_object_scoped_and_ambiguity_does_not_become_identity(tmp_path):
+    from PIL import Image
+    from real2sim_builder.authoring import modeling_groups
+    from real2sim_builder.observations import register_image
+    p=Project.create(tmp_path/'scenes','links');file=tmp_path/'unrelated_name.jpg'
+    Image.new('RGB',(40,30),'blue').save(file)
+    row=register_image(p,file,camera='ref',camera_type='external',scene_state='refs',role='model_reference')
+    specs={'camera':{'prompt':'camera','model_references':[{'image_id':row['id'],'evidence':'visible housing','status':'LINKED'}]},
+           'cup':{'prompt':'cup','model_references':[]}}
+    groups,_=modeling_groups(Candidate.create(p,'same'),{'objects':specs},{})
+    assert [r['image_id']for r in groups['camera']['references']]==[row['id']]
+    assert groups['cup']['references']==[]
+    specs['camera']['model_references'][0]['image_id']='missing'
+    with pytest.raises(ValueError,match='reference'):modeling_groups(Candidate(p,'same'),{'objects':specs},{})
+
+
+def test_changed_trusted_guidance_invalidates_analysis_not_existing_asset_bytes(tmp_path,monkeypatch):
+    from real2sim_builder import authoring
+    p=Project.create(tmp_path,'policy');memo=save_scene_memo(p,'camera')
+    c=Candidate.create(p,'same');modeling_tasks(c,{},{});fake=tmp_path/'codex'
+    fake_cli(fake,'camera',json.dumps(semantic_reply([{'id':'camera','prompt':'camera','role':'fixture'}],'camera')))
+    run_codex_modeling(c,executable=fake,timeout_s=10)
+    config=read(p.root/'input/reconstruction.yaml')
+    assert not authoring.analysis_required(config,memo['sha256'],project=p)
+    original=authoring._codex_guidance
+    def changed():
+        content,record=original();return content+b'\nnew policy',dict(record,sha256='f'*64)
+    monkeypatch.setattr(authoring,'_codex_guidance',changed)
+    assert authoring.analysis_required(config,memo['sha256'],project=p)
+
+
+def test_refit_without_a_saved_plan_analyzes_source_ids_into_candidate_only(tmp_path):
+    from test_builder_export import legacy_scene
+    p=Project.create(tmp_path/'scenes','old package');p.save_scene(legacy_scene());c=Candidate.create(p,'refined')
+    config={'refit_mode':True,'scene_state_id':'layout','reconstruction_memo':{'text':'gripper too small'}}
+    write(c.root/'reconstruction-config.yaml',config)
+    task=modeling_tasks(c,config,{})
+    assert task['status']=='WAITING_FOR_CODEX_ANALYSIS'
+    fake=tmp_path/'codex';fake_cli(fake,'',json.dumps(semantic_reply([{'id':'block','prompt':'red block','role':'manipulable_object'}])))
+    result=run_codex_modeling(c,executable=fake,timeout_s=10)
+    assert read(result['configuration'])['objects']['block']['prompt']=='red block'
+    assert not(p.root/'input/reconstruction.yaml').exists()
+    assert c.scene==p.scene
+
+
+def test_runtime_reuse_copies_only_saved_installation_settings_and_rejects_ambiguity(tmp_path):
+    from real2sim_builder.authoring import runtime_configuration
+    first=Project.create(tmp_path/'scenes','configured');second=Project.create(tmp_path/'scenes','old package')
+    saved={'sam':{'python':'installed python','model':'installed model','private_token':'must not copy'},'objects':{'wrong':{'prompt':'cup'}}}
+    write(first.root/'input/reconstruction.yaml',saved)
+    result=runtime_configuration(second,{})
+    assert result['sam']=={'python':'installed python','model':'installed model'}and 'objects'not in result
+    assert runtime_configuration(second,{'sam':{'model':'explicit'}})['sam']=={'model':'explicit'}
+    third=Project.create(tmp_path/'scenes','different installation');write(third.root/'input/reconstruction.yaml',{'sam':{'python':'other python','model':'other model'}})
+    assert 'sam'not in runtime_configuration(second,{})

@@ -1,6 +1,7 @@
+from scene_contract.naming import numbered_path
 """Scene/engine selection, supervised Leader control and measured Follower→Sim views."""
 from pathlib import Path
-import time,uuid,yaml
+import time,yaml
 from PyQt6.QtGui import QImage,QPixmap
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit
@@ -36,14 +37,24 @@ class RealSimPage(QWidget):
         box.addWidget(QLabel('이번 실행의 Paired Capture · Real Side / Sim Side / Real Wrist / Sim Wrist'))
         self.run_folder=QLabel();self.run_folder.setWordWrap(True);self.run_folder.hide();box.addWidget(self.run_folder)
         self.snapshot_table=SnapshotTable(paired=True,parent=self);self.snapshot_table.error.connect(self.show_error);box.addWidget(self.snapshot_table,1)
-        self.refit_button=QPushButton('촬영 자료로 Scene 재정합');self.refit_button.clicked.connect(self.open_refinement);box.addWidget(self.refit_button)
+        refinement=QHBoxLayout();box.addLayout(refinement)
+        self.refinement_memo=QPlainTextEdit();self.refinement_memo.setFixedHeight(64)
+        self.memo_source=None
+        self.refinement_memo.setPlaceholderText('Reconstruction Memo · 그리퍼 크기, 물체 위치, 가림, 충돌 등 개선할 점. 원본 Scene 메모는 유지됩니다.')
+        refinement.addWidget(self.refinement_memo,1)
+        self.refit_button=QPushButton('촬영 자료로 Scene 재정합');self.refit_button.clicked.connect(self.open_refinement);refinement.addWidget(self.refit_button)
         self.log=QPlainTextEdit();self.log.hide();box.addWidget(self.log);self.buttons()
         self.catalog_signature=None;self.catalog_timer=QTimer(self);self.catalog_timer.setInterval(1500);self.catalog_timer.timeout.connect(self.refresh_scenes);self.catalog_timer.start()
         self.refresh_scenes()
     def open_refinement(self):
         if self.active()or not self.project:return
+        try:
+            from real2sim_builder.evidence import save_reconstruction_memo
+            from real2sim_builder.project import Project
+            save_reconstruction_memo(Project(self.project['project']),self.refinement_memo.toPlainText(),self.scene_combo.currentData()['scene'])
+        except Exception as error:self.show_error(str(error));return
         from real2sim_builder.ui_reconstruction import ReconstructionDialog
-        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True)
+        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True,source_scene=self.scene_combo.currentData()['scene'],capture_ids=[r['id']for r in self.rows])
         dialog.exec()
     @property
     def rows(self):return self.snapshot_table.rows
@@ -100,6 +111,13 @@ class RealSimPage(QWidget):
             if not self.scene_combo.currentData():self.capture_hint.setText('등록된 실행 Scene이 없습니다. Builder에서 Scene Package를 준비하세요.')
         else:
             self.template=result['recipe'];self.project={'project':result['project'],'name':result['name']}
+            from real2sim_builder.files import read
+            path=Path(result['project'])/'working/reconstruction_memo.json'
+            record=read(path)if path.is_file()else{}
+            selected=Path(self.scene_combo.currentData()['scene']).parent
+            if selected.name!=Path(record.get('source_package','')).name:record={}
+            if self.memo_source!=str(selected):
+                self.refinement_memo.setPlainText(record.get('text',''));self.memo_source=str(selected)
             self.capture_hint.setText('연결할 준비가 되었습니다.');self.capture_hint.show();self.operation_message.hide();self.buttons()
     def connect_session(self):
         try:
@@ -108,7 +126,7 @@ class RealSimPage(QWidget):
             if self.template is None:raise ValueError('실행 Scene을 선택하세요.')
             import copy
             data=copy.deepcopy(self.template);self.request_control='leader_device_profile'in data['inputs']
-            key='real_sim_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/'real_sim';root.mkdir(parents=True,exist_ok=True)
+            key=numbered_path(self.workspace/'real_sim','real_sim_'+time.strftime('%Y%m%d'),digits=2).name;root=self.workspace/'real_sim';root.mkdir(parents=True,exist_ok=True)
             data['output']={'directory':str(root/key)};path=root/(key+'.yaml');path.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
             self.last_progress={};self.operation_message.hide();self.recipe_path=path;self.client.connect_session(path);self.snapshot_table.reset();self.run_folder.hide()
             self.state.setText('CONNECTING · Scene/Follower/Camera 준비 중');self.buttons()

@@ -1,5 +1,6 @@
+from scene_contract.naming import numbered_path
 """Scene material Capture with explicit start/stop Leader Teleoperation."""
-import json,math,uuid,time
+import json,math,time
 from pathlib import Path
 import yaml
 from PyQt6.QtCore import Qt
@@ -49,7 +50,7 @@ class CapturePage(QWidget):
         self.teleop_hint=QLabel();self.teleop_hint.setWordWrap(True);self.teleop_hint.setObjectName('mutedLabel');left.addWidget(self.teleop_hint);self.teleop_hint.hide()
         self.operation_message=QLabel();self.operation_message.setWordWrap(True);left.addWidget(self.operation_message);self.operation_message.hide()
         from .snapshot_table import SnapshotTable
-        left.addWidget(QLabel('이번 실행의 Snapshot · 더블 클릭으로 상세 보기'))
+        left.addWidget(QLabel('저장된 Snapshot · 더블 클릭으로 상세 보기'))
         self.snapshot_table=SnapshotTable(parent=self);self.snapshot_table.error.connect(self.show_error);left.addWidget(self.snapshot_table,2)
         self.settings_button=QPushButton('장치 설정');self.settings_button.clicked.connect(self.edit_settings);project_row.addWidget(self.settings_button)
         self.device_state=QLabel('저장 구성 선택 · 자동 연결 없음');self.device_state.setWordWrap(True);left.insertWidget(0,self.device_state)
@@ -143,6 +144,8 @@ class CapturePage(QWidget):
             except Exception as error:self.settings.saved_recipe=None;self.show_error(str(error))
         elif changed:self.settings.saved_recipe=None;self.device_state.setText('장치 설정에서 로봇/카메라를 선택하세요')
         if changed:self.snapshot_table.reset()
+        for row in data.get('snapshots',[]):self.snapshot_table.append(row)
+        if data.get('snapshot_errors'):self.show_error('일부 캡처를 불러오지 못했습니다:\n'+'\n'.join(data['snapshot_errors']))
         self.project_combo.blockSignals(True)
         if self.project_combo.findData(data['project'])<0:self.project_combo.addItem(data['name'],data['project'])
         self.project_combo.setCurrentIndex(self.project_combo.findData(data['project']));self.project_combo.blockSignals(False);self.project_path.setText(Path(data['project']).name);self.project_path.setToolTip(data['project'])
@@ -152,9 +155,9 @@ class CapturePage(QWidget):
             if any(p is not self and p.active()for p in getattr(self.window(),'sessions',{}).values())or any(p.active()for p in getattr(self.window(),'workflows',{}).values()):raise ValueError('다른 Worker를 먼저 종료하세요')
             data=self.settings.recipe();data['stage']='scene_capture'if data['stage']=='scene_capture'else'capture_session';data['inputs']['project']=self.project['project'];data.pop('engine',None)
             self.last_progress={};self.operation_message.clear();self.operation_message.hide();self.teleop_hint.hide()
-            key='session_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6];root=self.workspace/'capture';root.mkdir(exist_ok=True)
+            key=numbered_path(self.workspace/'capture','session_'+time.strftime('%Y%m%d'),digits=2).name;root=self.workspace/'capture';root.mkdir(exist_ok=True)
             data['output']={'directory':str(root/key)};path=root/(key+'.yaml');path.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
-            self.client.connect_session(path);self.snapshot_table.reset()
+            self.client.connect_session(path)
             group='observations'if data['stage']=='scene_capture'else'captures';folder=Path(self.project['project'])/'input'/group/key
             self.session_label.setText('이번 실행 저장 폴더\n'+str(folder));self.session_label.setToolTip(str(folder))
             self.buttons(False);self.state.setText('입력 검사 / CONNECTING')
@@ -202,7 +205,7 @@ class CapturePage(QWidget):
     def show_error(self,message):self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
         if self.finishing and self.settings.calibration_client.active():self.buttons(False);return
-        if self.finishing:self.session_label.setText('종료 · '+str(len(self.rows))+' Snapshot\n'+self.session_label.toolTip())
+        if self.finishing:self.session_label.setText('종료 · 저장된 Snapshot '+str(len(self.rows))+'개 표시\n'+self.session_label.toolTip())
         self.finishing=False;self.state.setText('연결 종료'if status in('completed','cancelled')else'연결 상태 확인 필요');self.last_progress={};self.buttons(False)
         self.teleop_hint.hide();self.capture_hint.hide();self.device_state.setText(self.state.text())
         if status in('completed','cancelled'):self.operation_message.clear();self.operation_message.hide()

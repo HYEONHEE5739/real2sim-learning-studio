@@ -4,6 +4,7 @@ Uses trimmed observed-to-model correspondences as in RoboSkills track.py, but
 estimates one shared World pose rather than a per-frame motion track. Algorithms
 are implemented here using existing NumPy/SciPy; no external agent framework.
 """
+from scene_contract.naming import numbered_path
 import copy
 import numpy as np
 from scipy.spatial import cKDTree
@@ -53,25 +54,27 @@ def surface_points(obj,scene,root,count=2000):
     return selected[:,0]*(1-u[:,None])+selected[:,1]*(u*(1-v))[:,None]+selected[:,2]*(u*v)[:,None]
 
 
-def initial_poses(scene,obj,points,support_id=None,*,upright=False):
+def initial_poses(scene,obj,points,support_id=None,*,upright=False,root=None):
     """Keep symmetric alternatives; horizontal support constrains roll/pitch/Z."""
     from ..scene import world_pose
     center=(np.percentile(points,2,axis=0)+np.percentile(points,98,axis=0))/2
     seeds=[]
     if obj['pose']['value']is not None:seeds.append(world_pose(scene,obj))
+    relation=None
     if support_id:
-        support=next(o for o in scene['objects']if o['id']==support_id)
-        base=world_pose(scene,support)
-        if not np.allclose(base[:3,2],[0,0,1],atol=1e-6):raise ValueError('A horizontal measured support is required for upright initialization')
-        center[2]=base[2,3]+support['dimensions']['value'][2]/2+obj['dimensions']['value'][2]/2
-        axes=np.eye(3)
-    elif upright:axes=np.eye(3)
-    else:
+        from ..scene import support_relations,support_binding,supported_pose
+        relation=support_relations(scene,{obj['id']:support_id})[obj['id']]
+        if relation['status']=='CONFIRMED':
+            binding=support_binding(scene,obj['id'],relation,root);axes=binding['basis']@binding['relative_rotation']
+        else:support_id=None
+    if not support_id and upright:axes=np.eye(3)
+    elif not support_id:
         _,_,vt=np.linalg.svd(points-points.mean(0),full_matrices=False);axes=vt.T
         if np.linalg.det(axes)<0:axes[:,-1]*=-1
     for yaw in(0,np.pi/2,np.pi,3*np.pi/2):
-        pose=np.eye(4);pose[:3,:3]=axes@Rotation.from_euler('z',yaw).as_matrix();pose[:3,3]=center
+        pose=np.eye(4);pose[:3,:3]=((binding['basis']@Rotation.from_euler('z',yaw).as_matrix()@binding['relative_rotation'])if support_id else axes@Rotation.from_euler('z',yaw).as_matrix());pose[:3,3]=center
         seeds.append(pose)
+    if support_id and relation['status']=='CONFIRMED':seeds=[supported_pose(scene,obj['id'],relation,p,root)for p in seeds]
     return seeds
 
 
@@ -117,8 +120,18 @@ def fit_clouds(project,scene,options=None):
     from ..scene import local_path,world_pose
     options=options or{};result=copy.deepcopy(scene);rows=cloud_inputs(project,scene);reports={};needs=[]
     selected=options.get('objects')
-    for obj in scene['objects']:
-        name=obj['id'];active=[r for r in rows if r['object_id']==name and r['split']=='train']
+    from ..scene import support_relations
+    relations=support_relations(result,options.get('supports'))
+    ordered=[]
+    def visit(name):
+        if name in ordered:return
+        if name in relations:visit(relations[name]['support'])
+        ordered.append(name)
+    for obj in scene['objects']:visit(obj['id'])
+    for name in ordered:
+        obj=next((o for o in result['objects']if o['id']==name),None)
+        if obj is None:continue
+        active=[r for r in rows if r['object_id']==name and r['split']=='train']
         if selected and name not in selected:continue
         if not active or obj['pose']['provenance']in('measured','calibrated')or obj.get('link')or obj['role']=='reference_robot':continue
         if obj['dimensions']['provenance']not in('measured','calibrated')and not obj.get('object_asset'):
@@ -127,28 +140,38 @@ def fit_clouds(project,scene,options=None):
         for row in active:
             with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:points.append(data['points_world_m'])
         points=np.concatenate(points)
+        if not len(points):continue  # RGB-only sensor rows carry no metric initialization evidence.
         if len(points)>20000:points=points[np.linspace(0,len(points)-1,20000,dtype=int)]
         model=surface_points(obj,scene,project.root)
-        upright=bool(options.get('supports',{}).get(name))or any(r.get('same_support_plane')and name in r['objects']for r in scene.get('geometry_constraints',{}).get('distances',[]))
-        report=trimmed_icp(model,points,initial_poses(scene,obj,points,options.get('supports',{}).get(name),upright=upright),
-            trim=options.get('trim',.8),iterations=options.get('iterations',30),checkpoint=project.checkpoint,upright=upright)
+        from ..scene import support_relations,supported_pose
+        relations=support_relations(result,options.get('supports'));relation=relations.get(name)
+        support=relation if relation and relation['status']=='CONFIRMED'else None
+        if support and next(o for o in result['objects']if o['id']==support['support'])['pose']['value']is None:
+            needs.append(name+': support '+support['support']+' has no metric pose observations');continue
+        project_pose=(lambda pose:supported_pose(result,name,support,pose,project.root))if support else None
+        # A confirmed same-support pair fixes relative roll/pitch even when no
+        # absolute support Object/plane was recorded in the historical Scene.
+        pair_plane=any(name in r['objects']and r.get('same_support_plane')for r in result.get('geometry_constraints',{}).get('distances',[]))
+        if project_pose is None and pair_plane and obj['pose']['value']is not None:
+            reference=world_pose(result,obj)[:3,:3]
+            def project_pose(pose):
+                pose=np.asarray(pose).copy();relative=reference.T@pose[:3,:3]
+                pose[:3,:3]=reference@Rotation.from_euler('z',np.arctan2(relative[1,0],relative[0,0])).as_matrix()
+                return pose
+        report=trimmed_icp(model,points,initial_poses(result,obj,points,support,root=project.root),
+            trim=options.get('trim',.8),iterations=options.get('iterations',30),checkpoint=project.checkpoint,project_pose=project_pose)
         reports[name]=report
         if report['status']=='ESTIMATED':
-            pose=np.asarray(report['T_world_object']);support=options.get('supports',{}).get(name)
-            if support:
-                # Preserve the explicitly declared horizontal support after ICP;
-                # do not accept an RGB fit that tips the table/object to match.
-                anchor=next(o for o in scene['objects']if o['id']==support);base=world_pose(scene,anchor)
-                yaw=np.arctan2(pose[1,0],pose[0,0]);pose[:3,:3]=Rotation.from_euler('z',yaw).as_matrix()
-                pose[2,3]=base[2,3]+anchor['dimensions']['value'][2]/2+obj['dimensions']['value'][2]/2
-                report['support_projection_applied']=True
-            result=assign_pose(result,name,pose)
+            result=assign_pose(result,name,np.asarray(report['T_world_object']))
+            report['support_projection_applied']=bool(support)
         else:needs.extend(name+': '+reason for reason in report['needs'])
+    from ..initialization import project_supports
+    result,physical=project_supports(result,options.get('supports'),project.root,allow_incomplete=True)
     constraints=None
-    if scene.get('geometry_constraints'):
+    if result.get('geometry_constraints')and physical['status']!='NEEDS_MORE_DATA':
         from ..initialization import apply_geometry_constraints
-        result,constraints=apply_geometry_constraints(result,scene['geometry_constraints'])
-    return result,{'status':'ESTIMATED'if reports and not needs else'NEEDS_MORE_DATA','objects':reports,'needs':needs,'measured_constraints':constraints,
+        result,constraints=apply_geometry_constraints(result,result['geometry_constraints'],root=project.root)
+    return result,{'status':'ESTIMATED'if reports and not needs else'NEEDS_MORE_DATA','objects':reports,'needs':needs,'measured_constraints':constraints,'physical_constraints':physical,
                   'fit_views':sorted({r['image_id']for r in rows if r['split']=='train'}),'physical_verified':False}
 
 
@@ -173,15 +196,18 @@ def fit_scene(project,scene,folder,options=None):
     from ..scene import local_path,world_pose,validate,camera_calibration_signature
     from ..observations import registered_images,camera_type
     from ..capture import observation_scene
-    from ..rendering import Renderer
+    from ..rendering import Renderer,render_scene
     from ..editing import preserve
     from ..files import write,sha
     options=dict(options or{});folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    from ..initialization import project_supports
+    try:scene,physical=project_supports(scene,options.get('supports'),project.root)
+    except ValueError as error:return scene,{'status':'CONSTRAINT_CONFLICT'if 'CONSTRAINT_CONFLICT'in str(error)else'NEEDS_MORE_DATA','needs':[str(error)],'physical_verified':False}
     rows=cloud_inputs(project,scene);images,_,needs=registered_images(project,scene=scene)
     by_id={i['id']:i for i in images};rows=[r for r in rows if r['image_id']in by_id]
     training=[r for r in rows if r['split']=='train']
     report={'status':'NEEDS_MORE_DATA','engine':options.get('engine','mujoco'),'physics_steps':0,'physical_verified':False,'needs':needs,
-        'scope':'native multiview fitting; not independent calibration/Task approval','holdout_used_for_optimization':False}
+        'scope':'native multiview fitting; not independent calibration/Task approval','holdout_used_for_optimization':False,'physical_constraints':physical}
     if not training:return scene,{**report,'needs':['Metric training observations required']}
     max_iterations=int(options.get('max_iterations',4));budget=int(options.get('max_evaluations',120))
     max_seconds=float(options.get('max_seconds',900))
@@ -207,26 +233,26 @@ def fit_scene(project,scene,folder,options=None):
             with np.load(path,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
             loaded[key,name]=raw
             if name not in models:models[name]=cKDTree(surface_points(next(o for o in scene['objects']if o['id']==name),scene,project.root))
-    first=observation_scene(scene,by_id[train_ids[0]],project.root)
+    first=observation_scene(scene,by_id[train_ids[0]],project.root,complete=False)
     strategy_rows=[]
     from ..cameras import camera_pixels,optical_rays
     for row in training:
-        image=by_id[row['image_id']];posed=observation_scene(scene,image,project.root)
+        image=by_id[row['image_id']];posed=observation_scene(scene,image,project.root,complete=False)
         cam=next(c for c in posed['cameras']if c['id']==image['camera'])
         original_cam=next(c for c in scene['cameras']if c['id']==image['camera'])
         _,optical=camera_pixels(original_cam,image)
         physical_pose=world_pose(posed,cam).copy();physical_pose[:3,:3]=physical_pose[:3,:3]@optical
         raw=loaded[row['image_id'],row['object_id']];points=raw['points_world_m']
-        singular=np.linalg.svd(points-points.mean(0),compute_uv=False)
-        rank=int(np.count_nonzero(singular>max(float(singular[0])*1e-3,1e-6)))
+        singular=np.linalg.svd(points-points.mean(0),compute_uv=False)if len(points)else np.array([])
+        rank=int(np.count_nonzero(singular>max(float(singular[0])*1e-3,1e-6)))if len(singular)else 0
         strategy_rows.append({**row,'camera':image['camera'],'camera_type':camera_type(image),
             'camera_pose':physical_pose.tolist(),'measured_q':image.get('q_measured')is not None,
             # The render loss reprojects pixel rays with the current K/pose.
             # Optical-only archives are usable as fixed World geometry, but
             # cannot supply that residual when the Camera changes.
-            'has_raw_depth':'uv_original'in raw and 'depth_relative'in raw,'cloud_rank':rank})
-    geometry_plan=select_parameters(scene,strategy_rows,options,stage='geometry')[3]
-    appearance_plan=select_parameters(scene,strategy_rows,options,stage='appearance')[3]
+            'has_raw_depth':'uv_original'in raw and 'depth_relative'in raw,'has_image_observation':row.get('render_only',False),'cloud_rank':rank})
+    geometry_plan=select_parameters(scene,strategy_rows,options,stage='geometry',root=project.root)[3]
+    appearance_plan=select_parameters(scene,strategy_rows,options,stage='appearance',root=project.root)[3]
     report['observability']={'holdout_used':False,'geometry':geometry_plan,'appearance':appearance_plan,'needs':geometry_plan['needs']}
     report['needs']=list(dict.fromkeys([*report['needs'],*geometry_plan['needs']]))
     has_appearance=bool(appearance_plan['active']);geometry_done=False;previous_stage=None
@@ -239,7 +265,7 @@ def fit_scene(project,scene,folder,options=None):
         def measure(trial,scales,keys):
             metrics=[]
             for key in keys:
-                project.checkpoint();image=by_id[key];posed=observation_scene(trial,image,project.root)
+                project.checkpoint();image=by_id[key];posed=observation_scene(trial,image,project.root,complete=False)
                 renderer.update_scene(posed);cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
                 rgb=renderer.rgb(image['camera']);target=targets[key];real=target['rgb']
                 if rgb.shape!=real.shape:raise ValueError('Native/Real RGB resolution differs')
@@ -271,7 +297,7 @@ def fit_scene(project,scene,folder,options=None):
                         tree=cKDTree(surface_points(obj,posed,project.root))
                     distances=tree.query((world-pose[:3,3])@pose[:3,:3])[0]
                     trimmed=np.sort(distances)[:max(1,int(len(distances)*.8))]
-                    metric_loss=float(np.minimum(trimmed/sigma,3).mean())
+                    metric_loss=float(np.minimum(trimmed/sigma,3).mean())if len(trimmed)else 0.
                     object_metrics.append({'object_id':name,'mask':missing+extra,'edge':edge_loss,'depth':depth_loss,'metric':metric_loss,
                         'iou':float((mask&rendered).sum()/max(1,(mask|rendered).sum()))})
                 rgb_loss=float(np.minimum(abs(rgb.astype(float)-real.astype(float))[union]/255.,.3).mean())if union.any()else float(np.minimum(abs(rgb.astype(float)-real.astype(float))/255.,.3).mean())
@@ -288,10 +314,10 @@ def fit_scene(project,scene,folder,options=None):
                 if time.monotonic()-started>=max_seconds:stop='max_seconds';break
                 project.checkpoint();seed=copy.deepcopy(best);seed_scales=dict(best_scales)
                 stage='appearance'if has_appearance and(geometry_done or iteration>=(max_iterations+1)//2)else'geometry'
-                blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage)
+                blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage,root=project.root)
                 if not len(indices)and stage=='geometry'and has_appearance:
                     geometry_done=True;stage='appearance'
-                    blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage)
+                    blocks,radius,indices,strategy=select_parameters(seed,strategy_rows,options,stage=stage,root=project.root)
                 if not len(indices):stop='unobservable'if report['observability']['needs']else'no_variables';break
                 if stage!=previous_stage:idle=0;previous_stage=stage
                 selected_blocks=[b for b in blocks if any(b[3]<=i<b[3]+b[4]for i in indices)]
@@ -300,9 +326,9 @@ def fit_scene(project,scene,folder,options=None):
                     nonlocal evaluations,best_loss,best,best_scales,best_metrics
                     if time.monotonic()-started>=max_seconds:raise TimeBudget()
                     project.checkpoint();delta=np.zeros(len(radius));delta[indices]=unit*radius[indices]
-                    trial,scales=apply_parameters(seed,selected_blocks,delta);evaluations+=1
+                    trial,scales=apply_parameters(seed,selected_blocks,delta,root=project.root);evaluations+=1
                     scales={key:seed_scales.get(key,1.)*scales.get(key,1.)for key in seed_scales.keys()|scales.keys()}
-                    preserve(scene,trial);validate(trial,project.root,complete=True)
+                    preserve(scene,trial);validate(render_scene(trial),project.root,complete=True)
                     metrics=measure(trial,scales,train_ids);score=summarize(metrics)
                     penalty=weights['prior']*float(np.mean(unit**2))
                     acceptable=all(new['loss']<=old['loss']+regression for new,old in zip(metrics,baseline))
@@ -318,7 +344,7 @@ def fit_scene(project,scene,folder,options=None):
                 # Publish a self-consistent completed iteration, while keeping
                 # raw rays and cumulative scale factors for the ongoing solve.
                 saved=reproject_observations(project,best,best_scales,folder/'observations')
-                preserve(scene,saved);validate(saved,project.root,complete=True)
+                preserve(scene,saved);validate(render_scene(saved),project.root,complete=True)
                 write(folder/'best-scene.yaml',saved);write(folder/'iterations.json',history)
                 if evaluations>=budget:stop='max_evaluations';break
                 if idle>=patience or(solution.success and improvement<minimum):
@@ -328,7 +354,7 @@ def fit_scene(project,scene,folder,options=None):
             stop='max_seconds'
         except (InterruptedError,ValueError,RuntimeError)as error:
             best=reproject_observations(project,best,best_scales,folder/'observations')
-            preserve(scene,best);validate(best,project.root,complete=True)
+            preserve(scene,best);validate(render_scene(best),project.root,complete=True)
             write(folder/'best-scene.yaml',best)
             error.best_scene=best  # Caller can retain the accepted Candidate on Stop.
             report.update(status='STOPPED'if isinstance(error,InterruptedError)else'FAILED',error=str(error),stop_reason='user_stop'if isinstance(error,InterruptedError)else'invalid_scene_or_render_failure')
@@ -337,7 +363,7 @@ def fit_scene(project,scene,folder,options=None):
     # Refresh derived World points and camera dependency hashes once, after the
     # final accepted state. The raw observations and source frames are immutable.
     best=reproject_observations(project,best,best_scales,folder/'observations')
-    preserve(scene,best);validate(best,project.root,complete=True)
+    preserve(scene,best);validate(render_scene(best),project.root,complete=True)
     improved=best_loss<summarize(baseline)-minimum
     exhausted=stop in('max_iterations','max_evaluations','max_seconds')
     status='UNRESOLVED'if stop=='unobservable'else'BUDGET_EXHAUSTED'if exhausted else'OPTIMIZED_UNVERIFIED'if improved else'NOT_IMPROVED'
@@ -348,6 +374,8 @@ def fit_scene(project,scene,folder,options=None):
                 'scope':'whole fit call; objective evaluations; baseline and final evaluation reported separately'},
         best_scene=str(folder/'best-scene.yaml'),converged=stop in('converged','no_improvement'),
         metric_constraints='measured dimensions/poses locked; explicit support projection',robot_constraints='fixed measured q/FK; one shared mount per physical camera')
+    from ..scene import support_metrics
+    report['physical_constraints']=support_metrics(best,root=project.root)
     write(folder/'best-scene.yaml',best);write(folder/'report.json',report)
     return best,report
 
@@ -361,7 +389,7 @@ def reproject_observations(project,scene,scales,folder):
     import uuid
     folder=Path(folder)
     if not folder.resolve().is_relative_to(project.root):folder=project.root/'scratch/render-fit-observations'
-    folder=folder/uuid.uuid4().hex;folder.mkdir(parents=True,exist_ok=True);result=copy.deepcopy(scene)
+    folder=numbered_path(folder,'iteration');folder.mkdir(parents=True,exist_ok=True);result=copy.deepcopy(scene)
     from ..cameras import optical_rays
     images={i.get('id'):i for i in project.evidence['images']}
     for index,row in enumerate(result.get('reconstruction_observations',{}).get('clouds',[])):
@@ -370,7 +398,10 @@ def reproject_observations(project,scene,scales,folder):
         source=local_path(project.root,row['path'])
         if sha(source)!=row['sha256']:raise ValueError('Source optical observation changed')
         with np.load(source,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
-        if 'points_camera_relative'not in raw:continue
+        if 'points_camera_relative'not in raw:
+            if row.get('render_only')and row.get('dependencies'):
+                row['dependencies']['camera_signature']=camera_calibration_signature(result,next(c for c in result['cameras']if c['id']==image['camera']))
+            continue
         posed=observation_scene(result,image,project.root,complete=False);cam=next(c for c in posed['cameras']if c['id']==image['camera'])
         points=raw['points_camera_relative']
         if 'uv_original'in raw:points=optical_rays(cam,raw['uv_original'])*raw['depth_relative'][:,None]
@@ -392,7 +423,7 @@ def alignment_metrics(project,scene,folder,options=None):
         return run_job(project,scene,folder,options,'compare')
     from PIL import Image,ImageOps
     from ..validation import compare,mask_metrics,camera_quality
-    from ..rendering import Renderer
+    from ..rendering import Renderer,render_scene
     from ..capture import observation_scene
     from ..observations import registered_images,camera_type
     from ..scene import local_path,world_pose,validate
@@ -403,9 +434,8 @@ def alignment_metrics(project,scene,folder,options=None):
     with ExitStack()as stack:
         for image in images:
             active=[r for r in rows if r['image_id']==image['id']]
-            if not active:continue
             project.checkpoint();posed=observation_scene(scene,image,project.root,complete=False)
-            try:validate(posed,project.root,complete=True)
+            try:validate(render_scene(posed),project.root,complete=True)
             except ValueError as error:needs.append(str(error));continue
             destination=folder/'previews'/image['id']
             if renderer is None:
@@ -423,7 +453,7 @@ def alignment_metrics(project,scene,folder,options=None):
                     distance=cKDTree(samples).query(data['points_world_m'])[0]
                 trimmed=np.sort(distance)[:max(1,int(.8*len(distance)))]
                 objects.append({'object_id':name,'mask_kind':row.get('mask_kind','visible_fragment'),**diagnostic,
-                    'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2))),
+                    'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2)))if len(trimmed)else None,
                     'independent_3d_position_error_m':None,'rotation_error_rad':None,
                     'scope':'derived depth surface residual; not independent measured pose accuracy'})
             result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects})
@@ -496,7 +526,7 @@ def compare_backends(project,scene,folder,options=None):
     return candidates[selected],report
 
 
-def trimmed_icp(model,observed,initial_poses,*,trim=.8,iterations=30,checkpoint=lambda:None,upright=False):
+def trimmed_icp(model,observed,initial_poses,*,trim=.8,iterations=30,checkpoint=lambda:None,upright=False,project_pose=None):
     """Rigid model-to-World multi-start fit with explicit degeneracy reporting."""
     model=np.asarray(model,float);observed=np.asarray(observed,float)
     for points in(model,observed):
@@ -508,7 +538,7 @@ def trimmed_icp(model,observed,initial_poses,*,trim=.8,iterations=30,checkpoint=
         return {'status':'NEEDS_MORE_DATA','needs':['Visible cloud is degenerate; obtain another surface/view'],'singular_values':singular.tolist()}
     tree=cKDTree(model);solutions=[];keep_count=max(3,int(len(observed)*trim))
     for initial in initial_poses:
-        pose=transform(initial).copy();valid=True
+        pose=transform(initial).copy();pose=project_pose(pose)if project_pose else pose;valid=True
         for iteration in range(iterations):
             checkpoint();local=(observed-pose[:3,3])@pose[:3,:3]
             distances,indices=tree.query(local);keep=np.argsort(distances)[:keep_count]
@@ -518,6 +548,7 @@ def trimmed_icp(model,observed,initial_poses,*,trim=.8,iterations=30,checkpoint=
             if upright:
                 pose[:3,:3]=Rotation.from_euler('z',np.arctan2(pose[1,0],pose[0,0])).as_matrix()
                 pose[:3,3]=observed[keep].mean(0)-model[indices[keep]].mean(0)@pose[:3,:3].T
+            if project_pose:pose=project_pose(pose)
             if np.max(abs(pose-previous))<1e-8:break
         if not valid:continue
         distances,indices=tree.query((observed-pose[:3,3])@pose[:3,:3]);keep=np.argsort(distances)[:keep_count]

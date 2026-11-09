@@ -78,7 +78,7 @@ assert not hasattr(p,'task'), 'Curation still owns an editable task field'
 assert 'cup 1'in p.task_label.text()
 QFileDialog.getExistingDirectory=lambda *a,**kw:str(root/'exports')
 p.export();wait(lambda:not p.busy)
-assert list((root/'exports').glob('lerobot-*/meta/tasks.parquet')),p.state.text()
+assert list((root/'exports').glob('lerobot_*/meta/tasks.parquet')),p.state.text()
 engine=QComboBox();engine.addItem('mujoco');settings=SourceSettings(sys.argv[1],root,engine)
 defaults=yaml.safe_load(settings.default_script())['execution']
 assert 'single_task'in defaults and 'seed'not in defaults

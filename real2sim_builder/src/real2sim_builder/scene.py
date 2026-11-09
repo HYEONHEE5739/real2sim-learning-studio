@@ -72,7 +72,7 @@ def local_path(root, relative):
         if not(root/'project.yaml').is_file()or len(parts)<6:
             raise ValueError('Workspace asset requires a Scene Project and exact version')
         identifier(parts[3])
-        if not re.fullmatch('[0-9a-f]{64}',parts[4])or any(p in('..','.')for p in parts[5:]):
+        if not re.fullmatch(r'v[0-9]{3,}',parts[4])or any(p in('..','.')for p in parts[5:]):
             raise ValueError('Invalid Workspace asset version/path')
         base=root.parent.parent/'object_assets';target=base
         if base.is_symlink():raise ValueError('Workspace asset symlink is forbidden')
@@ -238,6 +238,9 @@ def validate(scene, root=None, complete=False):
                 raise ValueError('Source asset hash changed')
     if 'geometry_constraints' in scene:
         validate_geometry_constraints(scene)
+        support_report=support_metrics(scene,root=root)
+        if support_report['status']=='CONSTRAINT_CONFLICT' or (complete and support_report['status']=='NEEDS_MORE_DATA'):
+            raise ValueError('CONSTRAINT_CONFLICT: '+'; '.join(support_report['violations']+support_report['needs']))
     if 'workflow' in scene:
         validate_workflow(scene)
     return scene
@@ -415,8 +418,9 @@ def validate_geometry_constraints(scene):
     if config.get('schema') != GEOMETRY_CONSTRAINT_SCHEMA or config.get('units') != 'm':
         raise ValueError('Unsupported relative geometry schema/units')
     rows = config.get('distances', [])
-    if not rows:
+    if not rows and not config.get('supports'):
         raise ValueError('Empty relative geometry constraints')
+    support_relations(scene)
     for row in rows:
         metrics = geometry_constraint_metrics(scene, row)
         tolerance = max(1e-08, row.get('uncertainty_m', 0))
@@ -426,12 +430,16 @@ def validate_geometry_constraints(scene):
     return config
 
 
-def validate_horizontal_layout(scene: dict,*,table: str,workspace: str,blocks: list[str],robot_frame: str='robot_base') -> dict:
+def validate_horizontal_layout(scene: dict,*,table: str,workspace: str,blocks: list[str],robot_frame: str='robot_base',root=None) -> dict:
     """Opt-in initial-layout check for a future Scene, never a calibration repair.
 
     Explicit box geometry only. Cameras, links, joint poses and provenance are not
     edited or approved. Z placement comes from actual box bottoms and table top.
     """
+    if scene.get('geometry_constraints',{}).get('supports'):
+        metrics=support_metrics(scene,root=root)
+        return {'passed':metrics['status']=='SATISFIED','issues':metrics['violations']+metrics['needs'],
+            'physical_constraints':metrics,'calibration_verified':False,'scope':'explicit_support_geometry_only'}
     validate(scene)
     objects={obj['id']:obj for obj in scene['objects']};issues=[]
     def box(name,role):
@@ -463,4 +471,179 @@ def validate_horizontal_layout(scene: dict,*,table: str,workspace: str,blocks: l
     return {'passed':not issues,'issues':issues,'table_surface_world_z_m':float(top[2]),
             'robot_base_world_position_m':base[:3,3].tolist(),'workspace_dimensions_m':workspace_size[:2].tolist(),
             'calibration_verified':False,'scope':'new_scene_initial_box_layout_only'}
+
+
+
+def support_relations(scene, supports=None):
+    """Normalize existing support declarations without promoting image hypotheses."""
+    nodes={o['id']:o for o in scene['objects']};relations={}
+    for declarations in (scene.get('geometry_constraints',{}).get('supports',{}),supports or {}):
+        if not isinstance(declarations,dict):raise ValueError('Support declarations must map Object/Frame IDs')
+        for name,data in declarations.items():
+            if isinstance(data,str)and name in relations and relations[name]['support']==data:continue
+            if isinstance(data,str):data={'support':data,'source':'user_declared','evidence':['explicit fitting.supports'],'status':'CONFIRMED'}
+            row=copy.deepcopy(data)
+            allowed={'support','source','status','evidence','parallel','relative_rotation','contact_anchor','support_anchor','tolerance_m','angle_tolerance_rad','yaw_bound_rad','yaw_reference_rad'}
+            if not isinstance(row,dict)or set(row)-allowed:raise ValueError('Invalid support relation fields')
+            if name not in nodes and name not in scene['frames']:raise ValueError('Unknown supported Object/Frame: '+name)
+            if row.get('support')not in nodes or row['support']==name:raise ValueError('Unknown/self support: '+name)
+            if row.get('source')not in ('user_declared','measured','calibrated','estimated'):raise ValueError('Support source required')
+            if not isinstance(row.get('evidence'),list)or not row['evidence']or any(not isinstance(e,str)or not e.strip()for e in row['evidence']):raise ValueError('Support evidence required')
+            row.setdefault('status','PROPOSED'if row['source']=='estimated'else'CONFIRMED')
+            if row['status']not in('CONFIRMED','PROPOSED')or row['source']=='estimated'and row['status']=='CONFIRMED':raise ValueError('Estimated support cannot be confirmed automatically')
+            row.setdefault('parallel',True)
+            if type(row['parallel'])is not bool:raise ValueError('Support parallel must be boolean')
+            for key,default in (('tolerance_m',1e-6),('angle_tolerance_rad',1e-6)):
+                row.setdefault(key,default)
+                if type(row[key])not in(int,float)or not np.isfinite(row[key])or row[key]<0:raise ValueError('Finite support tolerances required')
+            if 'yaw_bound_rad'in row and(type(row['yaw_bound_rad'])not in(int,float)or not np.isfinite(row['yaw_bound_rad'])or row['yaw_bound_rad']<0):raise ValueError('Finite nonnegative yaw bound required')
+            if 'yaw_reference_rad'in row and(type(row['yaw_reference_rad'])not in(int,float)or not np.isfinite(row['yaw_reference_rad'])):raise ValueError('Finite yaw reference required')
+            if 'relative_rotation'in row:
+                t=np.eye(4);t[:3,:3]=row['relative_rotation'];transform(t)
+            for field in ('contact_anchor','support_anchor'):
+                if field not in row:continue
+                anchor=row[field]
+                if not isinstance(anchor,dict)or set(anchor)!={'point_m','normal'}:raise ValueError('Contact anchor requires point_m/normal')
+                for key in ('point_m','normal'):
+                    a=np.asarray(anchor[key],float)
+                    if a.shape!=(3,)or not np.isfinite(a).all()or(key=='normal'and not np.isclose(np.linalg.norm(a),1)):raise ValueError('Finite contact point and unit normal required')
+            old=relations.get(name)
+            if old and old!=row:
+                # Retain derived initial-heading/reference rotation across solver blocks.
+                derived={k:row[k]for k in ('yaw_reference_rad','relative_rotation')if k in row and k not in old}
+                if {**old,**derived}==row:
+                    relations[name]=row;continue
+                if old['status']=='CONFIRMED'and row['status']=='CONFIRMED':raise ValueError('CONSTRAINT_CONFLICT: conflicting support declarations: '+name)
+                if old['status']=='CONFIRMED':continue
+            relations[name]=row
+    visiting=set();ordered={}
+    def visit(name):
+        if name in visiting:raise ValueError('CONSTRAINT_CONFLICT: cyclic support relations')
+        if name in ordered:return
+        visiting.add(name);parent=relations[name]['support']
+        if parent in relations:visit(parent)
+        visiting.remove(name);ordered[name]=relations[name]
+    for name in relations:visit(name)
+    return ordered
+
+
+def collision_extent(scene,obj,direction,root=None,*,upper=False):
+    """Extreme of actual collision parts in Object coordinates, never Visual bounds."""
+    from .calibration.geometry import parts,mesh_data
+    direction=np.asarray(direction,float);extents=[]
+    if obj['dimensions']['value']is None and obj['collision']['type']!='compound':raise ValueError('Contact dimensions are unknown')
+    for part in parts(obj,'collision'):
+        pose=np.asarray(part['pose']);axis=pose[:3,:3].T@direction;size=np.asarray(part['dimensions']);kind=part['type']
+        if kind=='box':radius=np.abs(axis)@(size/2)
+        elif kind=='cylinder':radius=np.linalg.norm(axis[:2])*size[0]/2+abs(axis[2])*size[2]/2
+        elif kind=='sphere':radius=np.linalg.norm(axis)*size[0]/2
+        elif kind=='mesh':
+            if root is None:raise ValueError('Collision mesh needs owned asset root or explicit Contact Anchor')
+            points=mesh_data(local_path(root,scene['assets'][part['asset']]['path']))[0]*np.asarray(part.get('scale',[1,1,1]))
+            values=points@axis;extents.append(float(pose[:3,3]@direction+(values.max()if upper else values.min())));continue
+        else:raise ValueError('Unsupported contact collision geometry')
+        extents.append(float(pose[:3,3]@direction+(radius if upper else-radius)))
+    if not extents:raise ValueError('Enabled collision or explicit Contact Anchor required')
+    return max(extents)if upper else min(extents)
+
+
+def support_binding(scene,name,row,root=None):
+    """Return the declared support plane and reference contact orientation."""
+    from scipy.spatial.transform import Rotation
+    nodes={o['id']:o for o in scene['objects']};support=nodes[row['support']];base=world_pose(scene,support)
+    if base is None:raise ValueError('Support pose is unknown')
+    anchor=row.get('support_anchor')
+    if anchor:point=np.asarray(anchor['point_m']);normal=np.asarray(anchor['normal'])
+    else:
+        if support['collision']['type']not in('box','cylinder'):raise ValueError('Support surface needs planar primitive collision or explicit Support Anchor')
+        point=np.array([0,0,collision_extent(scene,support,[0,0,1],root,upper=True)]);normal=np.array([0.,0.,1.])
+    # Align a contact coordinate system with the actual plane, including slopes.
+    rotation=base[:3,:3].copy();z=rotation@normal;x=rotation[:,0]-z*(rotation[:,0]@z)
+    if np.linalg.norm(x)<1e-8:x=rotation[:,1]-z*(rotation[:,1]@z)
+    x/=np.linalg.norm(x);basis=np.column_stack((x,np.cross(z,x),z));plane=base[:3,:3]@point+base[:3,3]
+    relative=np.asarray(row.get('relative_rotation',np.eye(3)),float)
+    obj=nodes.get(name);pose=(world_pose(scene,obj)if obj['pose']['value']is not None else None)if obj is not None else frame_world(scene,name)
+    if not row['parallel']and 'relative_rotation'not in row:
+        if pose is None:raise ValueError('Inclined placement needs a relative rotation or known pose')
+        relative=basis.T@pose[:3,:3]
+    if row['parallel']and not np.allclose(relative[:,2],[0,0,1],atol=row['angle_tolerance_rad']):raise ValueError('CONSTRAINT_CONFLICT: parallel relation has tilted reference')
+    contact=row.get('contact_anchor')
+    if obj is None and contact is None:
+        mounted=[o for o in nodes.values()if o['frame']==name and o.get('collision_enabled',True)]
+        if not mounted:raise ValueError('Robot Base/Frame needs Mount Collision or explicit Contact Anchor')
+    if contact:
+        # A supplied local contact normal may differ from the Object +Z axis.
+        n=np.asarray(contact['normal']);a=Rotation.align_vectors([[0,0,1]],[n])[0].as_matrix()
+        relative=relative@a
+    return {'basis':basis,'point':plane,'relative_rotation':relative,'relation':row}
+
+
+def supported_pose(scene,name,row,pose,root=None):
+    """Project a trial onto the declared 2D translation/yaw support manifold."""
+    binding=support_binding(scene,name,row,root);basis=binding['basis'];reference=binding['relative_rotation'];pose=np.asarray(pose,float).copy()
+    relative=basis.T@pose[:3,:3]@reference.T;yaw=float(np.arctan2(relative[1,0],relative[0,0]))
+    from scipy.spatial.transform import Rotation
+    if 'yaw_bound_rad'in row:
+        center=row.get('yaw_reference_rad',0.)
+        # Wrap around the retained initial heading; never reset limits per iteration.
+        yaw=center+np.clip(np.arctan2(np.sin(yaw-center),np.cos(yaw-center)),-row['yaw_bound_rad'],row['yaw_bound_rad'])
+    pose[:3,:3]=basis@Rotation.from_euler('z',yaw).as_matrix()@reference
+    gap=contact_gap(scene,name,row,pose,root,binding=binding)
+    pose[:3,3]-=gap*basis[:,2]
+    return pose
+
+
+def contact_gap(scene,name,row,pose,root=None,*,binding=None):
+    """Signed distance from actual collision/contact anchor to the support plane."""
+    binding=binding or support_binding(scene,name,row,root)
+    nodes={o['id']:o for o in scene['objects']};normal=binding['basis'][:,2];contact=row.get('contact_anchor')
+    if contact:bottom=float((pose[:3,:3]@np.asarray(contact['point_m']))@normal)
+    elif name in nodes:bottom=collision_extent(scene,nodes[name],pose[:3,:3].T@normal,root)
+    else:
+        offsets=[]
+        for obj in nodes.values():
+            if obj['frame']!=name or not obj.get('collision_enabled',True):continue
+            local=np.asarray(obj['pose']['value']);direction=(pose[:3,:3]@local[:3,:3]).T@normal
+            offsets.append(float((pose[:3,:3]@local[:3,3])@normal)+collision_extent(scene,obj,direction,root))
+        if not offsets:raise ValueError('Mount collision geometry unresolved')
+        bottom=min(offsets)
+    return float((pose[:3,3]-binding['point'])@normal+bottom)
+
+
+def support_metrics(scene,supports=None,root=None):
+    """Geometry diagnostics; numerical contact is not a simulator/physical certificate."""
+    from scipy.spatial.transform import Rotation
+    relations=[];needs=[];violations=[];nodes={o['id']:o for o in scene['objects']}
+    for name,row in support_relations(scene,supports).items():
+        result={'object_id':name,'support_id':row['support'],'source':row['source'],'evidence':row['evidence'],'status':row['status'],
+            'allowed_dof':[]if (nodes[name]['pose']if name in nodes else scene['frames'][name]['transform'])['provenance']in('measured','calibrated')else ['support_x','support_y']+([]if row.get('yaw_bound_rad')==0 else['yaw']),'physical_verified':False}
+        if row['status']!='CONFIRMED':needs.append(name+': estimated support needs review');relations.append(result);continue
+        try:
+            record=nodes[name]['pose']if name in nodes else scene['frames'][name]['transform']
+            pose=None if record['value']is None else world_pose(scene,nodes[name])if name in nodes else frame_world(scene,name)
+            if pose is None:raise ValueError('Object pose is unknown')
+            expected=supported_pose(scene,name,row,pose,root);binding=support_binding(scene,name,row,root)
+            gap=contact_gap(scene,name,row,pose,root,binding=binding);angle=float(np.linalg.norm(Rotation.from_matrix(expected[:3,:3]@pose[:3,:3].T).as_rotvec()))
+            relative=binding['basis'].T@pose[:3,:3]@binding['relative_rotation'].T
+            heading=np.arctan2(relative[1,0],relative[0,0])
+            aligned=binding['basis']@Rotation.from_euler('z',heading).as_matrix()@binding['relative_rotation']
+            normal=np.asarray(row.get('contact_anchor',{}).get('normal',[0,0,1]))
+            actual_normal=pose[:3,:3]@normal;expected_normal=aligned@normal
+            normal_error=float(np.arctan2(np.linalg.norm(np.cross(expected_normal,actual_normal)),expected_normal@actual_normal))
+            rp_error=float(np.linalg.norm(Rotation.from_matrix(aligned@pose[:3,:3].T).as_rotvec()))
+            result.update(gap_m=gap,penetration_m=max(0.,-gap),normal_error_rad=normal_error,relative_roll_pitch_error_rad=rp_error,
+                orientation_error_rad=angle,robot_mount_error_m=abs(gap)if name not in nodes else None)
+            collision_gap=None
+            if row.get('contact_anchor'):
+                try:collision_gap=contact_gap(scene,name,{k:v for k,v in row.items()if k!='contact_anchor'},pose,root,binding=binding)
+                except ValueError:pass  # An explicit mount anchor can describe geometry absent from this model.
+            result.update(collision_gap_m=collision_gap,collision_penetration_m=max(0.,-collision_gap)if collision_gap is not None else None)
+            if abs(gap)>row['tolerance_m']or angle>row['angle_tolerance_rad']or(collision_gap is not None and collision_gap < -row['tolerance_m']):
+                violations.append(name+': support contact/parallel constraint violated')
+        except ValueError as error:needs.append(name+': '+str(error));result['status']='NEEDS_CONTACT_GEOMETRY'
+        relations.append(result)
+    return {'status':'CONSTRAINT_CONFLICT'if violations else'NEEDS_MORE_DATA'if any(r['status']=='NEEDS_CONTACT_GEOMETRY'for r in relations)else'NEEDS_REVIEW'if needs else'SATISFIED',
+        'relations':relations,'needs':needs,'violations':violations,'physical_verified':False,
+        'scope':'declared contact geometry; not gravity, stability or grasp certification',
+        'unconstrained_objects':[name for name,obj in nodes.items()if obj['role']in('manipulable_object','receptacle','workspace')and name not in {r['object_id']for r in relations}]}
 

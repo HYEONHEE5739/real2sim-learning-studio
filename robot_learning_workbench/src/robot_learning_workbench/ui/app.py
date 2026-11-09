@@ -12,6 +12,8 @@ from .curation import CurationPage
 class Window(QMainWindow):
     def __init__(self,backend_python,modules,workspace):
         super().__init__()
+        from scene_contract.naming import check_storage_available
+        check_storage_available(workspace)
         from .theme import STYLE
         from .paths import GROUPS
         self.setStyleSheet(STYLE);self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)

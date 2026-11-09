@@ -150,7 +150,7 @@ def test_workspace_library_is_shared_but_scenes_and_exports_are_independent(tmp_
     frozen={f:sha(f)for f in(a.root/'exports/v1').rglob('*')if f.is_file()}
     old=sha(manifest)
     newer=register_object_asset(b,tmp_path/'source/block.usda',asset_id='paper_cup',generation_id='request_second')
-    assert newer['version']!=record['version']and sha(manifest)==old
+    assert newer['version']==record['version']and newer['content_sha256']==record['content_sha256']and sha(manifest)==old
     assert ca.scene['objects'][-1]['object_asset']['version']==record['version']
     cb.edit([{**instance_operation(b,newer['manifest'],'cup1',pose=pose.tolist()),'op':'use_object_asset'}])
     assert all(sha(f)==h for f,h in frozen.items())
@@ -233,7 +233,7 @@ def test_clone_into_another_workspace_publishes_only_referenced_asset_versions(t
 def test_malformed_unused_manifest_is_a_catalogue_item_error(tmp_path):
     from real2sim_builder.object_assets import list_object_assets
     p=Project.create(tmp_path/'scenes','malformed unused metadata')
-    bad=p.workspace/'object_assets/unused'/('a'*64)/'manifest.json'
+    bad=p.workspace/'object_assets/unused'/'v001'/'manifest.json'
     bad.parent.mkdir(parents=True);bad.write_text('{ unclosed: [')
     rows=list_object_assets(p)
     assert len(rows)==1 and rows[0]['asset_id']=='unused'and rows[0]['error']
@@ -246,7 +246,7 @@ def test_unrelated_broken_asset_is_catalogued_without_blocking_selected_asset(tm
     from real2sim_builder.files import write
     p=Project.create(tmp_path/'scenes','selective');c=Candidate.create(p,'draft')
     good=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='good')
-    broken=p.workspace/'object_assets/broken'/('a'*64)/'manifest.json';write(broken,{'invalid':'metadata'})
+    broken=p.workspace/'object_assets/broken'/'v001'/'manifest.json';write(broken,{'invalid':'metadata'})
     catalogue=list_object_assets(p)
     assert len(catalogue)==2 and next(r for r in catalogue if r['asset_id']=='broken')['error']
     instance_operation(p,good['manifest'],'block')
@@ -268,3 +268,31 @@ def test_partial_memo_dimension_constrains_asset_without_marking_other_axes_meas
     assert asset['dimensions']['constraints']==declared
     with pytest.raises(ValueError,match='bounds disagree'):
         register_object_asset(p,path,asset_id='wrong_height',dimensions={**declared,'value':[None,None,height*2]})
+
+
+def test_readable_asset_versions_separate_content_identity_from_storage(tmp_path):
+    from real2sim_builder.project import Project
+    from real2sim_builder.object_assets import register_object_asset
+    p=Project.create(tmp_path,'Readable assets')
+    source=tmp_path/'cube.usda'
+    source.write_text('''#usda 1.0
+(
+ defaultPrim="Cube"
+ metersPerUnit=1
+ upAxis="Z"
+)
+def Xform "Cube" {
+ def Mesh "Mesh" {
+  point3f[] points=[(0,0,0),(1,0,0),(0,1,0),(0,0,1)]
+  int[] faceVertexCounts=[3,3,3,3]
+  int[] faceVertexIndices=[0,2,1,0,1,3,1,2,3,2,0,3]
+ }
+}
+''')
+    first=register_object_asset(p,source,asset_id='cube')
+    assert first['version']=='v001'and len(first['content_sha256'])==64
+    again=register_object_asset(p,source,asset_id='cube',generation_id='a_new_request')
+    assert again['version']=='v001'
+    source.write_text(source.read_text().replace('(1,0,0)','(2,0,0)'))
+    second=register_object_asset(p,source,asset_id='cube')
+    assert second['version']=='v002'and second['content_sha256']!=first['content_sha256']

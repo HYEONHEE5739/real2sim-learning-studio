@@ -32,7 +32,8 @@ def mapping_coordinates_equal(a,b):
 def save_configuration(workspace,name,recipe):
     from real2sim_builder.files import write
     workspace=Path(workspace).resolve();slug=re.sub('[^a-z0-9]+','-',name.lower()).strip('-')or'so101'
-    root=workspace/'devices'/(slug+'-'+uuid.uuid4().hex[:8]);root.mkdir(parents=True)
+    from scene_contract.naming import reserve_directory
+    root=reserve_directory(workspace/'devices',slug)
     write(root/'capture.yaml',recipe);return root/'capture.yaml'
 
 

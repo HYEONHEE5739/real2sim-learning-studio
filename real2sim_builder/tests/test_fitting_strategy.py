@@ -9,6 +9,7 @@ def fixture(views=1,kind='side'):
     scene=legacy_scene();cam=scene['cameras'][0]
     cam['pose']['provenance']=cam['K']['provenance']='estimated'
     scene['objects'][1]['pose']['provenance']='estimated'
+    scene['geometry_constraints']={'schema':'real2sim.geometry-constraints/1','units':'m','distances':[],'supports':{'block':'table'}}
     rows=[]
     for i in range(views):
         pose=np.array(cam['pose']['value']);pose[:3,:3]=Rotation.from_rotvec([.1*i,.03*i*i,0]).as_matrix()@pose[:3,:3];pose[0,3]+=.05*i
@@ -141,7 +142,7 @@ def test_moving_base_cannot_use_disconnected_fixed_camera_as_world_anchor():
 
 
 def test_sphere_rotation_freezes_but_asymmetric_collision_is_preserved():
-    scene,rows=fixture(2);obj=scene['objects'][1];obj['visual']={'type':'sphere'};obj['collision']={'type':'sphere'}
+    scene,rows=fixture(2);scene.pop('geometry_constraints');obj=scene['objects'][1];obj['visual']={'type':'sphere'};obj['collision']={'type':'sphere'}
     obj['pose']['value'][2][3]=.2
     assert selected(scene,rows)[0]['object','block']==[0,1,2]
     obj['collision']={'type':'box'}

@@ -72,6 +72,11 @@ def test_snapshot_store_repeats_without_reopening_devices_or_duplication(tmp_pat
             m,rows,_=load_session(root);assert rows[0]['q_measured']==state['physical_q_measured']
             assert m['command_source']=='measured_observation_no_training_action'
         assert store.finish(b)['id']==two['id']
+        from robot_learning_workbench.ui.session_operations import catalog
+        saved=catalog(project.root)['snapshots']
+        assert [(r['id'],r['images'],r['q_measured'])for r in saved]==[(r['id'],r['images'],r['q_measured'])for r in(one,two)]
+        assert [r['unix_ns']for r in saved]==[one['unix_ns'],two['unix_ns']]
+        assert catalog(Project.create(tmp_path/'projects','Empty').root)['snapshots']==[]
         with pytest.raises(ValueError,match='reused'):store.prepare('capture3',state,rgb,now_ns=t)
     finally:f.close()
 
@@ -102,6 +107,10 @@ def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_p
         assert before=={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
         assert load_session(two['path'])[0]['command_source']=='measured_observation_no_training_action'
         assert len(project.evidence['capture_sessions'])==2
+        from robot_learning_workbench.ui.session_operations import catalog
+        restored=catalog(project.root)
+        assert not restored['snapshot_errors']and len(restored['snapshots'])==2
+        assert all(row['paired']and set(row['images'])=={'side','wrist','sim_side','sim_wrist'}for row in restored['snapshots'])
     finally:f.close()
 
 
@@ -119,3 +128,19 @@ def test_pair_transport_image_is_shared_and_ipc_paths_are_not_published(tmp_path
     write_pair(root,manifest,pending,result)
     assert (shot/'sim_side.png').stat().st_ino==(transport/'side.png').stat().st_ino
     pair=json.loads((shot/'pair.json').read_text());assert 'files'not in pair
+
+
+def test_snapshot_catalog_reads_each_saved_layout_without_merging_calibration(tmp_path,monkeypatch):
+    from real2sim_builder.files import write
+    from real2sim_builder import capture
+    from robot_learning_workbench.ui.session_operations import saved_snapshots
+    p=Project.create(tmp_path,'multi layout');root=p.root/'input/captures/session_001/capture_001';root.mkdir(parents=True)
+    manifest={'schema':'real2sim.snapshot/1','snapshots':[{'scene_state_id':'layout_a'},{'scene_state_id':'layout_b'}]}
+    write(root/'capture_manifest.yaml',manifest);write(p.root/'input/evidence.yaml',{'capture_sessions':[{'path':'input/captures/session_001/capture_001/capture_manifest.yaml'}]})
+    seen=[]
+    def load(root,*,scene_state):
+        seen.append(scene_state)
+        return {'session_id':'old_id'},[{'id':scene_state,'images':[],'q_measured':[0.]*6,'timestamp_ns':len(seen),'unix_ns':len(seen)}],[]
+    monkeypatch.setattr(capture,'load_snapshots',load)
+    rows,errors=saved_snapshots(p)
+    assert not errors and seen==['layout_a','layout_b']and [r['id']for r in rows]==seen

@@ -10,6 +10,8 @@ import numpy as np
 
 class IsaacRenderer:
     def __init__(self,scene,root,scratch,mode=None,*,data_types=('rgb','distance_to_image_plane','semantic_segmentation')):
+        from .rendering import render_scene
+        scene=render_scene(scene)
         import isaaclab.sim as sim
         from isaaclab.sensors import Camera,CameraCfg
         from isaacsim.core.utils.semantics import add_labels
@@ -37,6 +39,8 @@ class IsaacRenderer:
             self.close();raise
 
     def update_scene(self,scene):
+        from .rendering import render_scene
+        scene=render_scene(scene)
         from pxr import Gf
         from .scene import world_pose
         from .cameras import OPTICAL_TO_RENDER
