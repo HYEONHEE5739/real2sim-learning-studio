@@ -4,6 +4,42 @@ MuJoCo3.3.7 Renderer: https://mujoco.readthedocs.io/en/3.3.7/python.html#renderi
 Blender worker is invoked only through an already installed executable.
 """
 import sys
+from contextlib import contextmanager,ExitStack
+
+
+@contextmanager
+def render_views(factory,root,scratch,image_records=(),mode='software-egl'):
+    """One native context: reuse sensors, release each requested photo view.
+
+    Both engines receive the same metadata-selected transient description.
+    Switchable engines retain geometry/context while releasing photo products.
+    Other engines close the preceding context before opening the next view.
+    """
+    from .cameras import camera_roles,select_render_cameras
+    active=ExitStack();renderer=None;allocated=None
+    @contextmanager
+    def view(scene,camera_id):
+        nonlocal renderer,allocated
+        roles=camera_roles(scene,image_records)
+        reference=roles.get(camera_id)=='reference'
+        selected=select_render_cameras(scene,image_records=image_records,camera_ids=[camera_id]if reference else None)
+        names=tuple(c['id']for c in selected['cameras'])
+        if camera_id not in names:raise ValueError('Requested Camera is not a recorded render observation: '+camera_id)
+        if renderer is not None and names!=allocated and not callable(getattr(renderer,'release_cameras',None)):
+            active.close();renderer=None;allocated=None
+        if renderer is None:
+            renderer=active.enter_context(factory(selected,root,scratch,mode));allocated=names
+        else:renderer.update_scene(selected)
+        try:yield renderer
+        finally:
+            if reference:
+                release=getattr(renderer,'release_cameras',None)
+                if callable(release):release()
+                else:active.close();renderer=None;allocated=None
+    try:yield view
+    finally:active.close()
+
+
 if __name__ == '__main__' and '--blender-worker' in sys.argv:
     import bpy
     import json,runpy,numpy as np

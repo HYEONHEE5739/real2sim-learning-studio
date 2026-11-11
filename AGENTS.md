@@ -13,7 +13,7 @@
 
 ## 2026-11-09 우선 실행 계약
 
-제품 Reconstruction은 Codex의 실제 Scene/Model 이미지 분석 → 독립 Object bpy/USDA → 추정 Scene/Camera 구성 → 실제 Simulator 렌더 → Codex typed 수정의 기존 단일 호출 경로를 사용한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 자동 제작의 선행 조건이 아니다. 기존 Calibration/FK/기하 검증·진단 API의 별도 사용은 유지한다.
+최신 사용자 결정: 기본 Auto Reconstruction은 SimFoundry A_reconstruction Stage1–14로 전환한다. DA3 Nested Mixed Precision·SAM3/VLM 분해·CPD를 사용하고 Stage7만 기존 Codex+Sandbox Blender로 교체한다. 기존 Codex Scene plan 반복은 Source 기반 Real/Sim 재정합에 유지한다. 상세 상태·Runtime·부분 구현은 `docs/simfoundry-reconstruction-migration.md`를 따른다. 이번 전환 검증은 Synthetic/Mock만 사용하고 실제 사용자 사진 전체 E2E·모델 추론·하드웨어 실행은 금지한다.
 
 Candidate Visual Evidence에 실제 입력/SHA·가이드/모델·Script/자산·최초 Scene·모든 Iteration Before/After·최선/물리/센서/미검증 상태를 남긴다. 기존 단일 UI의 제작 기록 버튼을 사용하며 새 Agent Framework/Manager/별도 앱은 만들지 않는다. 상세 현재 계약은 `docs/codex-first-scene-builder.md`와 최신 `CODEX_SCENE_GUIDE.md`다. 아래 이전 설계와 충돌하면 이 절과 최신 사용자 지시를 우선한다.
 

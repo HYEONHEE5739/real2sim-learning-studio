@@ -1,5 +1,9 @@
 # Codex-First Auto Reconstruction
 
+현재 VLM/레거시 정리 계약: [Codex VLM 전환](../docs/codex-vlm-migration.md). DA3/SAM/FLUX/Bria/CPD Runtime은 유지하고 시각 판단은 기존 Codex 로그인·모델·추론 강도를 공유한다.
+
+> 2026-11-09 후속: 기본 Auto Reconstruction은 [SimFoundry Stage 전환 기록](../docs/simfoundry-reconstruction-migration.md)을 따른다. 아래 Codex-First 순서는 이전 구현 및 Source 기반 Real/Sim 재정합 문맥으로 보존한다.
+
 2026-11-09. 현재 제품 실행은 사진·Memo → Codex → Blender → 실제 렌더 → Codex 수정의 단일 경로다. 과거 Depth/Metric 등록을 전제로 한 자동 복원 설계를 교체했다. 명시 수치 Calibration API는 유지한다.
 
 ## 입력과 실행

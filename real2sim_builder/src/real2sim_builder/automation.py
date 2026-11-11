@@ -1,4 +1,4 @@
-"""Codex-first Candidate authoring using the existing Project lifecycle.
+"""Stage reconstruction and existing Real/Sim refinement on one Project lifecycle.
 
 Actual RGB interpretation, sandboxed Blender assets, native multiview render
 review and durable visual evidence share one bounded resumable loop. Current
@@ -9,6 +9,173 @@ from .files import read,write,sha
 from .candidate import Candidate,exclusive
 from .authoring import modeling_tasks,attach_modeled_assets,analysis_required
 import copy
+
+
+def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stage=14):
+    """Existing Project-owned orchestration with immutable per-stage attempts.
+
+    `worker` replaces only heavy dependency calls in synthetic tests; stage
+    processing, control, signatures, publication and reuse are always real.
+    """
+    from pathlib import Path
+    from . import reconstruction_stages as processing
+    from .stage_artifacts import StageArtifact, StageNeeds, STAGE_NAMES, manifest, verify_manifest, cache_key, digest
+    from . import stage_runtime
+    from dataclasses import fields
+    config=copy.deepcopy(config or {})
+    stage_runtime.validate_configuration(config)
+    if type(through_stage)is not int or not 1<=through_stage<=14:raise ValueError('Invalid final stage')
+    with exclusive(project):
+        selected=Candidate(project,candidate)if(project.root/'scratch/agent'/candidate/'candidate.json').is_file()else Candidate.create(project,candidate)
+        selected.require_open()
+        from .scene import validate
+        validate(selected.scene,project.root)
+        if not(selected.root/'reconstruction-config.yaml').exists():write(selected.root/'reconstruction-config.yaml',config)
+        root=selected.root/'reconstruction/simfoundry';root.mkdir(parents=True,exist_ok=True)
+        initial=root/'initial_scene.yaml'
+        if not initial.exists():
+            write(initial,selected.scene)
+            prior=selected.root/'reconstruction.json'
+            if prior.is_file():write(root/'prior_reconstruction.json',read(prior))
+        inputs=[initial]
+        from .evidence import scene_memo
+        memo=scene_memo(project)
+        selected_inputs=[row for row in project.evidence.get('images',[])
+            if row.get('role')=='scene_photo'and row.get('camera_type')=='external'
+            and not row.get('runtime_baseline')and row.get('split','train')=='train'
+            and(config.get('scene_state_id')is None or row.get('scene_state_id')==config['scene_state_id'])]
+        selected_inputs += [row for row in project.evidence.get('videos',[])if row.get('role')=='scene_video'
+            and(config.get('scene_state_id')is None or row.get('scene_state_id')==config['scene_state_id'])]
+        inputs.extend(project.root/row['path']for row in selected_inputs)
+        upstream=manifest(inputs,{'project':project.info['id'],'candidate':candidate,'scene_inputs':selected_inputs})
+        index_path=root/'cache.json';index=read(index_path)if index_path.is_file()else{}
+        if index.get('candidate_scene_sha256')not in(None,digest(selected.scene)):
+            raise ValueError('Candidate Scene changed outside the retained stage checkpoint; review before resuming')
+        report_path=selected.root/'reconstruction.json'
+        previous_report=read(report_path)if report_path.is_file()else{}
+        report={'pipeline':'simfoundry/1','candidate':candidate,'status':'RUNNING','stages':{},
+                'needs':[],'physical_verified':False,'input_signature':upstream['data'],
+                'not_tested':['real model accuracy','real physics stability','hardware/Task success']}
+        if previous_report.get('pipeline')=='simfoundry/1'and previous_report.get('status')=='STOPPED':project.control('resume')
+        data={};active=1;folder=None;identity={'kind':'mock'if worker is not None else'real'};subset={}
+        keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far'),4:('metric_anchors','world_registration'),
+              5:('objects','decomposition','scene_memo'),6:('image_preparation',),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
+              8:('pose',),9:('articulation',),10:('world_registration','support_asset'),11:('physics',),12:('physics',),13:('export',),14:('simulator',)}
+        operations={1:('video',),2:('da3',),3:('support','vlm'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
+                    6:('image_edit_objects','background_remove','vlm'),7:('blender',),8:('cpd','canonicalize','foundationpose'),9:('articulation',),10:(),11:('vlm',),12:('physics',),13:(),14:('simulator',)}
+        handlers={1:processing.prepare,2:processing.depth,3:processing.support,4:processing.world,
+                  5:processing.decompose,6:processing.prepare_objects,7:processing.meshes,8:processing.poses,9:processing.articulate,10:processing.compile_scene,
+                  11:processing.simulation_ready,12:processing.stabilize,13:processing.package_scene,14:processing.simulator_integration}
+        def call(operation,request,folder):
+            project.checkpoint()
+            folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+            def normalized(node):
+                if isinstance(node,dict):return {k:normalized(v)for k,v in node.items()}
+                if isinstance(node,list):return [normalized(v)for v in node]
+                if isinstance(node,str)and node.startswith('/'):
+                    p=Path(node)
+                    if p.is_file():return {'sha256':sha(p),'suffix':p.suffix}
+                return node
+            key=digest([operation,normalized(request),identity])
+            cache=folder/'worker-cache.json'
+            if cache.is_file():
+                saved=read(cache)
+                if saved['key']!=key:raise ValueError('Incomplete worker input identity changed')
+                verify_manifest(saved['manifest'],output_root=folder)
+                return saved['data']
+            result=worker(operation,request,Path(folder))if worker is not None else stage_runtime.invoke(selected,config,operation,request,folder,provider=call)
+            if not isinstance(result,dict):raise ValueError('Typed worker result mapping required')
+            result={**result,'_execution':identity['kind']}
+            write(folder/'response.json',result)
+            write(cache,{'key':key,'manifest':manifest(sorted(p for p in folder.rglob('*')if p.is_file()and p!=cache)),
+                         'data':result,'execution':identity['kind']})
+            project.checkpoint()
+            return result
+        def publish_report():
+            report['resume']={'available':True,'candidate':candidate,'incomplete_stage':report.get('failed_stage'),
+                              'completed_stages':[k for k,s in report['stages'].items()if s['status']=='COMPLETE']}
+            index['candidate_scene_sha256']=digest(selected.scene);write(index_path,index)
+            write(report_path,report)
+        def failure_record(status,error):
+            import shutil
+            failure=numbered_path(root/'failures'/('stage_'+str(active)),'attempt');failure.mkdir(parents=True)
+            if folder is not None and folder.is_dir():
+                for source in folder.rglob('*'):
+                    if source.is_file():
+                        target=failure/'partial'/source.relative_to(folder);target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
+            write(failure/'failure.json',{'status':status,'type':type(error).__name__,'message':str(error)})
+            artifact=StageArtifact.create(active,status,upstream,manifest(sorted(p for p in failure.rglob('*')if p.is_file())),runtime_identity=identity,config=subset,
+                needs=[str(error)],error={'type':type(error).__name__,'code':getattr(error,'code',None)})
+            artifact.validate(failure);write(failure/'artifact.json',artifact.to_dict());report['failure_artifact']=str(failure/'artifact.json')
+        try:
+            for stage in range(1,through_stage+1):
+                active=stage;folder=None
+                subset={k:config[k]for k in keys[stage]if k in config}
+                if stage in(5,7):subset['scene_memo_sha256']=memo['sha256']
+                if stage in(5,7):
+                    from .authoring import _codex_guidance
+                    subset['guidance_sha256']=_codex_guidance()[1]['sha256']
+                    subset['model_references']=[r for r in project.evidence['images']if r.get('role')=='model_reference']
+                if stage==14:subset['sensor_captures']=[r for r in project.evidence['images']if r.get('camera_type')in('side','wrist')]
+                identity=copy.deepcopy(getattr(worker,'runtime_identity',None))if worker is not None else{'kind':'real','operations':{op:stage_runtime.identity(config,op)for op in operations[stage]}}
+                if not identity:raise ValueError('Synthetic worker must declare explicit mock runtime identity')
+                identity['stage_implementation_sha256']={str(p.relative_to(Path(__file__).parent)):sha(p)for p in Path(__file__).parent.rglob('*.py')}
+                subset['schema']='simfoundry-stage/1'
+                signature=cache_key(stage,upstream,subset,identity)
+                cached=index.get(str(stage),{})
+                if cached.get('key')==signature and cached.get('artifact'):
+                    path=Path(cached['artifact'])
+                    if not path.resolve().is_relative_to(root.resolve()):raise ValueError('Stage artifact outside Candidate')
+                    raw=read(path);artifact=StageArtifact(**{f.name:raw[f.name]for f in fields(StageArtifact)})
+                    artifact.validate(path.parent)
+                    if artifact.status!='COMPLETE':raise ValueError('Only complete stages may be reused')
+                    report['stages'][str(stage)]={'status':'COMPLETE','artifact':str(path),'reused':True}
+                else:
+                    project.checkpoint()
+                    project.update(status='RUNNING',stage='STAGE_'+str(stage),candidate=candidate,task=STAGE_NAMES[stage-1])
+                    if cached.get('key')==signature and cached.get('pending'):
+                        folder=Path(cached['pending'])
+                        if not folder.resolve().is_relative_to((root/f'stage_{stage:02d}').resolve()):raise ValueError('Pending stage outside Candidate')
+                    else:
+                        folder=numbered_path(root/f'stage_{stage:02d}','attempt');folder.mkdir(parents=True)
+                        index[str(stage)]={'key':signature,'pending':str(folder)};write(index_path,index)
+                    handler=handlers.get(stage)
+                    if handler is None:raise StageNeeds('NOT_SUPPORTED','Stage '+str(stage)+' is not implemented yet')
+                    output=handler(selected,config,data,folder,call)
+                    project.checkpoint()
+                    write(folder/'payload.json',output)
+                    files=sorted(p for p in folder.rglob('*')if p.is_file())
+                    artifact=StageArtifact.create(stage,'COMPLETE',upstream,manifest(files,output),
+                        runtime_identity=identity,config=subset,coordinate_frame=output.get('coordinate_frame','not_applicable'),
+                        warnings=output.get('warnings',[]))
+                    artifact.validate(folder);path=folder/'artifact.json';write(path,artifact.to_dict())
+                    index[str(stage)]={'key':signature,'artifact':str(path)};write(index_path,index)
+                    report['stages'][str(stage)]={'status':'COMPLETE','artifact':str(path),'reused':False}
+                index['candidate_scene_sha256']=digest(selected.scene);write(index_path,index)
+                if not report['stages'][str(stage)]['reused']:
+                    from .visual_evidence import record
+                    images=sorted(p for p in path.parent.rglob('*.png'))[:12]
+                    record(selected,'simfoundry_'+str(stage).zfill(2),'COMPLETE',images=images,files=[path],
+                        summary=STAGE_NAMES[stage-1]+'; '+artifact.provenance['execution']+'; accuracy NOT_VERIFIED',details={'stage_id':stage,'execution':artifact.provenance['execution']})
+                data[stage]=artifact.output_manifest['data']
+                upstream=manifest([path],{'previous_output_sha256':artifact.output_sha256,'data':data[stage]})
+                publish_report()
+                # Stop after a cached stage still retains its completed record.
+                project.checkpoint()
+            report['status']='DRAFT_READY'if through_stage==14 else'STAGES_COMPLETE'
+            project.update(status='DRAFT_READY'if through_stage==14 else'NEEDS_MORE_DATA',stage='STAGE_'+str(through_stage),
+                           candidate=candidate,task='Stage artifacts retained; accuracy remains separately verified')
+            publish_report();return report
+        except (StageNeeds,InterruptedError)as error:
+            failure_record('STOPPED'if isinstance(error,InterruptedError)else error.status,error)
+            report.update(status='STOPPED'if isinstance(error,InterruptedError)else error.status,failed_stage=active,needs=[str(error)],error_code=getattr(error,'code',None))
+            project.update(status='STOPPED'if isinstance(error,InterruptedError)else'NEEDS_MORE_DATA',stage='STAGE_'+str(active),candidate=candidate,needs=report['needs'])
+            publish_report();return report
+        except Exception as error:
+            failure_record('FAILED',error)
+            report.update(status='FAILED',failed_stage=active,error={'type':type(error).__name__,'message':str(error)})
+            project.update(status='FAILED',stage='STAGE_'+str(active),candidate=candidate,error=str(error))
+            publish_report();raise
 
 
 def board_binding(scene,name,uv):
@@ -110,6 +277,23 @@ def restore_fitting(candidate,folder):
 
 
 def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False):
+    """Default SimFoundry stages; Real/Sim continues its existing source refit."""
+    if refit_only:
+        return _refit_reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,
+            run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,modeling_timeout_s=modeling_timeout_s,
+            max_review_calls=max_review_calls,refit_only=True)
+    configured=copy.deepcopy(config if config is not None else read(project.root/'input/reconstruction.yaml')if(project.root/'input/reconstruction.yaml').is_file()else{})
+    from .stage_runtime import workspace_configuration,runtime_environment
+    configured=workspace_configuration(project,configured)
+    if scene_state is not None:configured['scene_state_id']=scene_state
+    configured.update(execute_modeling=bool(run_modeling),max_modeling_calls=max_modeling_calls,modeling_timeout_s=modeling_timeout_s)
+    if type(max_modeling_calls)is not int or not 1<=max_modeling_calls<=30:raise ValueError('Bounded Codex call budget required')
+    if not 1<=modeling_timeout_s<=3600:raise ValueError('Bounded Codex deadline required')
+    with runtime_environment(configured):
+        return _run_stage_pipeline(project,candidate=candidate,config=configured)
+
+
+def _refit_reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=False,max_modeling_calls=6,modeling_timeout_s=900,max_review_calls=3,refit_only=False):
     """Keep the best comparable round even on Stop, child failure or budget exit."""
     best=[None];result=None;failure=None
     with exclusive(project):
@@ -174,6 +358,10 @@ def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=Fa
                     'incomplete_stage':final.get('failed_stage')or project.state.get('stage')}
                 from .visual_evidence import run_identity
                 final['pipeline']='codex-first/2';final['authoring_run']=run_identity(selected)
+                if final.get('status')in('FAILED','STOPPED'):
+                    project.update(status=final['status'],stage=final.get('failed_stage')or project.state.get('stage'),
+                        error=final.get('error'),error_code=final.get('error_code'),
+                        task='Candidate and completed evidence retained; resume the unfinished stage')
                 write(path,final)
                 if result is not None:result.update(final)
                 if final.get('pipeline')=='codex-first/2':

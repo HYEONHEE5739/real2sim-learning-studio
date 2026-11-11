@@ -1,6 +1,6 @@
 # Scene 수치·좌표·원본 보호 규칙
 
-2026-11-09. Codex-First 제작에서도 기존 Project/Candidate/Scene/Asset/Export 검증이 최종 책임을 가진다. 최신 실행 가이드는 [CODEX_SCENE_GUIDE](CODEX_SCENE_GUIDE.md)다.
+2026-11-09. SimFoundry Stage 제작에서도 기존 Project/Candidate/Scene/Asset/Export 검증이 최종 책임을 가진다. 최신 실행 가이드는 [CODEX_SCENE_GUIDE](CODEX_SCENE_GUIDE.md)다.
 
 ## 원본과 수명
 
@@ -26,6 +26,8 @@ Side는 하나의 고정 Camera, Wrist는 하나의 실제 URDF Link Mount다. �
 
 확정 Support는 지지면의 접선 XY·법선 Yaw와 명시 상대 자세를 사용한다. 높이/법선 정렬은 실제 Collision 극점/Contact Anchor에서 정한다. 경사면, parent-before-child, 치수/새 Asset 후 접촉 재계산을 유지한다. 보호된 Pose/관계를 Solver나 Codex가 삭제·완화할 수 없다. 영상 추정은 PROPOSED, 자료 부족은 NEEDS_MORE_DATA, 충돌은 CONSTRAINT_CONFLICT다.
 
+Scene Photo의 virtual/reference Camera와 실제 Side/Wrist 센서는 역할 메타데이터로 구분한다. Image role/camera_type, View 등록의 camera_type, 명시 Camera camera_type/purpose가 근거이며 ID 이름은 근거가 아니다. 충돌·누락은 오류로 남긴다. Scene/Package에는 사진 Camera와 이미지·Pose/K를 보존하고, Real/Sim 기본 렌더는 확인된 센서만 생성한다. 사진 비교는 해당 가상 Camera를 한 대씩 생성해 비교 후 자원을 해제한다. MuJoCo/Isaac에 동일하게 적용하며 GPU 메모리 문제를 이유로 원 Camera를 삭제하지 않는다.
+
 ## 렌더·반복·Evidence
 
 Scene 생성은 Depth/Metric Registration 성공을 필수로 하지 않는다. 실제 RGB/실측으로 초안을 추정하되, 같은 train 입력의 이미지 잔차를 독립 정확도라고 부르지 않는다. holdout은 수정 판단/모델링/최선 선택에 넣지 않는다.
@@ -42,4 +44,10 @@ Scene 생성은 Depth/Metric Registration 성공을 필수로 하지 않는다. 
 
 ## 기존 고급 API
 
-명시 Calibration/landmark/joint/검증 도구와 Renderer/Exporter의 기존 기하 수학은 유지한다. `inference.py`/`sfm.py`의 과거 결과 소비·진단 유틸은 제품 Auto Reconstruction의 실행 의존성이 아니다. 실제 사용처를 확인하지 않고 SDK/FK/Collision/정밀 보정 기능을 제거하지 않는다.
+명시 Calibration/landmark/joint/검증 도구와 Renderer/Exporter의 기존 기하 수학은 유지한다. `inference.py`의 저장 Depth 결과 소비·진단 유틸은 제품 Auto Reconstruction의 실행 의존성이 아니다. 실제 사용처를 확인하지 않고 SDK/FK/Collision/정밀 보정 기능을 제거하지 않는다.
+
+## SimFoundry 기본 경로
+
+DA3 Camera는 W2C, Depth는 optical-Z이며 모델 추정 m이다. 원본→처리 pixel affine/K를 함께 저장한다. Chunk는 공통 Camera 중심 Sim(3)으로만 연결하고 퇴화 시 중단한다. 선택 Camera→Support transform은 원본 roll/tilt 순서다. Robot World는 독립된 명시 등록이 없으면 연결하지 않는다. Stage8의 scale은 실측 축에 적용하지 않는다. 미측정 Native Asset scale 변경은 새 버전이며 기존 bytes를 고치지 않는다.
+
+Stage13은 passed=false인 미승인 Review Package다. Stage12 Probe·Stage14 import/render와 미끄럼/전도/그립/독립 센서 정합·Task 성공은 별도다. Articulation 생성은 현재 NOT_SUPPORTED이며 기존 SO-ARM URDF/FK를 대체하지 않는다.

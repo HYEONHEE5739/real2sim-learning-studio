@@ -175,6 +175,61 @@ from scipy.spatial.transform import Rotation
 TOLERANCE=1e-5
 
 
+def _settling_evidence(histories, *, support_normals=None, position_threshold=1e-4, orientation_threshold=1e-3, window=20):
+    """Observed motion, not an independent friction/toppling certification.
+
+    Per-step limits match source Stage12. Unlike its PyBullet implementation,
+    velocities are not reset to zero to force convergence.
+    """
+    records={}
+    for name,history in histories.items():
+        a=np.asarray(history);positions=a[:,:3,3];rotations=a[:,:3,:3]
+        delta_p=np.linalg.norm(np.diff(positions,axis=0),axis=1)
+        delta_r=np.array([Rotation.from_matrix(x.T@y).magnitude()for x,y in zip(rotations[:-1],rotations[1:])])
+        total_r=float(Rotation.from_matrix(rotations[0].T@rotations[-1]).magnitude())
+        up0=rotations[0]@np.array([0.,0,1.]);up1=rotations[-1]@np.array([0.,0,1.])
+        movement=positions[-1]-positions[0]
+        normal=np.asarray((support_normals or{}).get(name,[0.,0,1.]),float)
+        support_known=name in(support_normals or{})
+        tangent=float(np.linalg.norm(movement-normal*(movement@normal)))
+        # Actual declared support normal; unknown support stays explicitly unknown.
+        records[name]={'T_world_before':a[0].tolist(),'T_world_after':a[-1].tolist(),
+            'sample_count':len(a),'position_delta_total_m':float(np.linalg.norm(movement)),
+            'orientation_delta_total_rad':total_r,
+            'position_delta_last_m':float(delta_p[-1])if len(delta_p)else None,
+            'orientation_delta_last_rad':float(delta_r[-1])if len(delta_r)else None,
+            'tangential_displacement_m':tangent if support_known else None,
+            'tangent_basis':'declared support'if support_known else'NOT_VERIFIED',
+            'gravity_plane_displacement_m':float(np.linalg.norm(movement[:2])),
+            'up_axis_change_rad':float(np.arctan2(np.linalg.norm(np.cross(up0,up1)),np.clip(up0@up1,-1,1))),
+            'sliding_toppling':'motion diagnostics only; contact/friction stability NOT_VERIFIED',
+            'stable_window':bool(len(delta_p)>=window and np.all(delta_p[-window:]<position_threshold)and np.all(delta_r[-window:]<orientation_threshold)),
+            'thresholds':{'position_m':position_threshold,'orientation_rad':orientation_threshold,'window_steps':window}}
+    return records
+
+
+def reviewed_stabilized_scene(scene,proposals,approval,root=None):
+    """Apply reviewed estimates to a Candidate through existing validation only."""
+    import copy
+    from .stage_artifacts import digest
+    from .editing import preserve
+    from .scene import world_pose,value,transform,validate
+    if approval.get('approved')is not True or not approval.get('evidence')or approval.get('source_scene_sha256')!=digest(scene):
+        raise ValueError('Explicit matching stabilization review required')
+    result=copy.deepcopy(scene);nodes={o['id']:o for o in result['objects']}
+    if not set(proposals)<=set(nodes):raise ValueError('Unknown stabilization Object')
+    # Compute every local pose against the same unchanged source parent frames.
+    for name,row in proposals.items():
+        if row.get('stable_window')is not True:raise ValueError('Unstable pose cannot be applied')
+        obj=nodes[name]
+        if obj['role']!='manipulable_object' or obj.get('link'):raise ValueError('Stabilization cannot modify Robot/support objects')
+        parent=world_pose(scene,{'frame':obj['frame'],'pose':value(np.eye(4).tolist())})
+        local=np.linalg.inv(parent)@transform(row['T_world_after'])
+        obj['pose']=value(local.tolist(),'estimated',approval['evidence']+['Passive settling proposal; physical accuracy NOT_VERIFIED'])
+    preserve(scene,result);validate(result,root,complete=True)
+    return result
+
+
 def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
     """Execute passive MuJoCo object settling; never certify robot/PhysX by proxy.
 
@@ -186,7 +241,7 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
     from .exporters import mjcf,usd
     from .files import write
     from .calibration.geometry import parts
-    if type(steps)is not int or not 1<=steps<=2500:raise ValueError('Physics probe requires 1..2500 actual steps')
+    if type(steps)is not int or not 1<=steps<=10000:raise ValueError('Physics probe requires 1..10000 actual steps')
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     output=folder/('physics-isaac.json'if engine=='isaac'else'physics.json')
     report={'status':'NEEDS_MORE_DATA','physical_verified':False,'robot_articulation':'NOT_TESTED',
@@ -205,6 +260,12 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
                          'b':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom2)),'distance_m':float(c.dist)}for c in data.contact[:data.ncon]],
             'scope':'initial native collision query; no dynamics or mass/friction validation','physical_verified':False}
     dynamic=[o for o in scene['objects']if o['role']=='manipulable_object']
+    from .scene import support_relations,support_binding
+    support_normals={}
+    for name,row in support_relations(scene).items():
+        if row['status']!='CONFIRMED':continue
+        try:support_normals[name]=support_binding(scene,name,row,project.root)['basis'][:,2]
+        except ValueError:pass  # Missing support geometry is not replaced by a World-horizontal plane.
     for obj in dynamic:
         for field in('mass_kg','friction'):
             v=obj['physics'][field]['value']
@@ -231,13 +292,22 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
             if bodies:bodies.initialize()
             stage=__import__('omni.usd',fromlist=['get_context']).get_context().get_stage()
             initial=np.asarray(bodies.get_world_poses()[0]).copy()if bodies else np.empty((0,3))
-            for _ in range(steps):project.checkpoint();context.step(render=False)
+            histories={o['id']:[]for o in dynamic}
+            def collect():
+                if bodies is None:return
+                positions,quaternions=bodies.get_world_poses()
+                for obj,position,quaternion in zip(dynamic,positions,quaternions):
+                    t=np.eye(4);t[:3,3]=position;q=np.asarray(quaternion)
+                    t[:3,:3]=Rotation.from_quat(q[[1,2,3,0]]).as_matrix();histories[obj['id']].append(t)
+            collect()
+            for _ in range(steps):project.checkpoint();context.step(render=False);collect()
             final=np.asarray(bodies.get_world_poses()[0])if bodies else np.empty((0,3))
             velocities=np.asarray(bodies.get_velocities())if bodies else np.empty((0,6))
             forces=np.asarray(bodies.get_net_contact_forces(dt=.002))if bodies else np.empty((0,3))
             report['isaac']={'status':'STEPPED','physics_steps':steps,'simulation_seconds':steps*.002,
                 'initial_positions_m':initial.tolist(),'final_positions_m':final.tolist(),'finite':bool(np.isfinite(final).all()and np.isfinite(velocities).all()),
-                'max_final_speed':float(np.max(abs(velocities)))if velocities.size else 0.,'net_contact_forces_n':forces.tolist(),
+                'max_final_speed':float(np.max(abs(velocities)))if velocities.size else 0.,'net_contact_forces_n':forces.tolist(),'objects':_settling_evidence(histories,support_normals=support_normals),
+                'settled':None,'penetration_validation':'NOT_RECORDED; no stable-pose application without verified contact result',
                 'enabled_colliders':sum(p.HasAPI(UsdPhysics.CollisionAPI)and UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()is not False for p in stage.Traverse())}
             report['needs']+=['Independent physical parameter, open-container drop and articulated robot/gripper validation required']
             write(folder/'physics-isaac.json',report)
@@ -249,16 +319,25 @@ def physics_probe(project,scene,folder,*,steps=500,engine='mujoco'):
         return [{'a':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom1)),
                  'b':mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,int(c.geom2)),
                  'distance_m':float(c.dist)}for c in data.contact[:data.ncon]]
+    body_ids={o['id']:mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_BODY,o['id'])for o in dynamic}
+    def snapshot(body):
+        t=np.eye(4);t[:3,:3]=data.xmat[body].reshape(3,3);t[:3,3]=data.xpos[body];return t
+    histories={name:[snapshot(body)]for name,body in body_ids.items()}
     initial=contacts();finite=True;completed=0
     for index in range(steps):
         project.checkpoint();mujoco.mj_step(model,data);completed=index+1
         if not np.isfinite(data.qpos).all()or not np.isfinite(data.qvel).all():finite=False;break
+        mujoco.mj_forward(model,data)
+        for name,body in body_ids.items():histories[name].append(snapshot(body))
     final=contacts();speed=float(np.max(abs(data.qvel)))if model.nv else 0.
     penetrations=[r for r in initial if r['distance_m']<-.001]
     final_penetrations=[r for r in final if r['distance_m']<-.001]
+    motion=_settling_evidence(histories,support_normals=support_normals)
+    np.savez_compressed(folder/'physics-pose-history.npz',**{name:np.asarray(rows)for name,rows in histories.items()})
     report['mujoco']={'status':'STEPPED','steps':completed,'simulation_seconds':completed*float(model.opt.timestep),
         'finite':finite,'initial_contacts':initial,'initial_penetrations':penetrations,'final_contacts':final,'final_penetrations':final_penetrations,
-        'contact_count':len(final),'max_final_generalized_speed':speed,'settled':finite and speed<.01 and not final_penetrations,
+        'contact_count':len(final),'max_final_generalized_speed':speed,'settled':finite and speed<.01 and not final_penetrations and all(o['stable_window']for o in motion.values()),
+        'objects':motion,'pose_history':str(folder/'physics-pose-history.npz'),
         'parameters':{o['id']:o['physics']for o in dynamic}}
     if penetrations:report['needs'].append('Initial inter-object penetration exceeds 1mm')
     if final_penetrations:report['needs'].append('Final inter-object penetration exceeds 1mm; low velocity alone is not settling')

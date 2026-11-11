@@ -1,5 +1,9 @@
 # 기존 Builder 문서 검토·이관 지도
 
+현재 VLM/레거시 정리 계약: [Codex VLM 전환](../docs/codex-vlm-migration.md). DA3/SAM/FLUX/Bria/CPD Runtime은 유지하고 시각 판단은 기존 Codex 로그인·모델·추론 강도를 공유한다.
+
+> 2026-11-09 후속: 기본 Auto Reconstruction은 [SimFoundry Stage 전환 기록](../docs/simfoundry-reconstruction-migration.md)을 따른다. 아래 Codex-First 순서는 이전 구현 및 Source 기반 Real/Sim 재정합 문맥으로 보존한다.
+
 2026-10-31. 원본 기준 디렉터리: `/home/hyeonhee/soarm_isaaclab/real2sim-builder/`. `docs`의 Markdown 14개를 전체 읽었다. `AGENTS.md` 및 `CODEX_HANDOFF.md`도 확인했다. JSON 3개와 UI PNG 1개는 과거 결과 자료로 읽고 구분했다. 아래는 원문 복제가 아닌 현재 프로젝트용 주제별 정리다. 이전 폴더 없이도 [제작 가이드](SCENE_AUTHORING.md)와 [제작 규칙](SCENE_RULES.md)을 사용할 수 있다.
 
 | 기존 문서 | 가져온 내용 | 그대로 적용하지 않는 내용 |

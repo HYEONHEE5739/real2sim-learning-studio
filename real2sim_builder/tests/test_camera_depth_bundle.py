@@ -147,10 +147,10 @@ def test_pipeline_reports_modeling_states_instead_of_generic_missing_data(tmp_pa
     from real2sim_builder.automation import reconstruct
     p=Project.create(tmp_path/'projects','empty')
     report=reconstruct(p,candidate='analysis',config={})
-    assert report['status']=='WAITING_FOR_CODEX_ANALYSIS'
+    assert report['status']=='NEEDS_MORE_DATA'
     assert p.state['status']==report['status']
     report=reconstruct(p,candidate='model',config={'objects':{'block':{'prompt':'red block'}}})
-    assert report['status']=='WAITING_FOR_CODEX'
+    assert report['status']=='NEEDS_MORE_DATA'
     assert p.state['status']==report['status']and report['physical_verified']is False
 
 
@@ -182,7 +182,7 @@ def test_reconstruction_cli_and_project_report_same_waiting_state(tmp_path,capsy
     p=Project.create(tmp_path/'projects','cli state');write(p.root/'input/reconstruction.yaml',{})
     assert main(['reconstruct',str(p.root),'--candidate','analysis'])==2
     result=json.loads(capsys.readouterr().out)
-    assert result['status']==p.state['status']=='WAITING_FOR_CODEX_ANALYSIS'
+    assert result['status']==p.state['status']=='NEEDS_MORE_DATA'
     assert read(p.root/'scratch/agent/analysis/reconstruction.json')['status']==result['status']
 
 

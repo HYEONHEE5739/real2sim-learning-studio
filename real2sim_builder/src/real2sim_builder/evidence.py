@@ -61,13 +61,17 @@ def add_image(project, path, camera='side', split='train', timestamp=None, conte
     return row
 
 
-def add_video(project, path, camera='side', split='train', max_frames=12):
+def add_video(project, path, camera='side', split='train', max_frames=12, *, role=None, scene_state=None):
     project.require_writable()
     import cv2
     identifier(camera)
     relative = copy_input(project, path)
     evidence = project.evidence
     video = {'path': relative, 'camera': camera, 'split': split, 'max_frames': int(max_frames), 'extracted': False}
+    if role is not None:
+        if role!='scene_video' or not scene_state:raise ValueError('Scene Video requires an explicit static layout')
+        identifier(scene_state)
+        video.update(role=role,scene_state_id=scene_state,sha256=sha(project.root/relative),original_name=Path(path).name)
     if split not in ('train', 'validation') or not 1 <= max_frames <= 1000:
         raise ValueError('Invalid video sampling')
     evidence['videos'].append(video)

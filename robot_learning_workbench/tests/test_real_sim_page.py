@@ -73,3 +73,20 @@ client.busy=True;client.phase='start';client.cancel();client.done({'ok':True,'re
 assert sent==['cancel']and client.running
 client.running=False;client.timer.stop()
 ''',tmp_path)
+
+
+def test_authored_comparison_is_visible_as_no_physics_and_native_stays_distinct(tmp_path):
+    qt('''
+from pathlib import Path
+import sys
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.real_sim_page import RealSimPage
+app=QApplication([]);p=RealSimPage('/no/worker',[],Path(sys.argv[1]));p.catalog_timer.stop();p.client.timer.stop()
+simulation={'applied_sim_joint_rad':[0.]*6,'sim_joint_delta_rad':[0.]*6,'physics_steps':0,'state_application':'authored_measured_fk'}
+p.update_progress({'session_state':'OBSERVING','simulation':simulation})
+assert 'FK 시각 비교'in p.simulated.text()and '물리 실행 없음'in p.simulated.text()
+simulation={**simulation,'physics_steps':10,'state_application':'native_physics_joint_target'}
+p.update_progress({'session_state':'OBSERVING','simulation':simulation})
+assert 'Sim 관절값'in p.simulated.text()and '물리 실행 없음'not in p.simulated.text()
+p.close();app.processEvents()
+''',tmp_path)

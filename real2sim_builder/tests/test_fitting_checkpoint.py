@@ -1,3 +1,4 @@
+"""Advanced Codex/source-refit contracts retained alongside the default staged pipeline."""
 import pytest
 from real2sim_builder.project import Project,Candidate
 from real2sim_builder.files import write,read
@@ -51,9 +52,9 @@ def test_pipeline_restores_best_after_later_model_round(tmp_path,monkeypatch,exi
     monkeypatch.setattr(automation,'modeling_tasks',lambda *a:None)
     monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:{'decision':{'action':'complete'if rounds[0]==2 else'numeric','objects':[],'evidence':['w'],'reason':'refine','scene_plan':{'object_poses':[],'cameras':[],'needs':[]}if rounds[0]==1 else None}})
     if exit_kind=='failure':
-        with pytest.raises(RuntimeError):automation.reconstruct(p,candidate='draft',config={'objects':{}},run_modeling=True,max_review_calls=1)
+        with pytest.raises(RuntimeError):automation._refit_reconstruct(p,candidate='draft',config={'objects':{}},run_modeling=True,max_review_calls=1)
     else:
-        result=automation.reconstruct(p,candidate='draft',config={'objects':{}},run_modeling=True,max_review_calls=2 if exit_kind=='complete'else 1)
+        result=automation._refit_reconstruct(p,candidate='draft',config={'objects':{}},run_modeling=True,max_review_calls=2 if exit_kind=='complete'else 1)
         assert result['restored_best']
         assert result['status']==('STOPPED' if exit_kind=='stop' else 'BEST_RESTORED_UNVERIFIED'if exit_kind=='complete'else 'REVIEW_BUDGET_EXHAUSTED')
     assert c.scene['test_round']==1
@@ -86,6 +87,25 @@ def test_review_quota_resume_uses_validated_fitting_without_repeating_it(tmp_pat
     monkeypatch.setattr(automation,'_reconstruct',lambda *a,**k:pytest.fail('completed fitting repeated'))
     monkeypatch.setattr(automation,'modeling_tasks',lambda *a:None)
     monkeypatch.setattr(authoring,'run_codex_modeling',lambda *a,**k:{'decision':{'action':'complete','objects':[],'evidence':['w'],'reason':'ok'}})
-    result=automation.reconstruct(p,candidate='same',config=config,run_modeling=True)
+    result=automation._refit_reconstruct(p,candidate='same',config=config,run_modeling=True)
     assert result['status']=='VISUAL_DRAFT_REVIEWED' and result['review_calls']==1
     assert Candidate(p,'same').scene==c.scene
+
+
+def test_review_failure_finalizes_project_status_after_restoring_best(tmp_path,monkeypatch):
+    from real2sim_builder import automation,authoring
+    from real2sim_builder.codex_cli import CodexExecutionError
+    p=Project.create(tmp_path,'quota state');c=Candidate.create(p,'same')
+    def stage(project,**kw):
+        write(c.root/'metrics.json',metrics(p,c,.1))
+        return {'status':'DRAFT_READY','needs':[],'stages':{'codex_review':{'status':'WAITING_FOR_CODEX_REVIEW'}}}
+    monkeypatch.setattr(automation,'_reconstruct',stage)
+    monkeypatch.setattr(automation,'modeling_tasks',lambda *a:None)
+    def fail(*a,**k):raise CodexExecutionError('USAGE_LIMIT')
+    monkeypatch.setattr(authoring,'run_codex_modeling',fail)
+    with pytest.raises(CodexExecutionError):automation._refit_reconstruct(p,candidate='same',config={'objects':{}},run_modeling=True)
+    saved=read(c.root/'reconstruction.json')
+    assert saved['status']=='FAILED'and saved['error_code']=='USAGE_LIMIT'
+    assert p.state['status']=='FAILED'and p.state['stage']=='CODEX_REVIEW'
+    assert p.state['error_code']=='USAGE_LIMIT'
+    assert saved['resume']['available']and not(p.root/'working/run.lock').exists()

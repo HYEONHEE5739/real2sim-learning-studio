@@ -20,7 +20,7 @@ def export_project(tmp_path):
             'visual':{'type':'box'},'collision':{'type':'box'},'color':value([.5,.2,.1],'measured'),'physics':{'mass_kg':value(None),'friction':value(.1,'measured')}})
     pose=np.eye(4);pose[:3,:3]=[[1,0,0],[0,-1,0],[0,0,-1]];pose[2,3]=1
     for name in('side','wrist'):
-        scene['cameras'].append({'id':name,'frame':'world','pose':value(pose.tolist(),'calibrated'),'K':value([[640.,0,320.],[0,640.,240.],[0,0,1]],'calibrated'),
+        scene['cameras'].append({'id':name,'camera_type':name,'frame':'world','pose':value(pose.tolist(),'calibrated'),'K':value([[640.,0,320.],[0,640.,240.],[0,0,1]],'calibrated'),
             'resolution':[640,480],'distortion':value([0.]*5,'calibrated')})
     project.save_scene(scene)
     write(project.root/'working/validation/report.json',{'passed':False,'input_signature':project.signature(),'scope':'synthetic unvalidated review'})
@@ -73,7 +73,8 @@ def test_changed_registered_manifest_is_not_a_normal_selectable_scene(tmp_path):
     assert not rows or all(r.get('valid')is False and r.get('reason')for r in rows),'Changed package still appears as a normal Scene'
 
 
-def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_path):
+@pytest.mark.parametrize('distorted',[False,True])
+def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_path,distorted):
     from real2sim_builder.evidence import import_robot
     from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
     from robot_learning_workbench.robot.pose_render import create_pose_renderer
@@ -89,7 +90,10 @@ def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_
         link='link'+str(i);lo,hi=device.profile['joints'][name]['limits']
         parts.append(f'<link name="{link}"><visual><geometry><box size="0.03 0.03 0.08"/></geometry></visual></link><joint name="{name}" type="revolute"><parent link="{previous}"/><child link="{link}"/><origin xyz="0 0 0.08"/><axis xyz="0 1 0"/><limit lower="{lo}" upper="{hi}" effort="1" velocity="1"/></joint>');previous=link
     model.write_text(''.join(parts)+'</robot>');import_robot(project,model,joints=dict.fromkeys(JOINTS,0.),base=np.eye(4).tolist())
-    scene=project.scene;scene['robot_model']={'path':'input/robot.urdf','model_sha256':hashlib.sha256(model.read_bytes()).hexdigest(),'joint_names':list(JOINTS),'mapping_verified':False};project.save_scene(scene)
+    scene=project.scene;scene['robot_model']={'path':'input/robot.urdf','model_sha256':hashlib.sha256(model.read_bytes()).hexdigest(),'joint_names':list(JOINTS),'mapping_verified':False}
+    if distorted:scene['cameras'][1]['distortion']['value']=[.12,0,0,0,0]
+    photo=copy.deepcopy(scene['cameras'][0]);photo.update(id='photo_reference',camera_type='external',resolution=[160,120]);scene['cameras'].append(photo)
+    project.save_scene(scene)
     write(project.root/'working/validation/report.json',{'passed':False,'input_signature':project.signature()})
     # Explicit synthetic auxiliary collision declarations: export/parser checks
     # remain real and the resulting Package is authoring-only, not task physics.
@@ -105,7 +109,20 @@ def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_
     with pytest.raises(ValueError,match='physics requires native'):
         create_renderer(view,tmp_path/'interactive')
     with create_pose_renderer(view,tmp_path/'render')as renderer:
+        assert set(renderer.static.camera_views)=={'side','wrist'}
         result=renderer.render([0.]*6);moved=renderer.render([.2,0,0,0,0,0])
+        from real2sim_builder.rendering import Renderer
+        with Renderer(view.authored_scene,view.package.root,tmp_path/'builder-render')as builder:
+            assert np.array_equal(result['images']['side'],builder.rgb('side'))
+        if distorted:
+            from real2sim_builder.cameras import distort_render
+            cam=next(c for c in view.authored_scene['cameras']if c['id']=='wrist');coefficients=cam['distortion']['value'];cam['distortion']['value']=[0.]*5
+            ideal=renderer.render([0.]*6);cam['distortion']['value']=coefficients
+            assert np.array_equal(result['images']['wrist'],distort_render(cam,ideal['images']['wrist']))
+            assert not np.array_equal(result['images']['wrist'],ideal['images']['wrist'])
+            assert read(destination/'authored_scene.json')['cameras'][1]['distortion']==scene['cameras'][1]['distortion']
+            projection=read(destination/'camera_projection.json')
+            assert projection['cameras']['wrist']['distortion']==coefficients
     assert moved['applied_sim_joint_rad']==[.2,0,0,0,0,0]and np.any(moved['images']['side']!=result['images']['side'])
     assert result['physics_steps']==0 and result['applied_sim_joint_rad']==[0.]*6
     assert set(result['images'])=={'side','wrist'}and all(rgb.shape==(480,640,3)for rgb in result['images'].values())
@@ -121,6 +138,28 @@ def test_authored_export_uses_verified_model_mapping_and_measured_fk_render(tmp_
     setup=real_sim_setup(workspace,project.root,destination/'scene.json','mujoco')
     recipe=setup['recipe'];recipe['output']['directory']=str(workspace/'paired-output');path=workspace/'paired.yaml';path.write_text(yaml.safe_dump(recipe))
     assert prepared(str(path),str(Path(__file__).parents[1]/'task_modules.yaml'))['state']=='runtime_ready'
+    # The same child used by the Real/Sim screen must support explicitly
+    # selected authored comparison exports without claiming physics execution.
+    from robot_learning_workbench.recipe import read_recipe,prepare_recipe
+    from robot_learning_workbench.robot.render_transport import RenderProcess
+    import time
+    recipe['execution']['device_source']='memory';path.write_text(yaml.safe_dump(recipe))
+    plan=prepare_recipe(read_recipe(path));plan.output_path.mkdir(parents=True)
+    assert {'pose_render.py','cameras.py','isaac_render.py'}<={Path(name).name for name in plan.effective_settings['code_files']}
+    process=RenderProcess(plan,mapping)
+    try:
+        process.observe([0.]*6);deadline=time.monotonic()+20
+        while process.last_live is None:
+            process.poll();time.sleep(.01);assert time.monotonic()<deadline
+        assert process.last_live['state_application']=='authored_measured_fk'
+        assert process.last_live['physics_steps']==0
+        process.capture({'id':'authored_pair','sample':{'q_measured':[.2,0,0,0,0,0]}})
+        pair=None
+        while pair is None:
+            pair=process.poll();time.sleep(.01);assert time.monotonic()<deadline
+        assert pair['physics_steps']==0 and pair['applied_sim_joint_rad']==[.2,0,0,0,0,0]
+        assert set(pair['images'])=={'side','wrist'}
+    finally:process.close()
     damaged=copy.deepcopy(mapping);damaged['profile']['urdf_sha256']='f'*64
     from robot_learning_workbench.robot.calibration import fingerprint
     damaged['sha256']=fingerprint({k:v for k,v in damaged.items()if k!='sha256'})

@@ -5,7 +5,6 @@ import pytest
 
 def test_retired_geometry_settings_do_not_become_runtime_requirements(tmp_path):
     qt_check(tmp_path,'''
-from real2sim_builder.sfm import backend
 model=Path(sys.argv[1])/'weights';model.write_bytes(b'local test checkpoint')
 source=Path(sys.argv[1])/'mast3r';(source/'mast3r').mkdir(parents=True)
 (source/'mast3r/model.py').write_text('# installed source fixture')
@@ -14,7 +13,6 @@ config={'candidate':'same_candidate','sam':{'python':sys.executable,'model':str(
              'source':str(source),'colmap_python':sys.executable}}
 write(p.root/'input/reconstruction.yaml',config)
 assert ui.runtime_needs(config)==[],ui.runtime_needs(config)
-assert backend({})=='mast3r_colmap'
 legacy={'sam':config['sam'],'da3':config['sam']}
 assert ui.runtime_needs(legacy)==[]
 assert ui.runtime_needs({'sam':config['sam']})==[]
@@ -35,9 +33,9 @@ d.close()
 ''')
 
 
-def test_codex_render_progress_maps_to_single_screen_and_preserves_auth_controls(tmp_path):
+def test_advanced_refit_progress_maps_to_single_screen_and_preserves_auth_controls(tmp_path):
     qt_check(tmp_path,'''
-d=ui.ReconstructionDialog(p.root,sys.executable)
+d=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
 d.busy=lambda:True
 for stage,phrase,key in [('CODEX ANALYSIS','Codex','analysis'),('SCENE_COMPOSITION','Camera','camera'),('FITTING','렌더','fitting')]:
  p.update(status='RUNNING',stage=stage)
@@ -52,12 +50,11 @@ d.busy=lambda:False;d.close()
 def test_existing_scene_prepare_button_opens_current_dialog_with_saved_backend(tmp_path):
     qt_check(tmp_path,'''
 from robot_learning_workbench.ui.scene_inputs import SceneInputs
-from real2sim_builder.sfm import backend
 config={'candidate':'saved','geometry':{'backend':'mast3r_colmap','source':'saved runtime'}}
 write(p.root/'input/reconstruction.yaml',config)
 seen=[]
 def inspect(dialog):
- assert backend(dialog.configuration())=='mast3r_colmap'
+ assert dialog.configuration()['geometry']['backend']=='mast3r_colmap'
  assert dialog.configuration()==config
  assert not dialog.findChildren(QTabWidget)and not dialog.findChildren(QTableWidget)
  seen.append(dialog.candidate.text())
@@ -88,7 +85,7 @@ def test_reconstruction_hands_effective_render_settings_without_running_geometry
     monkeypatch.setattr(hybrid,'alignment_metrics',compare)
     config={'objects':{'block':{'prompt':'block'}},'scene_state_id':'layout',
         'scene_plan':{'object_poses':[],'cameras':[],'needs':[]},'fitting':{'max_evaluations':7}}
-    result=automation.reconstruct(project,candidate='fit',config=config,refit_only=refit)
+    result=automation._refit_reconstruct(project,candidate='fit',config=config,refit_only=refit)
     assert received[0]['max_evaluations']==7
     assert received[0]['optimize_appearance']is(not refit)
     if refit:assert received[0]['optimize_dimensions']is False

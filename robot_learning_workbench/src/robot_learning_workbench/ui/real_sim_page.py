@@ -17,7 +17,7 @@ class RealSimPage(QWidget):
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         box=QVBoxLayout(self);title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');box.addWidget(title)
-        hint=QLabel('Follower 측정값을 Sim의 목표 관절값으로 사용합니다. Sim은 중력·충돌을 계산하므로 실제 자세와 차이가 날 수 있습니다. 중단하면 새 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('Native Scene은 측정 관절값을 목표로 중력·충돌을 계산합니다. 시각 비교용 Scene은 같은 측정 관절값으로 FK 렌더하며 물리는 실행하지 않습니다. 중단하면 새 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
         selection=QHBoxLayout();box.addLayout(selection);selection.addWidget(QLabel('Scene'));self.scene_combo=QComboBox();selection.addWidget(self.scene_combo,1)
         selection.addWidget(QLabel('Simulation'));self.engine=QComboBox();self.engine.addItem('MuJoCo','mujoco');self.engine.addItem('Isaac Lab','isaaclab');selection.addWidget(self.engine)
         self.scene_combo.currentIndexChanged.connect(self.load_selected);self.engine.currentIndexChanged.connect(self.load_selected)
@@ -146,7 +146,8 @@ class RealSimPage(QWidget):
         if p.get('q_measured'):self.measured.setText('Follower 측정값 (rad) · '+', '.join(f'{q:.4f}'for q in p['q_measured']))
         if p.get('simulation'):
             simulation=p['simulation'];delta=max(abs(q)for q in simulation['sim_joint_delta_rad'])
-            self.simulated.setText('Sim 관절값 (rad) · '+', '.join(f'{q:.4f}'for q in simulation['applied_sim_joint_rad'])+f' · 최대 추종 차이 {delta:.4f}rad')
+            mode='FK 시각 비교 · 물리 실행 없음 · 'if simulation.get('state_application')=='authored_measured_fk'else'Sim 관절값 (rad) · '
+            self.simulated.setText(mode+', '.join(f'{q:.4f}'for q in simulation['applied_sim_joint_rad'])+f' · 최대 추종 차이 {delta:.4f}rad')
         for n,timing in p.get('camera_timing',{}).items():
             if timing:self.camera_labels[n].setText(('MEMORY 'if p.get('device_source')=='memory'else'REAL ')+n.upper()+f" · {timing.get('received_fps',0)or 0:.1f}FPS · age {timing['age_ms']:.0f}ms · Δt {timing['joint_skew_ms']:.0f}ms")
         if p.get('render_timing'):

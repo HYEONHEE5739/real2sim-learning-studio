@@ -15,8 +15,13 @@ def run(root):
             launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
         view=SceneView(config['scene'],config['engine'],config['settings'],config['mapping'])
         if view.identity!=config['identity']:raise ValueError('Scene changed before render child startup')
-        with create_renderer(view,root/'runtime')as renderer:
-            atomic_json(root/'ready.json',{'ready':True,'identity':view.identity})
+        comparison=view.render_type=='authored'
+        if comparison:
+            from .pose_render import create_pose_renderer
+        factory=create_pose_renderer if comparison else create_renderer
+        with factory(view,root/'runtime')as renderer:
+            interval=1/30 if comparison else renderer.control_dt_s
+            atomic_json(root/'ready.json',{'ready':True,'identity':view.identity,'render_type':view.render_type,'physics_enabled':not comparison})
             last_target=None;next_step=time.monotonic()
             while not(root/'stop').exists():
                 request=None;capture=False
@@ -30,11 +35,11 @@ def run(root):
                 now=time.monotonic()
                 if now<next_step:time.sleep(min(.01,next_step-now));continue
                 if request is None:
-                    if last_target is not None:
+                    if last_target is not None and not comparison:
                         renderer.advance(last_target);next_step=now+renderer.control_dt_s
                     else:time.sleep(.01)
                     continue
-                seen['capture.json'if capture else'latest.json']=request['id'];last_target=request['q'];result=renderer.render(last_target);generation+=1;next_step=now+renderer.control_dt_s
+                seen['capture.json'if capture else'latest.json']=request['id'];last_target=request['q'];result=renderer.render(last_target);generation+=1;next_step=now+interval
                 folder=root/'captures'/request['id']if capture else root/'live'/str(generation%2);folder.mkdir(parents=True,exist_ok=True)
                 files={}
                 for name,rgb in result.pop('images').items():

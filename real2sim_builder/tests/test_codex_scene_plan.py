@@ -1,3 +1,4 @@
+"""Advanced Codex/source-refit contracts retained alongside the default staged pipeline."""
 import copy
 import numpy as np
 import pytest
@@ -127,7 +128,7 @@ def test_scene_plan_can_complete_missing_mesh_support_anchor_but_cannot_move_it(
 
 
 def test_missing_mesh_anchor_requests_bounded_typed_composition_feedback(tmp_path):
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.scene import value
     p=Project.create(tmp_path,'support feedback');scene=legacy_scene()
     parent=scene['objects'][0]
@@ -144,7 +145,7 @@ def test_missing_mesh_anchor_requests_bounded_typed_composition_feedback(tmp_pat
 
 
 def test_composition_does_not_overwrite_conflicting_configured_anchor(tmp_path):
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     scene=legacy_scene();z=scene['objects'][0]['dimensions']['value'][2]/2
     relation={'support':'table','source':'user_declared','status':'CONFIRMED','evidence':['declared contact'],'parallel':True,
         'support_anchor':{'point_m':[0,0,z],'normal':[0,0,1]}}

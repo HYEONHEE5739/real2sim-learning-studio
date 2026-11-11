@@ -15,6 +15,16 @@ import time
 from functools import lru_cache
 from contextlib import contextmanager
 
+VISUAL_POLICY_VERSION='codex-visual/2'
+COMPLETED_EXIT_GRACE_S=2.
+VISUAL_DISABLED_FEATURES=('shell_tool','code_mode_host','multi_agent','apps','plugins',
+    'browser_use','computer_use','image_generation','view_image','sleep_tool','hooks',
+    'skill_search','skill_mcp_dependency_install','goals','unbounded_connection_retries')
+
+
+def visual_feature_args():
+    return [arg for feature in VISUAL_DISABLED_FEATURES for arg in ('--disable',feature)]
+
 
 def environment():
     allowed=('PATH','HOME','LANG','LC_ALL','TERM','TMPDIR','SSL_CERT_FILE','SSL_CERT_DIR','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS')
@@ -41,11 +51,150 @@ def capabilities(program):
     version=run(['--version']).splitlines()[0].strip()
     login=run(['login','--help']);run(['login','status','--help']);run(['logout','--help'])
     help_text=run(['exec','--help'])
+    root_help=run(['--help'])
     try:server=run(['app-server','--help'])
     except RuntimeError:server=''
     for flag in ('--ignore-user-config','--model','--ephemeral','--output-schema','--json'):
         if flag not in help_text:raise RuntimeError('Codex CLI 필수 옵션 미지원: '+flag)
-    return {'version':version,'device_auth':'--device-auth'in login,'app_server':'--listen'in server}
+    try:
+        flags=run(['features','list',*visual_feature_args()])
+        disabled={parts[0] for line in flags.splitlines()if len(parts:=line.split())>=3 and parts[-1]=='false'}
+    except RuntimeError:disabled=set()
+    return {'version':version,'device_auth':'--device-auth'in login,'app_server':'--listen'in server,
+            'images':'--image'in help_text,'structured_output':'--output-schema'in help_text,
+            'vlm_policy':set(VISUAL_DISABLED_FEATURES)<=disabled and '--no-daemon'in root_help}
+
+
+def image_supported(model, models):
+    """Require modality metadata, never infer vision from a model's name."""
+    row=next((r for r in models if r.get('model',r.get('slug'))==model),None)
+    if row is not None and 'inputModalities'in row:return 'image'in row['inputModalities']
+    return 'image'in model_metadata(model).get('input_modalities',[])
+
+
+def model_metadata(model):
+    """Only capability fields; polling timestamps/account identity are not inputs."""
+    path=Path(environment()['CODEX_HOME'])/'models_cache.json'
+    try:rows=json.loads(path.read_text())['models']
+    except (OSError,ValueError,KeyError):return {}
+    row=next((r for r in rows if r.get('slug')==model),{})
+    return {k:row[k]for k in ('slug','input_modalities','supported_reasoning_levels')if k in row}
+
+
+def validate_answer(value, schema):
+    """Validate the JSON types used by Builder schemas, including strict keys."""
+    if 'anyOf'in schema:
+        for branch in schema['anyOf']:
+            try:validate_answer(value,branch);return
+            except ValueError:pass
+        raise ValueError('Codex response does not match any schema branch')
+    kinds={'object':dict,'array':list,'string':str,'integer':int,'number':(int,float),'boolean':bool,'null':type(None)}
+    kind=schema.get('type')
+    if isinstance(kind,list):
+        for entry in kind:
+            try:validate_answer(value,{**schema,'type':entry});return
+            except ValueError:pass
+        raise ValueError('Codex response union type mismatch')
+    if kind and (not isinstance(value,kinds[kind])or(kind in ('number','integer')and isinstance(value,bool))):
+        raise ValueError('Codex response type mismatch: '+kind)
+    if isinstance(value,float)and not math.isfinite(value):raise ValueError('Nonfinite Codex response')
+    if 'enum'in schema and value not in schema['enum']:raise ValueError('Codex response enum mismatch')
+    if isinstance(value,dict):
+        props=schema.get('properties',{})
+        if not set(schema.get('required',[]))<=value.keys():raise ValueError('Incomplete Codex response')
+        if schema.get('additionalProperties')is False and set(value)-props.keys():raise ValueError('Unexpected Codex response fields')
+        for key,item in value.items():
+            if key in props:validate_answer(item,props[key])
+            elif isinstance(schema.get('additionalProperties'),dict):validate_answer(item,schema['additionalProperties'])
+    if isinstance(value,list):
+        if len(value)<schema.get('minItems',0)or len(value)>schema.get('maxItems',math.inf):raise ValueError('Codex response array length')
+        for item in value:validate_answer(item,schema.get('items',{}))
+    if isinstance(value,(int,float))and not isinstance(value,bool):
+        if value<schema.get('minimum',-math.inf)or value>schema.get('maximum',math.inf):raise ValueError('Codex response numeric bounds')
+
+
+def execute(command, work, folder, timeout_s, checkpoint, runtime, *, launcher=None, trace=False, completed_output=None):
+    """Single owned exec boundary for Stage7 and visual judgments. No retry."""
+    import tempfile
+    from .files import write
+    child=None;started=time.monotonic();events=[];offset=0;buffer=b'';completed=False;usage=None
+    completed_since=None;controlled_exit=False;failed_event=False
+    def event(kind,**fields):
+        from datetime import datetime,timezone
+        events.append({'event':kind,'elapsed_s':round(time.monotonic()-started,6),
+            'utc':datetime.now(timezone.utc).isoformat(),**fields})
+        write(Path(folder)/'events.json',{'schema':'codex-events/1','events':events,
+            'turn_completed':completed,'usage':usage,'raw_transcript_saved':False})
+    def drain(log):
+        nonlocal offset,buffer,completed,usage,failed_event
+        if not trace:return
+        # pread does not move the shared stdout file offset while the CLI writes.
+        for _ in range(8):
+            chunk=os.pread(log.fileno(),65536,offset)
+            if not chunk:break
+            offset+=len(chunk);buffer+=chunk
+            while b'\n'in buffer:
+                line,buffer=buffer.split(b'\n',1)
+                try:row=json.loads(line)
+                except ValueError:continue
+                if not isinstance(row,dict):continue
+                kind=row.get('type');allowed={'thread.started','turn.started','turn.completed','turn.failed','error','item.started','item.completed','item.updated'}
+                if kind not in allowed:continue
+                fields={};item=row.get('item')or{}
+                if isinstance(item,dict):
+                    category=item.get('type')
+                    if category in ('command_execution','agent_message','reasoning','mcp_tool_call','file_change','web_search','collab_tool_call'):fields['item_type']=category
+                    key=item.get('id','')
+                    if isinstance(key,str)and key.startswith('item_')and key[5:].isdigit():fields['item_id']=key
+                    if type(item.get('exit_code'))is int:fields['exit_code']=item['exit_code']
+                    if item.get('status')in('in_progress','completed','failed'):fields['status']=item['status']
+                if kind=='turn.completed':
+                    completed=True;raw=row.get('usage')or{}
+                    usage={k:v for k,v in raw.items()if k in('input_tokens','cached_input_tokens','output_tokens','total_tokens')and type(v)is int}if isinstance(raw,dict)else None
+                if kind in('turn.failed','error'):
+                    fields['code']=failure_code(row);failed_event=True
+                event(kind,**fields)
+            if len(buffer)>1024*1024:buffer=b'';event('oversized_event_discarded')
+    try:
+        checkpoint()
+        with tempfile.TemporaryFile(mode='w+b')as log:
+            child=(launcher or subprocess.Popen)(command,cwd=work,stdin=subprocess.DEVNULL,
+                stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=environment())
+            if trace:event('process.started',pid=child.pid,timeout_s=timeout_s)
+            try:
+                while child.poll()is None:
+                    drain(log)
+                    checkpoint()
+                    if trace and completed and not failed_event and completed_output and completed_output():
+                        if completed_since is None:completed_since=time.monotonic()
+                        if time.monotonic()-completed_since>=COMPLETED_EXIT_GRACE_S or time.monotonic()-started>=timeout_s:
+                            event('completed_output.exit_grace',grace_s=COMPLETED_EXIT_GRACE_S)
+                            controlled_exit=True;break
+                    else:completed_since=None
+                    if time.monotonic()-started>timeout_s:
+                        if trace:event('parent.timeout')
+                        raise TimeoutError('Codex execution timeout')
+                    time.sleep(.1)
+                drain(log)
+                if child.returncode and not controlled_exit:
+                    log.seek(0);code='MODELING_FAILED'
+                    for line in log:
+                        try:error_event=json.loads(line)
+                        except ValueError:continue
+                        classified=failure_code(error_event)
+                        if classified!='MODELING_FAILED':code=classified
+                    raise CodexExecutionError(code)
+            except InterruptedError:
+                if trace:event('parent.interrupted')
+                raise
+            finally:
+                stop_child(child)
+                drain(log)
+                if trace:event('process.exited',returncode=child.returncode)
+                write(Path(folder)/'codex.log',{'returncode':child.returncode,'runtime':runtime})
+    except BaseException as error:
+        error.remote_attempted=child is not None
+        raise
 
 
 def stop_child(child):
@@ -212,10 +361,10 @@ def auth_lock(*,exclusive=False):
         finally:fcntl.flock(stream,fcntl.LOCK_UN)
 
 
-def sandbox_args(work):
+def sandbox_args(work,*,read_only=False):
     """Workspace writes, offline tools, no credential/home reads (official profile)."""
     home=environment()['CODEX_HOME']
-    fs={':minimal':'read',str(Path(work).resolve()):'write',str(Path(home)/'auth.json'):'deny',
+    fs={':minimal':'read',str(Path(work).resolve()):'read'if read_only else'write',str(Path(home)/'auth.json'):'deny',
         str(Path(home)/'tmp'):'read',str(Path(executable()).resolve().parent.parent):'read'}
     table='{'+','.join(json.dumps(k)+'='+json.dumps(v)for k,v in fs.items())+'}'
     return ['-c','default_permissions="builder"','-c','permissions.builder.filesystem='+table,

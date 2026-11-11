@@ -9,7 +9,7 @@ import time
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl,QProcess,QProcessEnvironment,QThread,QTimer,QSettings,pyqtSignal
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,
-    QPushButton,QPlainTextEdit,QGroupBox,QProgressBar)
+    QPushButton,QPlainTextEdit,QGroupBox,QProgressBar,QGridLayout)
 from .project import Project
 from .files import read,write
 from . import codex_cli
@@ -38,9 +38,10 @@ def saved_configuration(project,candidate):
 
 
 def runtime_needs(config,*,refit=False):
-    """Only the installed authoring tools; retired inference models are irrelevant."""
+    """The stage runner checks each Runtime when reached; refits need Blender."""
     import shutil
     needs=[]
+    if not refit:return needs
     if not shutil.which(os.environ.get('REAL2SIM_BLENDER','blender')):needs.append('Blender: 기존 실행 파일을 REAL2SIM_BLENDER로 지정하세요.')
     if not shutil.which('bwrap'):needs.append('Blender Sandbox: 기존 bwrap 실행 파일이 필요합니다.')
     return needs
@@ -112,10 +113,17 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         scene_layout.addWidget(QLabel('저장된 Evidence · Capture · Scene Memo 자동 사용'))
         progress=QGroupBox('Scene 제작 진행 상황');steps=QVBoxLayout(progress);layout.addWidget(progress)
         self.stage_labels={}
-        perception='Object / Reference 연결'
-        for key,title in (('analysis','장면 분석'),('inference',perception),('modeling','Blender USDA 제작'),
-                          ('camera','최초 Scene / 추정 Camera 구성'),('fitting','Real/Sim 정합 및 Codex 수정 검토'),('checkpoint','최선 결과 저장')):
-            label=QLabel('○ '+title);steps.addWidget(label);self.stage_labels[key]=(label,title)
+        if self.refit:
+            titles=(('analysis','장면 분석'),('inference','Object / Reference 연결'),('modeling','Blender USDA 제작'),
+                    ('camera','공유 Sensor Camera'),('fitting','Real/Sim 정합 및 Codex 검토'),('checkpoint','최선 결과 저장'))
+            for key,title in titles:
+                label=QLabel('○ '+title);steps.addWidget(label);self.stage_labels[key]=(label,title)
+        else:
+            from .stage_artifacts import STAGE_NAMES
+            grid=QGridLayout();steps.addLayout(grid)
+            for index,title in enumerate(STAGE_NAMES):
+                label=QLabel('○ '+str(index+1)+'. '+title);label.setWordWrap(True)
+                grid.addWidget(label,index//2,index%2);self.stage_labels[str(index+1)]=(label,str(index+1)+'. '+title)
         self.current=QLabel('저장된 작업 확인 중…');self.current.setWordWrap(True);steps.addWidget(self.current)
         row=QHBoxLayout();layout.addLayout(row)
         self.start=QPushButton('생성 시작 / 이어서 실행');self.start.clicked.connect(self.run);row.addWidget(self.start)
@@ -187,7 +195,12 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         if generation!=self.generation:return
         self.clear_account()
         if 'error'in result:
-            self.summary.setPlainText(result['error']);self.pending_start=False;self.controls();return
+            self.summary.setPlainText(result['error'])
+            pending=self.pending_start;self.pending_start=False
+            if pending and not self.refit:
+                try:self.launch()
+                except Exception as error:self.summary.setPlainText(str(error))
+            self.controls();return
         self.account=result['snapshot'];self.version.setText(self.account['version'])
         logged=self.account['logged_in'];identity=self.account.get('account')or{}
         self.login_status.setText(('로그인됨'if logged else'로그인 필요')+' · '+' · '.join(str(identity[k])for k in ('email','planType')if identity.get(k)))
@@ -203,7 +216,7 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         self.model.setPlaceholderText('지원 모델 ID 직접 입력'if not self.account['models']else'모델 선택')
         if self.pending_start:
             self.pending_start=False
-            if not logged:self.summary.setPlainText('Builder Codex 로그인 후 이어서 실행하세요.')
+            if not logged and self.refit:self.summary.setPlainText('Builder Codex 로그인 후 이어서 실행하세요.')
             else:
                 try:self.launch()
                 except Exception as error:self.summary.setPlainText(str(error))
@@ -262,7 +275,8 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
     def launch(self):
         config=self.configuration();needs=runtime_needs(config,refit=self.refit)
         if needs:raise ValueError('\n'.join(needs)+'\n기존 설치 환경의 Reconstruction 설정을 복원하세요. 자동 설치하지 않습니다.')
-        codex_cli.selection_args(self.model.currentText(),self.effort.currentData(),self.account['models'])
+        if self.account and self.account.get('logged_in'):
+            codex_cli.selection_args(self.model.currentText(),self.effort.currentData(),self.account['models'])
         if (self.project.root/'working/run.lock').exists():raise ValueError('이 Project가 실행 중입니다. 기존 작업 종료 후 재개하세요.')
         if self.temporary:self.temporary.cleanup()
         self.temporary=tempfile.TemporaryDirectory(prefix='real2sim-reconstruct-')
@@ -297,6 +311,17 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         try:
             state=self.project.state;report=json.loads((root/'reconstruction.json').read_text())if(root/'reconstruction.json').is_file()else{}
             stages=report.get('stages',{});stage=state.get('stage')if self.busy() else None
+            if not self.refit:
+                from .stage_artifacts import STAGE_NAMES
+                for key,(label,title)in self.stage_labels.items():
+                    text=('● 'if stage=='STAGE_'+key else'✓ 'if stages.get(key,{}).get('status')=='COMPLETE'else'○ ')+title
+                    if label.text()!=text:label.setText(text)
+                active=int(stage[6:])if stage and stage.startswith('STAGE_')else report.get('failed_stage')
+                title=STAGE_NAMES[active-1]if type(active)is int and 1<=active<=14 else report.get('status','대기')
+                self.current.setText('현재 작업: '+('Stage '+str(active)+' · 'if active else'')+title)
+                if not self.busy()and report and not self.report_started:self.show_report(report)
+                return
+
             mapping={'CODEX ANALYSIS':'analysis','SCENE_COMPOSITION':'camera','GEOMETRY':'modeling','CODEX_MODELING':'modeling','FITTING':'fitting','CODEX_REVIEW':'fitting','CHECKPOINT':'checkpoint'}
             config=self.configuration()
             complete={'analysis':bool(config.get('scene_analysis')),'inference':bool(config.get('objects')),
@@ -326,9 +351,11 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
     def show_report(self,report):
         status=report.get('status','FAILED');code=report.get('error_code')
         names={'VISUAL_DRAFT_REVIEWED':'완료 · 시각 초안','NEEDS_MORE_DATA':'추가 자료 필요','STOPPED':'중단 · 이어서 실행 가능',
+               'DRAFT_READY':'초안 Package 생성 · 센서/물리 정확도 별도 검증',
+               'NEEDS_RUNTIME':'Runtime/인증 필요 · 완료 Stage 보존','NOT_SUPPORTED':'미지원 기능 · 완료 Stage 보존','NEEDS_REVIEW':'검토 필요 · 완료 Stage 보존',
                'FAILED':'실패 · 저장된 작업 보존','USAGE_LIMIT':'사용량 한도 도달 · 계정 전환 후 이어서 실행',
                'AUTHENTICATION_FAILED':'인증 필요 · 로그인 후 이어서 실행','MODEL_UNAVAILABLE':'모델 접근 불가 · 모델을 다시 선택하세요.'}
-        self.summary.setPlainText(names.get(code,names.get(status,status))+'\n'+report.get('error','')+'\n'+'\n'.join(report.get('needs',[])))
+        self.summary.setPlainText(names.get(code,names.get(status,status))+'\n'+str(report.get('error',''))+'\n'+'\n'.join(report.get('needs',[])))
 
     def finished(self,code,*_):
         self.discard_output();self.report_started=False

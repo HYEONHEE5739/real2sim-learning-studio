@@ -1,5 +1,8 @@
 # 최신 로컬 UI·Support와 Geometry Backend 통합
 
+> 2026-11-10 후속: VLM은 공통 Codex CLI로 전환했고 MASt3R/COLMAP 실행 코드는 제거했다. 현재 설정과 검증 범위는 [Codex VLM 전환](codex-vlm-migration.md)을 따른다. 아래 과거 실행·설치 기록은 당시 상태다.
+
+
 > 2026-11-08 저장 구조 이전 후 현재 Scene 경로는 `workbench_runs/scenes/auto-version`, `pickplace-colorblock`이며 Cache는 Candidate `.cache`에 있다. 이 문서 아래의 옛 폴더명은 당시 실행 기록이다. 현재 저장/입력 역할·실제 이전 검증은 [저장 구조 이전 기록](storage-migration.md)을 따른다.
 
 > **최신 적용 상태 (2026-11-08):** 통합본을 원래 `/home/hyeonhee/imitation_learnig_project`에 반영했다. 실행 위치는 원래 폴더이며 `./run_workbench_ui.sh`를 사용한다. DA3 제품 Worker/실행 분기를 제거했다. 아래 Worktree/독립 Smoke 절은 최종 적용 이전의 검증 이력이다. 기존 Scene 실제 실행 및 남은 제한은 문서 마지막 절을 따른다.

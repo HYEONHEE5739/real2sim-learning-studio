@@ -63,7 +63,9 @@ def save_inputs(path,files,notes,*,scene_state=None):
                     evidence=project.evidence
                     next(i for i in evidence['images']if i['id']==row['id'])['physical_camera_id']=None
                     write(project.root/'input/evidence.yaml',evidence)
-            elif suffix in('.mp4','.mov','.avi'):add_video(project,file,camera='reference')
+            elif suffix in('.mp4','.mov','.avi'):
+                if role!='scene_photo':raise ValueError('Scene Video belongs in Scene inputs, not Model Reference images')
+                add_video(project,file,camera='reference',max_frames=15,role='scene_video',scene_state=state)
             else:
                 if suffix in('.urdf','.obj','.usd','.usda','.usdc'):
                     from real2sim_builder.export import copy_native_asset,verify_native_closure

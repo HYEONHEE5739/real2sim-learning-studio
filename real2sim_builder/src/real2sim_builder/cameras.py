@@ -12,6 +12,59 @@ CLIP = (0.001, 1000.0)
 CONVENTIONS = {'canonical': '+X right, +Y down, +Z forward', 'render': '+X right, +Y up, -Z forward', 'conversion': OPTICAL_TO_RENDER.tolist(), 'clip_m': list(CLIP)}
 
 
+def camera_roles(scene,image_records=()):
+    """Resolve render roles from recorded metadata, never Camera IDs.
+
+    View registrations also cover imported Captures whose image rows predate
+    camera_type. An observation purpose alone does not identify a robot sensor.
+    Model-reference images supply appearance context, not placement cameras.
+    """
+    kinds={'side':'side','wrist':'wrist','external':'reference'}
+    evidence={c['id']:set()for c in scene['cameras']}
+    def add(name,kind):
+        if name in evidence and kind is not None:
+            if kind not in kinds:raise ValueError('Unknown Camera role metadata: '+str(kind))
+            evidence[name].add(kinds[kind])
+    for camera in scene['cameras']:
+        add(camera['id'],camera.get('camera_type'))
+        if camera.get('purpose')=='inspection':evidence[camera['id']].add('reference')
+    for row in scene.get('view_registrations',{}).values():add(row.get('camera'),row.get('camera_type'))
+    for image in image_records:
+        name=image.get('camera')
+        if name not in evidence:continue
+        if image.get('role')=='model_reference':evidence[name].add('context');continue
+        # Explicit capture type is authoritative even in older image rows that
+        # use the generic scene_photo role for a Side/Wrist observation.
+        if image.get('camera_type')is not None:add(name,image['camera_type'])
+        elif image.get('role')=='scene_photo':evidence[name].add('reference')
+    result={}
+    for name,roles in evidence.items():
+        observed=roles-{'context'}
+        if len(observed)>1:raise ValueError('Conflicting Camera role metadata: '+name)
+        result[name]=next(iter(observed))if observed else('context'if roles else'unknown')
+    return result
+
+
+def select_render_cameras(scene,*,image_records=(),camera_ids=None):
+    """Transient descriptor: sensors by default, explicit reference on demand.
+
+    The complete source Scene, calibrated values and image bindings are retained
+    by the caller. Only this independent render description is filtered.
+    """
+    import copy
+    roles=camera_roles(scene,image_records)
+    names=[n for n,k in roles.items()if k in('side','wrist')]if camera_ids is None else list(camera_ids)
+    if not names:raise ValueError('Camera role metadata required to select robot sensors')
+    for name in names:
+        if name not in roles:raise ValueError('Unknown render Camera: '+name)
+        if roles[name]in('unknown','context'):raise ValueError('Camera role metadata required; context/reference image is not a render Camera: '+name)
+    selected=set(names);result=copy.deepcopy(scene)
+    result['cameras']=[c for c in result['cameras']if c['id']in selected]
+    if 'view_registrations'in result:
+        result['view_registrations']={key:row for key,row in result['view_registrations'].items()if row['camera']in selected}
+    return result
+
+
 def pinhole_scene(scene):
     """Transient native projection; RGB/mask/depth use the original lens warp.
 

@@ -1,0 +1,110 @@
+# Copy values into the existing Workspace reconstruction configuration.
+# Paths refer to existing installations. No credentials, installation or download.
+scene_state_id: REPLACE_WITH_ONE_STATIC_LAYOUT_ID
+video_candidates: 15
+depth:
+  batch_size: 4
+  process_res: 336
+  overlap: 3
+support:
+  categories: [table, floor]
+  frame_selection:
+    mode: hybrid
+image_preparation:
+  size: 512
+  upsample: true
+  infill: false
+  remove_background: true
+  remove_bg_max_side: 1024
+  check_valid: false
+pose:
+  samples: 10
+  surface_samples: 10000
+  foundationpose: false
+  canonicalize_front: true
+  front_refine: true
+  front_yaw_snap: true
+  bake_fitted_tilt: auto  # Native Codex canonical +Z meshes are not pixel-aligned.
+articulation:
+  objects: []  # Requested new articulated Objects currently stop NOT_SUPPORTED.
+physics:
+  engine: mujoco
+  steps: 500  # Bounded maximum 10000; actual motion remains a diagnostic.
+  apply_stabilized_poses: false  # Requires matching explicit pose_review; never automatic promotion.
+simulator:
+  engine: mujoco
+runtimes:
+  blender:
+    executable: /EXISTING/Blender/blender  # Scoped existing REAL2SIM_BLENDER selector.
+  preparation:
+    python: /EXISTING/general/bin/python
+  da3:
+    python: /EXISTING/da3/bin/python
+    source: /EXISTING/Depth-Anything-3/src
+    model: /EXISTING/local-snapshot-b2359bdf726fb44ef62acca04d629dcf158053e7
+    timeout_s: 900
+  sam3:
+    python: /EXISTING/sam31/bin/python
+    model: /EXISTING/sam3.1_multiplex.pt
+    minimum_free_mib: 4096
+    model_options:
+      confidence_threshold: 0.5
+      imgsz: 1024
+      device: cuda:0
+  vlm:
+    provider: codex  # Existing login/model/effort/usage controls; no separate credentials.
+    timeout_s: 900
+  image_edit:
+    python: /EXISTING/r2s-comfy/bin/python
+    source: /EXISTING/ComfyUI
+    # Directory fingerprint includes GGUF, text encoders and VAE; no download.
+    models: /EXISTING/ComfyUI/models
+    workflow: /EXISTING/real2sim_builder/config/flux-kontext-gguf.api.json
+    provider: comfy_gguf  # Local generation; Codex performs visual review.
+    minimum_free_mib: 6144
+    timeout_s: 900
+    model_options:
+      size: 512
+      steps: 20
+      timeout_s: 600
+      models:
+        unet: flux1-kontext-dev-Q4_K_S.gguf
+        clip: clip_l.safetensors
+        t5: t5xxl_fp8_e4m3fn_scaled.safetensors
+        vae: ae.safetensors
+  # Optional full Runtime overrides (same spec fields as image_edit):
+  # image_edit_removal: {python: ..., source: ..., provider: ...}
+  # image_edit_objects: {python: ..., source: ..., provider: ...}
+  # Stage5 selects image_edit_removal; Stage6 selects image_edit_objects.
+  # Missing overrides fall back to image_edit. No backend is silently replaced.
+  rembg:
+    python: /EXISTING/rembg/bin/python
+    model: /EXISTING/local/bria-rmbg.onnx  # Existing Bria weights only; no download.
+  decomposition:
+    # CPU-only pruning/SBERT/ray order, after the SAM GPU child has exited.
+    python: /EXISTING/r2s-cpd/bin/python
+    model: /EXISTING/all-mpnet-base-v2/snapshot
+  prior_depth:
+    python: /EXISTING/r2s-prior-depth/bin/python
+    source: /EXISTING/Prior-Depth-Anything
+    model: /EXISTING/Prior-Depth-Anything/snapshot-vitl-vitb-v1.0
+    minimum_free_mib: 5120
+    timeout_s: 600
+  pose:
+    python: /EXISTING/r2s-cpd/bin/python
+    simfoundry_source: /EXISTING/SimFoundry  # CPU software front-view rendering only.
+  foundationpose:
+    python: /EXISTING/foundationpose/bin/python
+    source: /EXISTING/FoundationPose
+  physics:
+    python: /EXISTING/builder-engine/bin/python
+    source: /EXISTING/Isaac/omni.usd.libs  # Existing pxr + bin directories for child bootstrap.
+    timeout_s: 240
+  simulator:
+    python: /EXISTING/builder-engine/bin/python
+    source: /EXISTING/Isaac/omni.usd.libs
+    timeout_s: 240
+# Optional explicit world_registration: measured/calibrated support_to_world
+# 4x4 with evidence, required for a Scene that already contains a Robot World.
+# Optional metric_anchors: explicit 4 observed_corners_camera_m + measured
+# dimensions_xy_m/source/evidence; diagnostic only, never automatic rescaling.

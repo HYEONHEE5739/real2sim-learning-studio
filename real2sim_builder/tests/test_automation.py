@@ -8,20 +8,21 @@ def test_empty_inputs_keep_a_measured_draft_without_launching_models_or_export(t
     config={'measurements':[{'id':'block','kind':'box','dimensions_m':[.03]*3,'evidence':['caliper']}],
             'objects':{'block':{'prompt':'red cube'}}}
     result=reconstruct(p,candidate='auto_1',config=config)
-    assert result['status']=='WAITING_FOR_CODEX' and result['needs']
-    c=Candidate(p,'auto_1');assert c.scene['objects'][0]['pose']['value']is None
+    assert result['status']=='NEEDS_MORE_DATA' and result['needs']
+    c=Candidate(p,'auto_1');assert not c.scene['objects']  # No synthetic measured Object before Scene input preparation
     assert not(p.root/'working/current_scene.yaml').exists() and not list((p.root/'exports').iterdir())
     assert not(c.root/'.cache/inference/sam-job').exists()
-    assert p.state['status']=='WAITING_FOR_CODEX'
+    assert p.state['status']=='NEEDS_MORE_DATA'
 
 
-def test_cli_reconstruction_uses_saved_configuration_and_retains_original(tmp_path,capsys):
+def test_cli_reconstruction_uses_candidate_configuration_and_retains_original(tmp_path,capsys):
     from real2sim_builder.cli import main
     from test_builder_export import legacy_scene
     p=Project.create(tmp_path,'cli auto');p.save_scene(legacy_scene());before=sha(p.root/'working/current_scene.yaml')
     config=tmp_path/'configuration.yaml';write(config,{'objects':{'block':{'prompt':'cube'}}})
     assert main(['reconstruct',str(p.root),'--candidate','cli_auto','--config',str(config)])==2
-    assert read(p.root/'input/reconstruction.yaml')['objects']['block']['prompt']=='cube'
+    assert not(p.root/'input/reconstruction.yaml').exists()
+    assert read(p.root/'scratch/agent/cli_auto/reconstruction-config.yaml')['objects']['block']['prompt']=='cube'
     assert sha(p.root/'working/current_scene.yaml')==before
     assert read(p.root/'scratch/agent/cli_auto/reconstruction.json')['physical_verified']is False
 
@@ -162,16 +163,16 @@ def test_scene_memo_is_one_exact_text_with_legacy_read_only_restore(tmp_path):
     assert legacy.read_bytes()=='과거 메모\r\n그대로'.encode()and sha(a.root/'input/evidence.yaml')==before
 
 
-def test_changed_memo_hands_off_to_codex_before_any_model_or_fitting(tmp_path,monkeypatch):
+def test_missing_scene_photos_stops_before_models_and_preserves_changed_memo(tmp_path,monkeypatch):
     from real2sim_builder import automation
     from real2sim_builder.evidence import save_scene_memo
     p=Project.create(tmp_path,'memo first');save_scene_memo(p,'配置だけ変更。 Different cups now.')
     def forbidden(*a,**kw):raise AssertionError('Models must wait for current memo interpretation')
     monkeypatch.setattr('real2sim_builder.inference.run_models',forbidden)
     result=automation.reconstruct(p,candidate='fresh',config={'scene_analysis':{'memo_sha256':'old'},'objects':{'cup':{'prompt':'cup'}}})
-    assert result['status']=='WAITING_FOR_CODEX_ANALYSIS'
-    c=Candidate(p,'fresh');task=read(c.root/'modeling/tasks.json')
-    assert task['scene_memo']['text']=='配置だけ変更。 Different cups now.'
+    assert result['status']=='NEEDS_MORE_DATA'and result['failed_stage']==1
+    c=Candidate(p,'fresh')
+    assert (p.root/'input/scene_memo.txt').read_text()=='配置だけ変更。 Different cups now.'
     assert 'inference'not in result['stages']and not(c.root/'.cache/inference').exists()
 
 

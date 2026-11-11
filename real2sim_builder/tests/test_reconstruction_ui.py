@@ -163,7 +163,7 @@ d=ui.ReconstructionDialog(p.root,sys.executable)
 missing=ui.runtime_needs({})
 assert not any(any(label in item for label in ('SAM','MASt3R','COLMAP','DA3'))for item in missing)
 ui.os.environ['REAL2SIM_BLENDER']='/missing/blender'
-assert any('Blender'in item for item in ui.runtime_needs({}))
+assert any('Blender'in item for item in ui.runtime_needs({},refit=True))
 assert not any('DA3'in item for item in missing)
 d.show_report({'status':'FAILED','error_code':'USAGE_LIMIT'})
 assert '계정 전환'in d.summary.toPlainText()
@@ -218,12 +218,13 @@ again.close()
 ''')
 
 
-def test_codex_first_ui_has_no_geometry_preflight_and_opens_existing_visual_record(tmp_path):
+def test_staged_ui_has_per_stage_preflight_and_opens_existing_visual_record(tmp_path):
     qt_check(tmp_path,'''
 assert not any('SAM' in n or 'COLMAP' in n or 'MASt3R' in n for n in ui.runtime_needs({'sam':{},'geometry':{'backend':'not-installed'}}))
 d=ui.ReconstructionDialog(p.root,sys.executable)
 assert hasattr(d,'evidence_button')
-assert not any('SAM' in title or 'COLMAP' in title for _,title in d.stage_labels.values())
+assert len(d.stage_labels)==14 and any('SAM3' in title for _,title in d.stage_labels.values())
+assert not any('COLMAP' in title for _,title in d.stage_labels.values())
 from real2sim_builder.candidate import Candidate
 from real2sim_builder.visual_evidence import record
 c=Candidate.create(p,d.candidate.text());record(c,'01_scene_analysis','STOPPED',summary='retained')
@@ -232,4 +233,22 @@ ui.QDesktopServices.openUrl=lambda url:opened.append(url.toLocalFile())
 d.open_evidence()
 assert opened==[str(c.root/'evidence/index.html')]
 d.close()
+''')
+
+
+def test_stage_progress_and_logout_allow_cpu_and_depth_work_before_codex(tmp_path):
+    qt_check(tmp_path,'''
+d=ui.ReconstructionDialog(p.root,sys.executable)
+assert len(d.stage_labels)==14
+commands=[];d.start_cli=lambda args:commands.append(args)
+d.pending_start=True
+d.account_result({'snapshot':{'version':'test','logged_in':False,'account':{},'models':[],'usage':[]}},0)
+assert commands and commands[0][0]=='reconstruct'
+d.busy=lambda:True
+for stage in (1,2,3,7,10,14):
+ p.update(status='RUNNING',stage='STAGE_'+str(stage))
+ d.update_progress()
+ assert d.stage_labels[str(stage)][0].text().startswith('●')
+ assert str(stage) in d.current.text()
+d.busy=lambda:False;d.close()
 ''')

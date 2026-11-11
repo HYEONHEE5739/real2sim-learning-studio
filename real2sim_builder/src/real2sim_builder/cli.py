@@ -103,8 +103,7 @@ def main(argv=None):
         print(json.dumps(rows,indent=2));return 0
     if args.command=='reconstruct':
         from .automation import reconstruct
-        from .authoring import save_configuration
-        config=save_configuration(project,read(args.config))if args.config else None
+        config=read(args.config)if args.config else None
         result=reconstruct(project,candidate=args.candidate,config=config,scene_state=args.scene_state,run_modeling=args.run_modeling,max_modeling_calls=args.max_modeling_calls,max_review_calls=args.max_review_calls)
         print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED')else 2
     if args.command=='register-views':

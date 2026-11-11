@@ -31,8 +31,8 @@ def view_loss(metrics,priority):
                  sum(priority['weights'][role]for role in groups))
 
 
-def surface_points(obj,scene,root,count=2000):
-    """Sample the declared known geometry, not an invented hidden observation."""
+def surface_mesh(obj,scene,root):
+    """One Native mesh adapter for fitting/exported USDA geometry parts."""
     import trimesh
     from .geometry import parts,mesh_data
     from ..scene import local_path
@@ -47,7 +47,12 @@ def surface_points(obj,scene,root,count=2000):
             mesh=trimesh.Trimesh(vertices*np.asarray(part.get('scale',[1,1,1])),faces,process=False)
         else:raise ValueError('Unsupported measured surface geometry')
         mesh.apply_transform(part['pose']);meshes.append(mesh)
-    mesh=trimesh.util.concatenate(meshes);triangles=mesh.triangles;areas=mesh.area_faces
+    return trimesh.util.concatenate(meshes)
+
+
+def surface_points(obj,scene,root,count=2000):
+    """Sample the declared known geometry, not an invented hidden observation."""
+    mesh=surface_mesh(obj,scene,root);triangles=mesh.triangles;areas=mesh.area_faces
     if not np.isfinite(areas).all()or areas.sum()<=0:raise ValueError('Invalid model surface area')
     rng=np.random.default_rng(0);selected=triangles[rng.choice(len(areas),count,p=areas/areas.sum())]
     u=rng.random(count);v=rng.random(count);u=np.sqrt(u)
@@ -233,7 +238,6 @@ def fit_scene(project,scene,folder,options=None):
             with np.load(path,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
             loaded[key,name]=raw
             if name not in models:models[name]=cKDTree(surface_points(next(o for o in scene['objects']if o['id']==name),scene,project.root))
-    first=observation_scene(scene,by_id[train_ids[0]],project.root,complete=False)
     strategy_rows=[]
     from ..cameras import camera_pixels,optical_rays
     for row in training:
@@ -260,51 +264,52 @@ def fit_scene(project,scene,folder,options=None):
     history=[];evaluations=0;best=copy.deepcopy(scene);best_scales={};best_loss=float('inf');best_metrics=[]
     priority=view_priority(images,options.get('view_weights',{}));report['view_priority']=priority
     def summarize(metrics):return view_loss(metrics,priority)
-    # One compiled native Scene and context, reused sequentially across views.
-    with renderer_factory(first,project.root,folder/'native',options.get('renderer','software-egl'))as renderer:
+    from ..rendering import render_views
+    with render_views(renderer_factory,project.root,folder/'native',project.evidence['images'],options.get('renderer','software-egl'))as render_view:
         def measure(trial,scales,keys):
             metrics=[]
             for key in keys:
                 project.checkpoint();image=by_id[key];posed=observation_scene(trial,image,project.root,complete=False)
-                renderer.update_scene(posed);cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
-                rgb=renderer.rgb(image['camera']);target=targets[key];real=target['rgb']
-                if rgb.shape!=real.shape:raise ValueError('Native/Real RGB resolution differs')
-                diagonal=float(np.hypot(*real.shape[:2]));union=np.zeros(real.shape[:2],bool);object_metrics=[]
-                native_depth=None
-                for row in target['rows']:
-                    name=row['object_id'];mask,boundary,distance=target['masks'][name];rendered=renderer.mask(image['camera'],name)
-                    union|=mask|rendered;edge=rendered^binary_erosion(rendered)
-                    missing=float((mask&~rendered).sum()/mask.sum());full=row.get('mask_kind')=='silhouette'
-                    extra=float((rendered&~mask).sum()/max(1,rendered.sum()))if full else 0.
-                    edge_loss=float(distance_transform_edt(~edge)[boundary].mean()/diagonal)
-                    if full and edge.any():edge_loss+=float(distance[edge].mean()/diagonal)
-                    raw=loaded[key,name];scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',key),1.)
-                    obj=next(o for o in posed['objects']if o['id']==name);pose=world_pose(posed,obj)
-                    if 'uv_original'in raw and 'depth_relative'in raw:
-                        uv=raw['uv_original'];rays=optical_rays(cam,uv)
-                        optical=rays*raw['depth_relative'][:,None]*scale;world=optical@camera_pose[:3,:3].T+camera_pose[:3,3]
-                        if native_depth is None:native_depth=renderer.depth(image['camera'])
-                        pixels=np.rint(uv).astype(int);h,w=mask.shape;valid=(pixels[:,0]>=0)&(pixels[:,0]<w)&(pixels[:,1]>=0)&(pixels[:,1]<h)
-                        pixels=pixels[valid];z=optical[valid,2]
-                        visible=mask[pixels[:,1],pixels[:,0]]&rendered[pixels[:,1],pixels[:,0]]
-                        residual=abs(native_depth[pixels[:,1],pixels[:,0]][visible]-z[visible])/sigma
-                        depth_loss=float(np.minimum(residual,3).mean())if len(residual)else 0.
-                    else:
-                        world=raw['points_world_m'];depth_loss=0.
-                    base_obj=next(o for o in scene['objects']if o['id']==name)
-                    tree=models[name]
-                    if obj['dimensions']['value']!=base_obj['dimensions']['value']:
-                        tree=cKDTree(surface_points(obj,posed,project.root))
-                    distances=tree.query((world-pose[:3,3])@pose[:3,:3])[0]
-                    trimmed=np.sort(distances)[:max(1,int(len(distances)*.8))]
-                    metric_loss=float(np.minimum(trimmed/sigma,3).mean())if len(trimmed)else 0.
-                    object_metrics.append({'object_id':name,'mask':missing+extra,'edge':edge_loss,'depth':depth_loss,'metric':metric_loss,
-                        'iou':float((mask&rendered).sum()/max(1,(mask|rendered).sum()))})
-                rgb_loss=float(np.minimum(abs(rgb.astype(float)-real.astype(float))[union]/255.,.3).mean())if union.any()else float(np.minimum(abs(rgb.astype(float)-real.astype(float))/255.,.3).mean())
-                losses={name:float(np.mean([r[name]for r in object_metrics]))if object_metrics else 0. for name in('mask','edge','depth','metric')}
-                losses['rgb']=rgb_loss;total=sum(weights[k]*v for k,v in losses.items())
-                metrics.append({'image_id':key,'camera_type':camera_type(image),'split':image['split'],'loss':float(total),'components':losses,'objects':object_metrics,
-                    'iou':float(np.mean([r['iou']for r in object_metrics]))if object_metrics else None})
+                with render_view(posed,image['camera'])as renderer:
+                    cam=next(c for c in posed['cameras']if c['id']==image['camera']);camera_pose=world_pose(posed,cam)
+                    rgb=renderer.rgb(image['camera']);target=targets[key];real=target['rgb']
+                    if rgb.shape!=real.shape:raise ValueError('Native/Real RGB resolution differs')
+                    diagonal=float(np.hypot(*real.shape[:2]));union=np.zeros(real.shape[:2],bool);object_metrics=[]
+                    native_depth=None
+                    for row in target['rows']:
+                        name=row['object_id'];mask,boundary,distance=target['masks'][name];rendered=renderer.mask(image['camera'],name)
+                        union|=mask|rendered;edge=rendered^binary_erosion(rendered)
+                        missing=float((mask&~rendered).sum()/mask.sum());full=row.get('mask_kind')=='silhouette'
+                        extra=float((rendered&~mask).sum()/max(1,rendered.sum()))if full else 0.
+                        edge_loss=float(distance_transform_edt(~edge)[boundary].mean()/diagonal)
+                        if full and edge.any():edge_loss+=float(distance[edge].mean()/diagonal)
+                        raw=loaded[key,name];scale=row.get('depth_scale',1.)*scales.get(row.get('depth_batch',key),1.)
+                        obj=next(o for o in posed['objects']if o['id']==name);pose=world_pose(posed,obj)
+                        if 'uv_original'in raw and 'depth_relative'in raw:
+                            uv=raw['uv_original'];rays=optical_rays(cam,uv)
+                            optical=rays*raw['depth_relative'][:,None]*scale;world=optical@camera_pose[:3,:3].T+camera_pose[:3,3]
+                            if native_depth is None:native_depth=renderer.depth(image['camera'])
+                            pixels=np.rint(uv).astype(int);h,w=mask.shape;valid=(pixels[:,0]>=0)&(pixels[:,0]<w)&(pixels[:,1]>=0)&(pixels[:,1]<h)
+                            pixels=pixels[valid];z=optical[valid,2]
+                            visible=mask[pixels[:,1],pixels[:,0]]&rendered[pixels[:,1],pixels[:,0]]
+                            residual=abs(native_depth[pixels[:,1],pixels[:,0]][visible]-z[visible])/sigma
+                            depth_loss=float(np.minimum(residual,3).mean())if len(residual)else 0.
+                        else:
+                            world=raw['points_world_m'];depth_loss=0.
+                        base_obj=next(o for o in scene['objects']if o['id']==name)
+                        tree=models[name]
+                        if obj['dimensions']['value']!=base_obj['dimensions']['value']:
+                            tree=cKDTree(surface_points(obj,posed,project.root))
+                        distances=tree.query((world-pose[:3,3])@pose[:3,:3])[0]
+                        trimmed=np.sort(distances)[:max(1,int(len(distances)*.8))]
+                        metric_loss=float(np.minimum(trimmed/sigma,3).mean())if len(trimmed)else 0.
+                        object_metrics.append({'object_id':name,'mask':missing+extra,'edge':edge_loss,'depth':depth_loss,'metric':metric_loss,
+                            'iou':float((mask&rendered).sum()/max(1,(mask|rendered).sum()))})
+                    rgb_loss=float(np.minimum(abs(rgb.astype(float)-real.astype(float))[union]/255.,.3).mean())if union.any()else float(np.minimum(abs(rgb.astype(float)-real.astype(float))/255.,.3).mean())
+                    losses={name:float(np.mean([r[name]for r in object_metrics]))if object_metrics else 0. for name in('mask','edge','depth','metric')}
+                    losses['rgb']=rgb_loss;total=sum(weights[k]*v for k,v in losses.items())
+                    metrics.append({'image_id':key,'camera_type':camera_type(image),'split':image['split'],'loss':float(total),'components':losses,'objects':object_metrics,
+                        'iou':float(np.mean([r['iou']for r in object_metrics]))if object_metrics else None})
             return metrics
         baseline=measure(best,{},train_ids);best_metrics=baseline;best_loss=summarize(baseline)
         write(folder/'best-scene.yaml',best);idle=0;stop='max_iterations'
@@ -423,42 +428,46 @@ def alignment_metrics(project,scene,folder,options=None):
         return run_job(project,scene,folder,options,'compare')
     from PIL import Image,ImageOps
     from ..validation import compare,mask_metrics,camera_quality
-    from ..rendering import Renderer,render_scene
+    from ..rendering import Renderer,render_scene,render_views
     from ..capture import observation_scene
     from ..observations import registered_images,camera_type
     from ..scene import local_path,world_pose,validate
     from ..files import write
     options=options or{};rows=cloud_inputs(project,scene);images,state,needs=registered_images(project,scene=scene)
-    result=[];models={};renderer=None
-    from contextlib import ExitStack
-    with ExitStack()as stack:
+    result=[];models={}
+    with render_views(options.get('renderer_factory',Renderer),project.root,folder/'native',project.evidence['images'],options.get('renderer','software-egl'))as render_view:
         for image in images:
             active=[r for r in rows if r['image_id']==image['id']]
             project.checkpoint();posed=observation_scene(scene,image,project.root,complete=False)
             try:validate(render_scene(posed),project.root,complete=True)
             except ValueError as error:needs.append(str(error));continue
             destination=folder/'previews'/image['id']
-            if renderer is None:
-                renderer=stack.enter_context(options.get('renderer_factory',Renderer)(posed,project.root,folder/'native',options.get('renderer','software-egl')))
-            else:renderer.update_scene(posed)
-            real=np.asarray(ImageOps.exif_transpose(Image.open(local_path(project.root,image['path']))).convert('RGB'))
-            metrics=compare(real,renderer.rgb(image['camera']),destination);objects=[]
-            for row in active:
-                name=row['object_id'];obj=next(o for o in scene['objects']if o['id']==name)
-                target=np.asarray(Image.open(local_path(project.root,row['mask'])).convert('L'))>0
-                mask=renderer.mask(image['camera'],name);diagnostic=mask_metrics(target,mask)
-                if name not in models:models[name]=surface_points(obj,scene,project.root)
-                pose=world_pose(scene,obj);samples=models[name]@pose[:3,:3].T+pose[:3,3]
-                with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:
-                    distance=cKDTree(samples).query(data['points_world_m'])[0]
-                trimmed=np.sort(distance)[:max(1,int(.8*len(distance)))]
-                objects.append({'object_id':name,'mask_kind':row.get('mask_kind','visible_fragment'),**diagnostic,
-                    'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2)))if len(trimmed)else None,
-                    'independent_3d_position_error_m':None,'rotation_error_rad':None,
-                    'scope':'derived depth surface residual; not independent measured pose accuracy'})
-            scope=scene.get('view_registrations',{}).get(image['id'],{}).get('comparison_scope','full_scene')
-            result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects,
-                'comparison_scope':scope,'use_for_best_selection':scope=='full_scene'})
+            with render_view(posed,image['camera'])as renderer:
+                real=np.asarray(ImageOps.exif_transpose(Image.open(local_path(project.root,image['path']))).convert('RGB'))
+                metrics=compare(real,renderer.rgb(image['camera']),destination);objects=[]
+                for row in active:
+                    name=row['object_id'];obj=next(o for o in scene['objects']if o['id']==name)
+                    target=np.asarray(Image.open(local_path(project.root,row['mask'])).convert('L'))>0
+                    mask=renderer.mask(image['camera'],name);diagnostic=mask_metrics(target,mask)
+                    if name not in models:models[name]=surface_points(obj,scene,project.root)
+                    pose=world_pose(scene,obj);samples=models[name]@pose[:3,:3].T+pose[:3,3]
+                    with np.load(local_path(project.root,row['path']),allow_pickle=False)as data:
+                        distance=cKDTree(samples).query(data['points_world_m'])[0]
+                    trimmed=np.sort(distance)[:max(1,int(.8*len(distance)))]
+                    objects.append({'object_id':name,'mask_kind':row.get('mask_kind','visible_fragment'),**diagnostic,
+                        'observed_point_surface_rmse_m':float(np.sqrt(np.mean(trimmed**2)))if len(trimmed)else None,
+                        'independent_3d_position_error_m':None,'rotation_error_rad':None,
+                        'scope':'derived depth surface residual; not independent measured pose accuracy'})
+                scope=scene.get('view_registrations',{}).get(image['id'],{}).get('comparison_scope','full_scene')
+                cam=next(c for c in posed['cameras']if c['id']==image['camera'])
+                from ..scene import frame_world
+                context={'optical_convention':'+X right, +Y down, +Z forward','camera_frame':cam['frame'],
+                    'T_world_camera':world_pose(posed,cam).tolist(),'T_parent_camera':cam['pose']['value'],
+                    'T_world_parent':frame_world(posed,cam['frame']).tolist(),
+                    'T_world_robot_links':{name:frame_world(posed,name).tolist()for name in posed['frames']if name.startswith('robot_link_')},
+                    'scope':'Actual transforms used for this measured-q render; estimated extrinsics remain uncalibrated'}
+                result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects,
+                    'comparison_scope':scope,'use_for_best_selection':scope=='full_scene','render_context':context})
     report={'images':result,'scene_state_id':state,'needs':list(dict.fromkeys(needs)),
             'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison','camera_quality':camera_quality(result,options.get('camera_quality'))}
     write(folder/'metrics.json',report);return report

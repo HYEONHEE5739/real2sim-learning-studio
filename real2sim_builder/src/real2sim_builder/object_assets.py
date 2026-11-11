@@ -312,3 +312,100 @@ def instance_operation(project,manifest,name,*,pose=None,role='manipulable_objec
         'visual':geometry(record['visual']),'collision':geometry(record['collision']),'assets':assets,
         'object_asset':{'asset_id':record['asset_id'],'version':record['version'],'entry_asset':entry_key,'default_prim':record['default_prim'],
             'collision_status':record['collision_status'],'manifest_asset':manifest_key,'manifest_sha256':sha(local_path(project.root,manifest))}}
+
+
+def scaled_asset_operation(candidate, observed, scale, folder, *, rotation=None):
+    """Derive a new native Asset version for an unmeasured CPD scale hypothesis.
+
+    Always start from the immutable Stage7 binding, never the current instance;
+    retries cannot scale an already scaled mesh a second time.
+    """
+    from .export import copy_native_asset
+    from .stage_artifacts import StageNeeds
+    from pxr import Usd, UsdGeom, Gf, Sdf
+    project=candidate.project;folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    binding=observed['asset_reference'];scene=candidate.scene
+    source=local_path(project.root,scene['assets'][binding['manifest_asset']]['path'])
+    record=verify_object_asset(project,read(source))
+    dimensions=record['dimensions']
+    constraints=dimensions.get('constraints',{})
+    if dimensions['provenance']in('measured','calibrated')or any(v is not None for v in constraints.get('value',[])):
+        raise ValueError('CPD cannot scale protected asset dimensions')
+    if type(scale)not in(int,float)or not np.isfinite(scale)or scale<=0:raise ValueError('Positive finite scale required')
+    rotation=np.eye(3)if rotation is None else np.asarray(rotation,float)
+    if rotation.shape!=(3,3)or not np.isfinite(rotation).all()or not np.allclose(rotation@rotation.T,np.eye(3),atol=1e-8)or not np.isclose(np.linalg.det(rotation),1):raise ValueError('Proper native canonical rotation required')
+    identity={'source_manifest_sha256':sha(source),'scale':scale,'rotation':rotation.tolist()}
+    receipt=folder/'scaled.json'
+    if receipt.is_file():
+        saved=read(receipt)
+        if saved['input']!=identity:raise ValueError('Scaled native asset identity changed')
+        derived=verify_object_asset(project,saved['asset'])
+    else:
+        entry=copy_native_asset(source.parent/record['entry'],folder/'source')
+        stage=Usd.Stage.Open(str(entry));root=stage.GetDefaultPrim();children=list(root.GetChildren())
+        group=UsdGeom.Xform.Define(stage,root.GetPath().AppendChild('CPDScaledGeometry'))
+        edits=Sdf.BatchNamespaceEdit()
+        for child in children:edits.Add(child.GetPath(),group.GetPath().AppendChild(child.GetName()))
+        if not stage.GetRootLayer().Apply(edits):raise StageNeeds('NOT_SUPPORTED','Native referenced geometry cannot be safely reparented for a scaled asset version')
+        matrix=Gf.Matrix4d(1.)
+        for i in range(3):
+            for j in range(3):matrix[i,j]=float(rotation[j,i]*scale)
+        group.AddTransformOp().Set(matrix);stage.GetRootLayer().Save()
+        extent=UsdGeom.BBoxCache(Usd.TimeCode.Default(),['default','render'],useExtentsHint=False).ComputeWorldBound(root).ComputeAlignedRange().GetSize()
+        dims=value(list(extent),'estimated',
+                   ['Stage8 CPD uniform-scale hypothesis; source '+sha(source)+'; accuracy NOT_VERIFIED'])
+        derived=register_object_asset(project,entry,asset_id=record['asset_id'],dimensions=dims,
+                                      origin=record['origin'],generation_id='cpd-scale-hypothesis')
+        write(receipt,{'input':identity,'asset':derived})
+    operation=instance_operation(project,derived['manifest'],observed['id'])
+    operation['op']='use_object_asset'
+    return operation
+
+
+def support_asset_operation(candidate, specification, support_to_world, folder):
+    """An explicitly dimensioned support primitive, never inferred hidden extent.
+
+    Plane normal/origin alone do not establish tabletop bounds or thickness.
+    Existing support instances remain unchanged; all geometry is a new version.
+    """
+    from pxr import Usd,UsdGeom,UsdPhysics
+    from .scene import transform
+    from .stage_artifacts import StageNeeds
+    import trimesh
+    name=identifier(specification['id']);dimensions=specification.get('dimensions',{})
+    dims=dimensions.get('value')
+    if not isinstance(dims,list)or len(dims)!=3 or any(type(x)not in(int,float)or not np.isfinite(x)or x<=0 for x in dims):
+        raise StageNeeds('NEEDS_MORE_DATA','New support needs explicit observed/estimated extents and thickness')
+    if dimensions.get('provenance')not in('measured','estimated','calibrated')or not dimensions.get('evidence'):
+        raise ValueError('Support extent provenance/evidence required')
+    pose=np.asarray(support_to_world)@transform(specification['T_support_object'])
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    receipt=folder/'registration.json';identity={'specification':specification,'support_to_world':np.asarray(support_to_world).tolist()}
+    old=next((o for o in candidate.scene['objects']if o['id']==name),None)
+    if receipt.is_file():
+        saved=read(receipt)
+        if saved['input']!=identity:raise ValueError('Support registration input changed during retry')
+        record=verify_object_asset(candidate.project,read(candidate.project.root/saved['manifest']))
+        if old and(old.get('object_asset',{}).get('manifest_sha256')!=sha(candidate.project.root/saved['manifest'])):
+            raise StageNeeds('NEEDS_REVIEW','Existing support binding differs from this attempt')
+        operation=instance_operation(candidate.project,record['manifest'],name,role='workspace',pose=pose.tolist())
+        if old:operation['op']='use_object_asset'
+        return operation
+    if old:raise StageNeeds('NEEDS_REVIEW','Existing support is preserved; choose an explicit independent new Object ID')
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);path=folder/'support.usda'
+    if not path.exists():
+        stage=Usd.Stage.CreateNew(str(path));UsdGeom.SetStageMetersPerUnit(stage,1);UsdGeom.SetStageUpAxis(stage,'Z')
+        root=UsdGeom.Xform.Define(stage,'/Object');stage.SetDefaultPrim(root.GetPrim())
+        geometry=trimesh.creation.box(extents=dims)
+        for part,is_collision in [('Visual',False),('Collision',True)]:
+            mesh=UsdGeom.Mesh.Define(stage,'/Object/'+part);mesh.CreatePointsAttr(geometry.vertices.tolist())
+            mesh.CreateFaceVertexCountsAttr([3]*len(geometry.faces));mesh.CreateFaceVertexIndicesAttr(geometry.faces.ravel().tolist())
+            if is_collision:
+                UsdPhysics.CollisionAPI.Apply(mesh.GetPrim()).CreateCollisionEnabledAttr(True);mesh.CreateVisibilityAttr('invisible')
+        stage.GetRootLayer().Save()
+    record=register_object_asset(candidate.project,path,asset_id=name,dimensions=dimensions,
+        origin='explicit support-local centered box; extents not inferred from a partial plane',generation_id='explicit-support')
+    operation=instance_operation(candidate.project,record['manifest'],name,role='workspace',pose=pose.tolist())
+    operation['pose']=pose.tolist()
+    write(receipt,{'input':identity,'manifest':record['manifest']})
+    return operation

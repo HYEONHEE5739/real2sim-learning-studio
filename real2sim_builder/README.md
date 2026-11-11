@@ -1,8 +1,12 @@
 # Real2Sim Builder
 
+현재 VLM/레거시 정리 계약: [Codex VLM 전환](../docs/codex-vlm-migration.md). DA3/SAM/FLUX/Bria/CPD Runtime은 유지하고 시각 판단은 기존 Codex 로그인·모델·추론 강도를 공유한다.
+
+체크포인트 포함 범위·최신 검증 한계와 로컬 모델/Runtime 경로 재설정은 [체크포인트 안내](../docs/simfoundry-checkpoint.md)를 따릅니다. 실제 Workspace 설정·가중치·진단 자료는 Git에 포함하지 않습니다.
+
 Offline project/candidate reconstruction, calibration, review and immutable Scene packages. Runtime files follow the existing Architecture; Native Dataset storage is owned by the Workbench and is unchanged.
 
-기본 진입점은 Scene Prepare의 **Auto Reconstruction** 또는 Builder의 **Start Reconstruction**입니다. Scene/Model 사진과 자유 메모를 Codex가 직접 분석하고, 기존 Blender에서 Object별 USDA를 제작·재사용한 뒤 실제 Simulator 렌더를 비교·수정합니다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 제품 Reconstruction의 필수 단계가 아닙니다. 단일 실행 화면의 **제작 기록 / 결과 이미지 보기**에서 최초 Scene·반복 Before/After·실제 생성 파일과 실패 기록을 확인합니다. 사용법은 [AUTO_SCENE_FITTING.md](AUTO_SCENE_FITTING.md), 제작 규칙은 [SCENE_RULES.md](SCENE_RULES.md), 이관 내역은 [SOURCE_DOCUMENTS.md](SOURCE_DOCUMENTS.md)를 따릅니다.
+기본 진입점은 Scene Prepare의 **Auto Reconstruction**입니다. 기본 엔진은 SimFoundry Stage1–14이며 DA3 Nested Mixed Precision, SAM3/VLM 분해, Codex+Sandbox Blender Mesh, CPD Pose, 기존 USD/MuJoCo/Isaac 경계를 사용합니다. Stage별 Artifact·Stop/Resume와 기존 계정/모델/사용량·제작 기록 UI를 유지합니다. 실제 Runtime 준비와 부분 구현 범위는 [전환 기록](../docs/simfoundry-reconstruction-migration.md), 설정은 [템플릿](config/simfoundry-reconstruction.example.yaml)을 확인하세요. Source 기반 Real/Sim 재정합은 기존 흐름을 유지합니다.
 
 GLB/glTF 입력·Scan 모듈/CLI/UI는 제거했습니다. 과거 의존 자산은 원본 그대로 보존하며 새 정합/Export에서 `LEGACY_UNSUPPORTED`를 반환합니다. 실측 Geometry constraint는 `candidate PROJECT constrain NAME --options constraints.yaml`로 사용합니다.
 

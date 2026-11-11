@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 from real2sim_builder.files import read,sha
 from real2sim_builder.scene import validate,world_pose
+from real2sim_builder.cameras import camera_roles,select_render_cameras
 from .calibration import JOINTS,mapper_from_metadata,joint_specs
-from ..engines.mujoco.rendering import camera_rgb
 
 
 def validate_binding(view):
@@ -17,21 +17,32 @@ def validate_binding(view):
     if model.get('path')!=package.scene['robot'].get('asset_path'):raise ValueError('Authored FK model differs from exported robot')
     if sha(package.root/model['path'])!=model['model_sha256']:raise ValueError('FK model bytes changed')
     if not any(o.get('link')for o in scene['objects']):raise ValueError('Authored Scene has no robot link geometry')
-    cameras={c['id']:c for c in scene['cameras']}
-    if not {'side','wrist'}<=cameras.keys()or any(cameras[n]['resolution']!=[640,480]for n in('side','wrist')):raise ValueError('Explicit Side/Wrist 640×480 camera declarations required')
+    sensors=select_render_cameras(scene);_sensor_bindings(sensors)
+    if any(c['resolution']!=[640,480]for c in sensors['cameras']):raise ValueError('Explicit Side/Wrist 640×480 camera declarations required')
     view.authored_scene=scene
+
+
+def _sensor_bindings(scene):
+    roles=camera_roles(scene);result={}
+    for name,role in roles.items():
+        if role not in('side','wrist'):continue
+        if role in result:raise ValueError('Ambiguous sensor role metadata: '+role)
+        result[role]=name
+    if set(result)!={'side','wrist'}:raise ValueError('Explicit Side/Wrist sensor role metadata required')
+    return result
 
 
 class AuthoredRenderer:
     def __init__(self,view,directory):
-        self.view=view;self.renderer=None;self.static=None;directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+        self.view=view;self.static=None;directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+        self.sensor_ids=_sensor_bindings(view.authored_scene)
         self.bounds=joint_specs(view.package.root/view.authored_scene['robot_model']['path'])
         if view.engine=='mujoco':
-            import mujoco
-            self.model=mujoco.MjModel.from_xml_path(str(view.package.root/view.package.scene['engines']['mujoco']['asset_path']));self.data=mujoco.MjData(self.model);self.renderer=mujoco.Renderer(self.model,height=480,width=640)
+            from real2sim_builder.rendering import Renderer
+            self.static=Renderer(select_render_cameras(view.authored_scene),view.package.root,directory)
         elif view.engine=='isaac':
             from real2sim_builder.isaac_render import IsaacRenderer
-            self.static=IsaacRenderer(view.authored_scene,view.package.root,directory,data_types=('rgb',))
+            self.static=IsaacRenderer(select_render_cameras(view.authored_scene),view.package.root,directory,data_types=('rgb',))
         else:raise ValueError('Unsupported authored Scene engine')
     def render(self,q):
         import time
@@ -41,27 +52,14 @@ class AuthoredRenderer:
         for n,x in zip(JOINTS,raw):
             if not self.bounds[n]['limits'][0]<=x<=self.bounds[n]['limits'][1]:raise ValueError('Measured joint outside authored model limits: '+n)
         scene=observation_scene(self.view.authored_scene,{'session_id':'measured','eligible':True,'q_measured':raw.tolist(),'joint_names':list(JOINTS)},self.view.package.root)
-        if self.static:images=self.static.render(scene)
-        else:
-            import mujoco
-            from scipy.spatial.transform import Rotation
-            from real2sim_builder.cameras import OPTICAL_TO_RENDER
-            for obj in scene['objects']:
-                index=mujoco.mj_name2id(self.model,mujoco.mjtObj.mjOBJ_BODY,obj['id']);pose=world_pose(scene,obj);quaternion=Rotation.from_matrix(pose[:3,:3]).as_quat()[[3,0,1,2]]
-                if index<0:raise ValueError('Authored object missing from native model')
-                address=self.model.body_jntadr[index]
-                if self.model.body_jntnum[index]and self.model.jnt_type[address]==mujoco.mjtJoint.mjJNT_FREE:
-                    offset=self.model.jnt_qposadr[address];self.data.qpos[offset:offset+7]=np.r_[pose[:3,3],quaternion]
-                else:self.model.body_pos[index]=pose[:3,3];self.model.body_quat[index]=quaternion
-            for camera in scene['cameras']:
-                index=mujoco.mj_name2id(self.model,mujoco.mjtObj.mjOBJ_CAMERA,camera['id']);pose=world_pose(scene,camera)@OPTICAL_TO_RENDER;self.model.cam_pos[index]=pose[:3,3];self.model.cam_quat[index]=Rotation.from_matrix(pose[:3,:3]).as_quat()[[3,0,1,2]]
-            mujoco.mj_forward(self.model,self.data);images={}
-            for n in('side','wrist'):images[n]=camera_rgb(self.renderer,self.data,n).copy()
-        cameras={c['id']:{'resolution':c['resolution'],'K':c['K']['value'],'T_world_optical':world_pose(scene,c).tolist()}for c in scene['cameras']if c['id']in('side','wrist')}
-        return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'source_scene':self.view.source_scene,'engine':self.view.engine,'physics_steps':0,'state_application':'authored_measured_fk',
+        self.static.update_scene(select_render_cameras(scene))
+        images={role:self.static.rgb(name)for role,name in self.sensor_ids.items()}
+        selected={c['id']:c for c in scene['cameras']}
+        cameras={role:{'camera_id':name,'resolution':selected[name]['resolution'],'K':selected[name]['K']['value'],
+            'distortion':selected[name]['distortion']['value'],'T_world_optical':world_pose(scene,selected[name]).tolist()}for role,name in self.sensor_ids.items()}
+        return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_target_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'source_scene':self.view.source_scene,'engine':self.view.engine,'physics_steps':0,'total_physics_steps':0,'simulation_time_s':0.,'state_application':'authored_measured_fk',
                 'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED','physical_verified':False}
     def close(self):
-        if self.renderer:self.renderer.close();self.renderer=None
         if self.static:self.static.close();self.static=None
     def __enter__(self):return self
     def __exit__(self,*_):self.close()

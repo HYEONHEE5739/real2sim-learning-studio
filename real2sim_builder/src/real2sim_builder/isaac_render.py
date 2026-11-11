@@ -13,12 +13,12 @@ class IsaacRenderer:
         from .rendering import render_scene
         scene=render_scene(scene)
         import isaaclab.sim as sim
-        from isaaclab.sensors import Camera,CameraCfg
         from isaacsim.core.utils.semantics import add_labels
         import omni.usd
         from .exporters.usd import export
-        self.scene=copy.deepcopy(scene);self.cameras={};self.frames={};self.sim=None
+        self.scene=copy.deepcopy(scene);self.cameras={};self.frames={};self.sim=None;self.stage=None;self.products=[];self.camera_product_paths={}
         self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
+        self.data_types=tuple(data_types)
         try:
             self.sim=sim.SimulationContext(sim.SimulationCfg(dt=1/30,device='cuda:0'))
             scratch=Path(scratch);scratch.mkdir(parents=True,exist_ok=True)
@@ -28,11 +28,6 @@ class IsaacRenderer:
             if 'semantic_segmentation'in data_types:
                 for obj in scene['objects']:
                     add_labels(self.stage.GetPrimAtPath('/World/Authored/'+obj['id']),[obj['id']],instance_name='class')
-            for camera in scene['cameras']:
-                name=camera['id'];w,h=camera['resolution']
-                self.cameras[name]=Camera(CameraCfg(prim_path='/World/Authored/'+name,spawn=None,width=w,height=h,
-                    data_types=list(data_types),
-                    colorize_semantic_segmentation=False,update_latest_camera_pose=True))
             self.sim.reset()
             self.update_scene(scene)
         except BaseException:
@@ -41,7 +36,7 @@ class IsaacRenderer:
     def update_scene(self,scene):
         from .rendering import render_scene
         scene=render_scene(scene)
-        from pxr import Gf
+        from pxr import Gf,UsdGeom
         from .scene import world_pose
         from .cameras import OPTICAL_TO_RENDER
         if scene['assets']!=self.scene['assets']:raise ValueError('Renderer geometry changed; recompile explicitly')
@@ -78,7 +73,16 @@ class IsaacRenderer:
                     set_attr(shader,'inputs:'+field,float(obj.get('material',{}).get(field,{}).get('value',default)))
         for camera in scene['cameras']:
             name=camera['id'];w,h=camera['resolution']
-            if self.resolutions.get(name)!=[w,h]:raise ValueError('Isaac camera resolution changed; recompile explicitly')
+            if name in self.resolutions and self.resolutions[name]!=[w,h]:raise ValueError('Isaac camera resolution changed; recompile explicitly')
+            self.resolutions[name]=[w,h]
+            path='/World/Authored/'+name
+            self.stage.DefinePrim(path,'Camera').SetActive(True)
+            native=UsdGeom.Camera(self.stage.GetPrimAtPath(path))
+            if not UsdGeom.Xformable(native).GetOrderedXformOps():UsdGeom.Xformable(native).AddTransformOp()
+            from .cameras import CLIP
+            native.CreateClippingRangeAttr(Gf.Vec2f(*CLIP))
+            for attr in('FocalLength','HorizontalAperture','VerticalAperture','HorizontalApertureOffset','VerticalApertureOffset'):
+                getattr(native,'Create'+attr+'Attr')()
             pose=world_pose(scene,camera)@OPTICAL_TO_RENDER;k=np.asarray(camera['K']['value']);focal=10.
             set_attr(name,'xformOp:transform',Gf.Matrix4d(*pose.T.ravel().tolist()))
             # Same USD pinhole convention as the exporter, including principal
@@ -93,15 +97,36 @@ class IsaacRenderer:
             set_attr(name,'inputs:intensity',float(light['energy']['value']))
             set_attr(name,'inputs:color',Gf.Vec3f(*light['color']['value']))
         self.camera_views={c['id']:c for c in scene['cameras']}
+        if set(self.cameras)!=set(self.camera_views):
+            self.release_cameras()
+            import omni.replicator.core as rep
+            for camera in scene['cameras']:
+                name=camera['id'];w,h=camera['resolution']
+                self.stage.GetPrimAtPath('/World/Authored/'+name).SetActive(True)
+                product=rep.create.render_product('/World/Authored/'+name,(w,h),force_new=True)
+                self.products.append(product);self.camera_product_paths[name]=product.path;self.cameras[name]={}
+                for kind in self.data_types:
+                    params={'colorize':False}if kind=='semantic_segmentation'else None
+                    annotator=rep.AnnotatorRegistry.get_annotator(kind,init_params=params,device='cpu')
+                    self.cameras[name][kind]=annotator;annotator.attach([product.path])
         self.frames.clear()
         # Rendering only: no physics step and no articulation command.
         for _ in range(3):self.sim.render()
 
     def _frame(self,camera):
         if camera not in self.frames:
-            sensor=self.cameras[camera];sensor.update(1/30,force_recompute=True);data=sensor.data
-            self.frames[camera]=({k:v[0].detach().cpu().numpy().copy()for k,v in data.output.items()},
-                copy.deepcopy(data.info[0].get('semantic_segmentation')))
+            output={};info=None;w,h=self.resolutions[camera]
+            for kind,annotator in self.cameras[camera].items():
+                packet=annotator.get_data()
+                if isinstance(packet,dict):
+                    pixels=packet['data']
+                    if kind=='semantic_segmentation':info=copy.deepcopy(packet.get('info'))
+                else:pixels=packet
+                pixels=np.asarray(pixels).copy()
+                if pixels.shape[:2]!=(h,w):raise RuntimeError('Isaac render buffer not ready or wrong resolution: '+camera+'/'+kind)
+                if pixels.ndim==2:pixels=pixels[...,None]
+                output[kind]=pixels
+            self.frames[camera]=(output,info)
         return self.frames[camera]
 
     def rgb(self,camera):
@@ -118,11 +143,30 @@ class IsaacRenderer:
         return distort_render(self.camera_views[camera],np.isin(data['semantic_segmentation'][...,0],ids),nearest=True)
     def render(self,scene):
         self.update_scene(scene);return {name:self.rgb(name)for name in self.cameras}
+    def release_cameras(self):
+        """Release requested view products, retaining compiled geometry/context."""
+        from contextlib import ExitStack
+        self.frames.clear()
+        cameras,self.cameras=self.cameras,{};products,self.products=self.products,[]
+        paths,self.camera_product_paths=self.camera_product_paths,{}
+        with ExitStack()as cleanup:
+            if self.stage is not None:
+                for name in cameras:cleanup.callback(self.stage.GetPrimAtPath('/World/Authored/'+name).SetActive,False)
+            for product in reversed(products):cleanup.callback(product.destroy)
+            for name,annotators in reversed(list(cameras.items())):
+                for annotator in reversed(list(annotators.values())):cleanup.callback(annotator.detach,[paths[name]])
+
     def close(self):
-        self.frames.clear();self.cameras.clear()
-        if self.sim is not None:
-            self.sim.clear_all_callbacks();self.sim.clear_instance();self.sim=None
-        self.stage=None
+        from contextlib import ExitStack
+        stage,self.stage=self.stage,None;sim,self.sim=self.sim,None
+        # Finish every release even if a native annotator detach raises.
+        with ExitStack()as cleanup:
+            if sim is not None:
+                # Unsubscribe the standalone STOP handler before stopping the
+                # live timeline; otherwise a subsequent context can keep rendering.
+                cleanup.callback(sim.stop);cleanup.callback(sim.clear_instance);cleanup.callback(sim.clear_all_callbacks)
+            if stage is not None:cleanup.callback(stage.RemovePrim,'/World/Authored')
+            cleanup.callback(self.release_cameras)
     def __enter__(self):return self
     def __exit__(self,*_):self.close()
 
@@ -187,7 +231,15 @@ def worker(folder):
         project=Project(request['project']);options={**request['options'],'renderer_factory':IsaacRenderer}
         if request['operation']=='fit':
             scene,report=fit_scene(project,request['scene'],folder,options);write(folder/'best-scene.yaml',scene)
-        else:report=alignment_metrics(project,request['scene'],folder,options)
+        else:
+            from functools import partial
+            from .calibration.hybrid import cloud_inputs
+            # RGB comparison needs no depth buffers. Only observations with
+            # object masks require semantic output; full-resolution photo AOVs
+            # otherwise consume GPU memory without contributing to this loss.
+            outputs=('rgb','semantic_segmentation')if cloud_inputs(project,request['scene'])else('rgb',)
+            options['renderer_factory']=partial(IsaacRenderer,data_types=outputs)
+            report=alignment_metrics(project,request['scene'],folder,options)
         write(folder/'report.json',report)
     except BaseException as error:
         write(folder/'error.json',{'error':str(error),'stopped':isinstance(error,InterruptedError)});raise

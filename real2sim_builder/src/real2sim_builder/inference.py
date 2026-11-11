@@ -390,17 +390,26 @@ def build_render_observations(candidate,report,*,same_layout=False):
         'needs':needs+([]if records else['No eligible sensor Mask/Object correspondences; source Captures retained']),'depth_generated':False}
 
 
-def _run_worker(project,python,kind,request,folder,timeout):
+def _run_worker(project,python,kind,request,folder,timeout,*,entrypoint=None):
     """Own one child only; its exit releases GPU memory before the next model."""
     from .files import write
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);path=folder/'request.json';write(path,request)
     env=dict(os.environ,HF_HUB_OFFLINE='1',HF_DATASETS_OFFLINE='1',PYTHONDONTWRITEBYTECODE='1',PYTHONNOUSERSITE='1',
              YOLO_AUTOINSTALL='false',YOLO_CONFIG_DIR=str(folder/'ultralytics'))
     env.pop('PYTHONPATH',None);env.pop('PYTHONHOME',None)
+    # These engine children use the existing Isaac USD bindings, not a new USD
+    # installation. The dynamic loader needs this before Python starts.
+    if kind in ('physics','simulator') and entrypoint is not None and request.get('source'):
+        usd=Path(request['source']).resolve()
+        if not(usd/'pxr').is_dir()or not(usd/'bin').is_dir():
+            raise FileNotFoundError('Configured existing USD binding/bin bootstrap required')
+        env['LD_LIBRARY_PATH']=str(usd/'bin')+(':'+env['LD_LIBRARY_PATH']if env.get('LD_LIBRARY_PATH')else'')
     started=time.monotonic()
     last_stage=None
     with (folder/'worker.log').open('w')as log:
-        child=subprocess.Popen([str(python),'-B',str(Path(__file__).resolve()),'--worker',kind,str(path)],stdout=log,stderr=subprocess.STDOUT,env=env,start_new_session=True)
+        script=Path(__file__).resolve() if entrypoint is None else Path(entrypoint).resolve()
+        if script.parent!=Path(__file__).resolve().parent:raise ValueError('Worker entrypoint must be package-owned')
+        child=subprocess.Popen([str(python),'-B',str(script),'--worker',kind,str(path)],stdout=log,stderr=subprocess.STDOUT,env=env,start_new_session=True)
         try:
             while child.poll()is None:
                 project.checkpoint()
@@ -428,8 +437,8 @@ def _runtime(project,config,kind,folder):
     spec=config.get(kind,{})
     python=Path(spec.get('python',''));model=Path(spec.get('model',''))
     if not python.is_file()or not os.access(python,os.X_OK):raise ValueError(kind+': configure an existing Python interpreter')
-    files=[]if kind=='colmap'else sorted(p for p in model.rglob('*')if p.is_file()and p.suffix in('.json','.safetensors'))if model.is_dir()else[model]
-    if kind!='colmap'and(not files or any(not p.is_file()for p in files)):raise ValueError(kind+': configure existing local model/checkpoint files')
+    files=sorted(p for p in model.rglob('*')if p.is_file()and p.suffix in('.json','.safetensors'))if model.is_dir()else[model]
+    if not files or any(not p.is_file()for p in files):raise ValueError(kind+': configure existing local model/checkpoint files')
     _run_worker(project,python,'probe',{'kind':kind,'source':spec.get('source'),'output':str(folder/'probe.json')},folder,60)
     identity={'python':str(python.resolve()),'runtime':read(folder/'probe.json'),'files':{str(p.resolve()):sha(p)for p in files},'worker_sha256':sha(Path(__file__))}
     return spec,identity
@@ -459,7 +468,13 @@ def prepare_rgb(candidate,images):
 
 
 def run_models(candidate,config,*,scene_state=None,sensor_alignment=False,segmentation_only=False):
-    """Cache SAM and the selected Geometry backend independently."""
+    """Explicit SAM observations; geometry belongs to DA3 Stage2.
+
+    Existing reports remain readable through validate_depth_output/object_points.
+    Calling the removed geometry executor cannot silently replace its backend.
+    """
+    if not segmentation_only:
+        raise ValueError('LEGACY_GEOMETRY_UNSUPPORTED: use SimFoundry DA3 Stage2; saved Depth/Camera metadata is preserved')
     from .files import read,write,sha
     from .observations import input_images,camera_type
     from .candidate import exclusive
@@ -502,13 +517,10 @@ def run_models(candidate,config,*,scene_state=None,sensor_alignment=False,segmen
             name=row['object_id'];image=row['image_id'];row.update(read(row['path']));row.update(object_id=name,image_id=image)
         association=associate_instances({'segments':segments},objects,config.get('selections'))
         segments=association['segments']
-        from .sfm import backend,run_geometry
-        selected_backend=backend(config)
-        if segmentation_only:batches,geometry=[],{'status':'NOT_REQUESTED','needs':[],'scope':'Sensor registration uses the existing metric Scene, not a new SfM'}
-        else:batches,geometry=run_geometry(candidate,config,images,prepared,segments,root,include_capture=sensor_alignment)
+        batches,geometry=[],{'status':'NOT_REQUESTED','needs':[],'scope':'SAM only; geometry is DA3 Stage2'}
         report={'status':'SEGMENTED'if segmentation_only else'INFERRED'if batches else'NEEDS_MORE_DATA','scene_state_id':state,'images':images,'segments':segments,
             'depth_batches':batches,'models':{'sam':sam_identity,'geometry':geometry.get('runtime_identity')},'geometry':geometry,
-            'backend':selected_backend,'prepared_rgb':prepared,'derived':True,'physical_verified':False,
+            'backend':'segmentation_only','prepared_rgb':prepared,'derived':True,'physical_verified':False,
             'metric_scale':'NOT_ESTABLISHED_BY_AI','needs':needs+geometry['needs']}
         report=associate_instances(report,objects,config.get('selections'))
         write(root/('sensor_'+state+'.json'if segmentation_only else'results.json'),report);return report
@@ -522,10 +534,6 @@ def _worker(kind,request):
         folder=Path(folder);folder.mkdir(exist_ok=True,parents=True)
         (folder/'result.json').write_text(json.dumps(data,indent=2,allow_nan=False));(folder/'COMPLETE').write_text('complete\n')
     if kind=='probe':
-        if request['kind']in('mast3r','colmap'):
-            sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-            from real2sim_builder.sfm import probe
-            return probe(request)
         if request['kind']!='sam':raise ValueError('Unknown inference worker probe')
         import importlib.metadata as meta
         import importlib.util
@@ -537,10 +545,6 @@ def _worker(kind,request):
         source=package_root/'models/sam/predict.py'
         Path(request['output']).write_text(json.dumps({'python':sys.version,'package':distribution,'version':meta.version(distribution),
             'torch':meta.version('torch'),'api_sha256':checksum(source)}));return
-    if kind in('mast3r','colmap'):
-        sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-        from real2sim_builder import sfm
-        return getattr(sfm,kind+'_worker')(request)
     if kind!='sam':raise ValueError('Unknown inference worker')
     import numpy as np
     import torch
@@ -579,5 +583,5 @@ def _worker(kind,request):
 
 
 if __name__=='__main__':
-    if len(sys.argv)!=4 or sys.argv[1]!='--worker':raise SystemExit('Internal worker: --worker probe|sam|mast3r|colmap REQUEST.json')
+    if len(sys.argv)!=4 or sys.argv[1]!='--worker':raise SystemExit('Internal worker: --worker probe|sam REQUEST.json')
     _worker(sys.argv[2],json.loads(Path(sys.argv[3]).read_text()))

@@ -372,8 +372,15 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
             else:target=copy_native_asset(source,staging,copied=copied,report=derivations)
             required.append(target.relative_to(staging).as_posix())
         engines={};mapping={}
+        from .cameras import pinhole_scene
+        distorted=any(any(c['distortion']['value'])for c in working['cameras'])
+        if distorted:
+            write(staging/'camera_projection.json',{'schema':'real2sim.camera-projection/1',
+                'native_projection':'pinhole; authored Real/Sim renderer applies original distortion after rendering',
+                'source_camera_calibration_changed':False,
+                'cameras':{c['id']:{'K':c['K']['value'],'resolution':c['resolution'],'distortion':c['distortion']['value']}for c in working['cameras']}})
         for engine,module,suffix in [('mujoco',mjcf,'.xml'),('isaac',usd,'.usda')]:
-            target=staging/('scene'+suffix);mapping[engine]=module.export(working,staging,target)
+            target=staging/('scene'+suffix);mapping[engine]=module.export(pinhole_scene(working)if distorted else working,staging,target)
             engines[engine]={'asset_path':target.relative_to(staging).as_posix(),'loader_validation':'NOT_TESTED','required_files':required}
         spec=_scene_spec(working,scene_id,revision,mapping,model_path,required);spec['engines']=engines
         if isaac_robot_asset is not None:

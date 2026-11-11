@@ -158,9 +158,9 @@ def test_shared_prompt_runs_sam_once_without_overwriting_object_ids(tmp_path,mon
                 (path/'COMPLETE').touch()
     monkeypatch.setattr(inference,'_run_worker',worker)
     config={'objects':{'cup1':{'prompt':'paper cup'},'cup2':{'prompt':'paper cup'}}}
-    report=inference.run_models(c,config,scene_state='layout')
+    report=inference.run_models(c,config,scene_state='layout',segmentation_only=True)
     assert calls==[1]
     assert [r['object_id']for r in report['segments']]==['cup1','cup2']
     assert report['segments'][0]['masks']==report['segments'][1]['masks']
     assert all(r['association']['status']=='AMBIGUOUS'for r in report['segments'])
-    inference.run_models(c,config,scene_state='layout');assert calls==[1]
+    inference.run_models(c,config,scene_state='layout',segmentation_only=True);assert calls==[1]

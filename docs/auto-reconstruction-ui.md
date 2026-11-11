@@ -1,5 +1,8 @@
 # Auto Reconstruction — 로그인·사용량·중단·재개
 
+> 2026-11-10 후속: VLM은 공통 Codex CLI로 전환했고 MASt3R/COLMAP 실행 코드는 제거했다. 현재 설정과 검증 범위는 [Codex VLM 전환](codex-vlm-migration.md)을 따른다. 아래 과거 실행·설치 기록은 당시 상태다.
+
+
 ## 2026-11-09 현재 실행 계약 — Codex-First
 
 제품 Auto Reconstruction은 Scene/Model 사진과 Memo를 Codex가 직접 분석하고, 기존 Sandbox Blender로 자산을 제작한 뒤 실제 Simulator 렌더를 보며 typed Scene plan을 반복 수정한다. SAM/DA3/MASt3R/COLMAP·Depth·Metric 등록은 초기 Scene 생성의 필수 단계가 아니다. 최초 Scene/각 Iteration/최종 결과의 실제 Visual Evidence를 Candidate에 보존하고 단일 UI에서 연다.

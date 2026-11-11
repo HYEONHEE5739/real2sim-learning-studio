@@ -1,3 +1,4 @@
+"""Advanced Codex/source-refit contracts retained alongside the default staged pipeline."""
 import numpy as np
 from PIL import Image
 from real2sim_builder.project import Project
@@ -7,7 +8,7 @@ from test_builder_export import legacy_scene
 
 
 def test_native_scene_render_and_first_checkpoint_need_no_depth_models(tmp_path,monkeypatch):
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.observations import register_image
     from real2sim_builder.rendering import Renderer
     p=Project.create(tmp_path,'Codex native');p.save_scene(legacy_scene());scene=p.scene
@@ -60,7 +61,7 @@ Path(args[args.index('--output-last-message')+1]).write_text('''+repr(json.dumps
 
 def test_actual_native_iteration_preserves_first_before_after_and_best(tmp_path,monkeypatch):
     from real2sim_builder import authoring
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.observations import register_image
     from real2sim_builder.rendering import Renderer
     scene=legacy_scene();scene['objects'][1]['pose']['provenance']='estimated'
@@ -102,7 +103,7 @@ def test_unmeasured_physics_keeps_initial_native_contacts_but_never_claims_stepp
 def test_entire_codex_loop_analyzes_authors_composes_and_reviews_using_actual_blender(tmp_path,monkeypatch):
     import sys,json
     from real2sim_builder import authoring
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.observations import register_image
     from real2sim_builder.files import write
     p=Project.create(tmp_path,'complete loop');path=tmp_path/'real.png';Image.new('RGB',(160,120),'white').save(path)
@@ -140,7 +141,7 @@ Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(answer))
 
 
 def test_current_evidence_never_labels_stale_preview_as_a_new_render(tmp_path):
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.observations import register_image
     from real2sim_builder.rendering import Renderer
     p=Project.create(tmp_path,'stale preview');p.save_scene(legacy_scene());c=Candidate.create(p,'auto')
@@ -186,7 +187,7 @@ def test_codex_modeling_review_never_reads_retired_cached_inference(tmp_path):
 
 
 def test_stop_in_physics_still_has_the_first_rendered_scene_checkpoint(tmp_path,monkeypatch):
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     from real2sim_builder.observations import register_image
     from real2sim_builder.rendering import Renderer
     p=Project.create(tmp_path,'stop after render');p.save_scene(legacy_scene())
@@ -206,7 +207,7 @@ def test_failed_remote_response_consumes_call_budget_and_retains_evidence(tmp_pa
     import sys
     import pytest
     from real2sim_builder import authoring
-    from real2sim_builder.automation import reconstruct
+    from real2sim_builder.automation import _refit_reconstruct as reconstruct
     p=Project.create(tmp_path,'failed remote');exe=tmp_path/'codex'
     exe.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\nPath(sys.argv[sys.argv.index("--output-last-message")+1]).write_text("{}")\n');exe.chmod(0o700)
     run=authoring.run_codex_modeling
@@ -234,3 +235,71 @@ def test_native_initial_compile_keeps_camera_distortion_and_warps_actual_pixels(
     report=physics_probe(p,scene,tmp_path/'contacts')
     assert report['collision_query']['status']=='QUERIED'
     assert scene==original
+
+
+def test_new_image_analysis_invalidates_previous_scene_composition(tmp_path):
+    import sys,json
+    from real2sim_builder.authoring import modeling_tasks,run_codex_modeling
+    from real2sim_builder.files import write
+    from real2sim_builder.observations import register_image
+    from test_modeling_handoff import semantic_reply
+    p=Project.create(tmp_path,'new camera evidence');c=Candidate.create(p,'auto')
+    rgb=tmp_path/'front.png';Image.new('RGB',(160,120),'white').save(rgb)
+    register_image(p,rgb,camera='front_ref',camera_type='external',scene_state='refs',role='model_reference')
+    old={'authoring_mode':'codex','objects':{},'scene_plan':{'object_poses':[],'cameras':[],'needs':['old mount unresolved']}}
+    write(c.root/'reconstruction-config.yaml',old);modeling_tasks(c,old,{})
+    executable=tmp_path/'codex';executable.write_text('#!'+sys.executable+'\nimport sys,json\nfrom pathlib import Path\nargs=sys.argv\nPath(args[args.index("--output-last-message")+1]).write_text('+repr(json.dumps(semantic_reply([])))+')\n');executable.chmod(0o700)
+    run_codex_modeling(c,executable=executable)
+    updated=read(c.root/'review-config.yaml')
+    assert 'scene_plan'not in updated
+    assert updated['composition_feedback']['previous_plan']==old['scene_plan']
+
+
+def test_actual_review_has_per_view_optical_pose_for_shared_mount_corrections(tmp_path):
+    from real2sim_builder.observations import register_image
+    from real2sim_builder.calibration.hybrid import alignment_metrics
+    from real2sim_builder.rendering import Renderer
+    scene=legacy_scene();p=Project.create(tmp_path,'review camera frame');p.save_scene(scene)
+    with Renderer(scene,p.root,tmp_path/'native')as renderer:rgb=renderer.rgb('side')
+    path=tmp_path/'real.png';Image.fromarray(rgb).save(path)
+    register_image(p,path,camera='side',camera_type='side',scene_state='layout')
+    from real2sim_builder.authoring import apply_scene_plan
+    c=Candidate.create(p,'review')
+    apply_scene_plan(c,{'object_poses':[],'cameras':[],'needs':[]},scene_state='layout')
+    result=alignment_metrics(p,c.scene,p.root/'scratch/review')
+    row=result['images'][0]
+    assert row['render_context']['optical_convention']=='+X right, +Y down, +Z forward'
+    assert np.allclose(row['render_context']['T_world_camera'],scene['cameras'][0]['pose']['value'])
+    assert row['render_context']['camera_frame']=='world'
+
+
+def test_ui_cli_configuration_is_an_override_not_a_project_input_edit(tmp_path,monkeypatch):
+    from real2sim_builder.cli import main
+    from real2sim_builder.files import write
+    p=Project.create(tmp_path,'ui config protection')
+    original={'objects':{},'scene_state_id':'saved'};write(p.root/'input/reconstruction.yaml',original)
+    override=tmp_path/'ui-config.yaml';write(override,{'objects':{},'scene_state_id':'candidate'})
+    before=sha(p.root/'input/reconstruction.yaml')
+    def reconstruct(project,**kw):
+        assert kw['config']['scene_state_id']=='candidate'
+        return {'status':'NEEDS_MORE_DATA'}
+    monkeypatch.setattr('real2sim_builder.automation.reconstruct',reconstruct)
+    assert main(['reconstruct',str(p.root),'--candidate','auto','--config',str(override)])==2
+    assert sha(p.root/'input/reconstruction.yaml')==before
+
+
+def test_reused_attachment_does_not_undo_a_later_visual_pose_correction(tmp_path):
+    from real2sim_builder.authoring import modeling_tasks,record_modeling_results,attach_modeled_assets
+    from real2sim_builder.object_assets import register_object_asset
+    from real2sim_builder.scene import value
+    from test_object_assets import asset_fixture
+    p=Project.create(tmp_path/'projects','attachment iteration');c=Candidate.create(p,'auto')
+    scene=c.scene;scene['frames']['robot_link_gripper']={'parent':'world','transform':value(np.eye(4).tolist(),'derived',['FK'])};c.save(scene)
+    asset=register_object_asset(p,asset_fixture(tmp_path/'asset'),asset_id='housing')
+    attachment={'link':'gripper','T_link_object':np.eye(4).tolist(),'evidence':'visible rigid bracket','provenance':'estimated','physical_verified':False}
+    config={'authoring_mode':'codex','objects':{'housing':{'prompt':'housing','robot_attachment':attachment}}}
+    modeling_tasks(c,config,{});record_modeling_results(c,[asset]);attach_modeled_assets(c,config,{})
+    pose=np.eye(4);pose[0,3]=.012;c.edit([{'op':'update_pose','id':'housing','value':pose.tolist(),'evidence':['rendered correction']}])
+    attach_modeled_assets(c,config,{})
+    assert c.scene['objects'][0]['frame']=='robot_link_gripper'
+    assert c.scene['objects'][0]['pose']['value']==pose.tolist()
