@@ -77,7 +77,13 @@ def test_actual_stage_entrypoint_owned_group_stops_and_times_out(tmp_path,monkey
     assert pidfile.exists()
     pids=[int(v)for v in pidfile.read_text().split()]
     for pid in pids:
-        assert not psutil.pid_exists(pid)or psutil.Process(pid).status()==psutil.STATUS_ZOMBIE
+        deadline=time.monotonic()+1
+        while time.monotonic()<deadline:
+            try:status=psutil.Process(pid).status()
+            except psutil.NoSuchProcess:break
+            if status==psutil.STATUS_ZOMBIE:break
+            time.sleep(.01)  # Observe delivery of SIGTERM/SIGKILL, not scheduler timing.
+        else:pytest.fail('Owned process remained alive after worker group cleanup')
     assert(tmp_path/'owned/request.json').is_file()
 
 

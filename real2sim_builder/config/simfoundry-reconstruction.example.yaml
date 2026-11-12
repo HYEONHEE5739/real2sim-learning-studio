@@ -25,6 +25,11 @@ pose:
   front_refine: true
   front_yaw_snap: true
   bake_fitted_tilt: auto  # Native Codex canonical +Z meshes are not pixel-aligned.
+  point_policy: original_only  # Original RGB + original DA3-estimated Z, not measured points.
+  # include_generated requires generated_evidence and an additional original-only
+  # CPD sensitivity fit. No automatic inclusion or point-confidence calibration.
+# Optional decomposition.minimum_depth_confidence must be justified in the
+# model's native confidence scale; no universal default probability threshold.
 articulation:
   objects: []  # Requested new articulated Objects currently stop NOT_SUPPORTED.
 physics:
@@ -105,6 +110,34 @@ runtimes:
     source: /EXISTING/Isaac/omni.usd.libs
     timeout_s: 240
 # Optional explicit world_registration: measured/calibrated support_to_world
-# 4x4 with evidence, required for a Scene that already contains a Robot World.
-# Optional metric_anchors: explicit 4 observed_corners_camera_m + measured
-# dimensions_xy_m/source/evidence; diagnostic only, never automatic rescaling.
+# rigid 4x4 with evidence. Existing protected coordinates are preserved.
+# metric_anchors: explicit FOUR full observed_corners_camera_m, measured
+# dimensions_xy_m/source/evidence. These yield scale QA/estimate, NOT Base Pose.
+# Never substitute the bounding rectangle of a partial point cloud.
+# Without explicit World registration Stage10 can use either:
+# (a) >=3 independent non-collinear support/Robot World 3D correspondences, or
+# (b) metric support corners + >=4 localized diverse measured-q Wrist poses,
+#     through the existing shared FK/mount solver. Full rank is still required.
+# Missing evidence leaves UNRESOLVED, not a fabricated identity/calibration.
+# sensor_registration:
+#   enabled: true
+#   world_anchors:
+#     - id: UNIQUE_SURVEYED_POINT_ID
+#       group_id: INDEPENDENT_OBSERVATION_GROUP_ID
+#       split: train  # validation rows NEVER enter the alignment fit.
+#       support_point: [0.0, 0.0, 0.0]  # REPLACE; Stage4 support coordinates.
+#       robot_world_point_m: [0.0, 0.0, 0.0]  # REPLACE with independent measured data.
+#       source: measured
+#       evidence: [REPLACE_WITH_ACTUAL_CORRESPONDENCE_EVIDENCE]
+#   joint:
+#     enabled: true  # Existing joint.fit_joint_scene; reviewed landmarks required.
+#     max_nfev: 100
+#   render_refinement:
+#     enabled: false  # Explicit bounded existing hybrid.fit_scene/alignment_metrics.
+#   metric_review:  # Existing explicit-registration path only; bound to current QA.
+#     accepted: true
+#     anchors_sha256: SHA256_OF_CANONICAL_JSON_METRIC_ANCHORS
+#     evidence: [EXPLICIT_REVIEW_OF_CURRENT_ANCHOR_QA]
+#   view_anchors: {}  # Existing observations.register_views bindings.
+# Automatic output is ESTIMATED; no metric/physics/task approval is implied.
+# enabled:false defers sensors with NOT_REQUESTED; it never certifies them.

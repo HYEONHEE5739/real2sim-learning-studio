@@ -116,9 +116,16 @@ class StageArtifact:
 
 
 class StageNeeds(RuntimeError):
-    def __init__(self, status, message, *, code=None):
+    def __init__(self, status, message, *, code=None, classification='HARD_BLOCK',
+                 scope='stage', object_ids=(), dependencies=(), input_sha256=None):
         if status not in STATUSES - {'COMPLETE'}:
             raise ValueError('Invalid stage stop status')
         self.status = status
         self.code = code
+        if classification not in {'HARD_BLOCK','RETRYABLE','OBJECT_REVIEW','ESTIMATED_CONTINUE','DEPENDENCY_BLOCK','FINAL_APPROVAL_BLOCK'}:
+            raise ValueError('Invalid gate classification')
+        if scope not in ('stage','object','approval'):raise ValueError('Invalid gate scope')
+        self.gate = {'classification':classification,'scope':scope,'reason':code or status,
+                     'object_ids':list(object_ids),'dependencies':list(dependencies),
+                     'input_sha256':input_sha256,'resume_requires_review':classification!='ESTIMATED_CONTINUE'}
         super().__init__(message)

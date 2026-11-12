@@ -54,7 +54,7 @@ def test_stage5_6_one_mock_smoke_blocks_failed_edit_before_depth(tmp_path):
     candidate=SimpleNamespace(project=project,scene={'frames':{}})
     shape=(32,48);rgb=np.full((*shape,3),150,np.uint8);rgb[10:22,16:30]=[220,30,20]
     z=np.ones(shape,np.float32);K=np.array([[60,0,24],[0,60,16],[0,0,1.]])
-    depth=tmp_path/'input.npz';np.savez(depth,image=rgb[None],depth=z[None],intrinsics=K[None])
+    depth=tmp_path/'input.npz';np.savez(depth,image=rgb[None],depth=z[None],conf=np.ones_like(z)[None],intrinsics=K[None])
     mask=tmp_path/'target.png';m=np.zeros(shape,np.uint8);m[10:22,16:30]=255;Image.fromarray(m).save(mask)
     calls=[]
     def provider(op,request,folder):

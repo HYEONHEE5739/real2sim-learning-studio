@@ -28,11 +28,15 @@ def test_other_saved_photo_layouts_reach_codex_as_context_without_relabelling(tm
 def test_memo_dimensions_flow_through_codex_plan_without_measurement_form(tmp_path):
     from real2sim_builder.authoring import geometry_specs
     from real2sim_builder.initialization import measured_geometry
-    p=Project.create(tmp_path,'memo sizes');text='컵 높이는 100mm야. 작업판은 200×150×5mm야.'
+    p=Project.create(tmp_path,'memo sizes');text='cup height 100mm. board x 200mm. board y 150mm. board z 5mm.'
     memo=save_scene_memo(p,text);c=Candidate.create(p,'plan')
     geometry={'kind':'container','dimensions_m':[None,None,.1],'source':'user_memo',
-              'evidence_quote':'컵 높이는 100mm야.','evidence':[],'wall_m':None,'support':'board'}
-    board={**geometry,'kind':'box','dimensions_m':[.2,.15,.005],'evidence_quote':'작업판은 200×150×5mm야.','support':None}
+              'evidence_quote':'cup height 100mm.','evidence':[],'wall_m':None,'support':'board',
+              'measurement_claims':[{'field':'z','object_id':'cup','subject_quote':'cup','axis_quote':'height','statement_quote':'cup height 100mm.',
+                  'value_quote':'100mm','value':'100','unit':'mm'}]}
+    board={**geometry,'kind':'box','dimensions_m':[.2,.15,.005],'evidence_quote':text,'support':None,
+        'measurement_claims':[{'field':axis,'object_id':'board','subject_quote':'board','axis_quote':axis,'statement_quote':f'board {axis} {n}mm.',
+            'value_quote':f'{n}mm','value':str(n),'unit':'mm'}for axis,n in zip('xyz',[200,150,5])]}
     answer=semantic_reply([{'id':'cup','prompt':'cup','role':'receptacle','geometry':geometry},
                            {'id':'board','prompt':'board','role':'support_surface','geometry':board}],text)
     modeling_tasks(c,{},{});fake=tmp_path/'codex';fake_cli(fake,text,json.dumps(answer))

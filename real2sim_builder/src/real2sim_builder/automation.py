@@ -59,8 +59,8 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         if previous_report.get('pipeline')=='simfoundry/1'and previous_report.get('status')=='STOPPED':project.control('resume')
         data={};active=1;folder=None;identity={'kind':'mock'if worker is not None else'real'};subset={}
         keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far'),4:('metric_anchors','world_registration'),
-              5:('objects','decomposition','scene_memo'),6:('image_preparation',),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
-              8:('pose',),9:('articulation',),10:('world_registration','support_asset'),11:('physics',),12:('physics',),13:('export',),14:('simulator',)}
+              5:('objects','decomposition','scene_memo'),6:('image_preparation','pose'),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
+              8:('pose',),9:('articulation',),10:('world_registration','support_asset','sensor_registration','metric_anchors','capture_layouts'),11:('physics',),12:('physics',),13:('export',),14:('simulator',)}
         operations={1:('video',),2:('da3',),3:('support','vlm'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
                     6:('image_edit_objects','background_remove','vlm'),7:('blender',),8:('cpd','canonicalize','foundationpose'),9:('articulation',),10:(),11:('vlm',),12:('physics',),13:(),14:('simulator',)}
         handlers={1:processing.prepare,2:processing.depth,3:processing.support,4:processing.world,
@@ -82,6 +82,11 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 saved=read(cache)
                 if saved['key']!=key:raise ValueError('Incomplete worker input identity changed')
                 verify_manifest(saved['manifest'],output_root=folder)
+                response=folder/'response.json'
+                if (saved.get('execution')!=identity['kind']or not response.is_file()
+                    or not any(Path(row['path'])==response.resolve()for row in saved['manifest']['files'])
+                    or digest(saved['data'])!=digest(read(response))):
+                    raise ValueError('Worker cache response integrity mismatch')
                 return saved['data']
             result=worker(operation,request,Path(folder))if worker is not None else stage_runtime.invoke(selected,config,operation,request,folder,provider=call)
             if not isinstance(result,dict):raise ValueError('Typed worker result mapping required')
@@ -103,9 +108,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 for source in folder.rglob('*'):
                     if source.is_file():
                         target=failure/'partial'/source.relative_to(folder);target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
-            write(failure/'failure.json',{'status':status,'type':type(error).__name__,'message':str(error)})
+            write(failure/'failure.json',{'status':status,'type':type(error).__name__,'message':str(error),'gate':getattr(error,'gate',None)})
             artifact=StageArtifact.create(active,status,upstream,manifest(sorted(p for p in failure.rglob('*')if p.is_file())),runtime_identity=identity,config=subset,
-                needs=[str(error)],error={'type':type(error).__name__,'code':getattr(error,'code',None)})
+                needs=[str(error)],error={'type':type(error).__name__,'code':getattr(error,'code',None),'gate':getattr(error,'gate',None)})
             artifact.validate(failure);write(failure/'artifact.json',artifact.to_dict());report['failure_artifact']=str(failure/'artifact.json')
         try:
             for stage in range(1,through_stage+1):
@@ -116,7 +121,24 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                     from .authoring import _codex_guidance
                     subset['guidance_sha256']=_codex_guidance()[1]['sha256']
                     subset['model_references']=[r for r in project.evidence['images']if r.get('role')=='model_reference']
-                if stage==14:subset['sensor_captures']=[r for r in project.evidence['images']if r.get('camera_type')in('side','wrist')]
+                if stage in(10,14):
+                    from .observations import input_images
+                    from .scene import local_path
+                    sensors=[r for r in project.evidence['images']if r.get('camera_type')in('side','wrist')]
+                    # Check actual bytes before considering a completed Stage
+                    # cache. Metadata-only identities cannot detect file damage.
+                    for image in sensors:
+                        if sha(local_path(project.root,image['path']))!=image['sha256']:
+                            raise ValueError('Sensor source SHA mismatch: '+image['id'])
+                    for state in {r.get('scene_state_id')for r in sensors}:
+                        input_images(project,state)  # Existing q/role/train-holdout contracts.
+                    model=selected.scene.get('robot_model')
+                    if model and any(r['camera_type']=='wrist'for r in sensors):
+                        if not model.get('path')or not model.get('model_sha256'):
+                            raise ValueError('Wrist Robot model SHA identity required')
+                        if sha(local_path(project.root,model['path']))!=model['model_sha256']:
+                            raise ValueError('Wrist Robot model SHA mismatch')
+                    subset['sensor_captures']=sensors
                 identity=copy.deepcopy(getattr(worker,'runtime_identity',None))if worker is not None else{'kind':'real','operations':{op:stage_runtime.identity(config,op)for op in operations[stage]}}
                 if not identity:raise ValueError('Synthetic worker must declare explicit mock runtime identity')
                 identity['stage_implementation_sha256']={str(p.relative_to(Path(__file__).parent)):sha(p)for p in Path(__file__).parent.rglob('*.py')}
@@ -169,6 +191,7 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         except (StageNeeds,InterruptedError)as error:
             failure_record('STOPPED'if isinstance(error,InterruptedError)else error.status,error)
             report.update(status='STOPPED'if isinstance(error,InterruptedError)else error.status,failed_stage=active,needs=[str(error)],error_code=getattr(error,'code',None))
+            report['gate']=getattr(error,'gate',None)
             project.update(status='STOPPED'if isinstance(error,InterruptedError)else'NEEDS_MORE_DATA',stage='STAGE_'+str(active),candidate=candidate,needs=report['needs'])
             publish_report();return report
         except Exception as error:

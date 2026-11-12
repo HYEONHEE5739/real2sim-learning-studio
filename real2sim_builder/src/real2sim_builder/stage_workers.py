@@ -440,11 +440,16 @@ def cpd(request):
             candidates.append({'rotation':inverse_rotation.tolist(),'translation':inverse_translation.tolist(),
                 'scale':float(pre_scale*inverse_scale),'score':float(np.sum(distance**2)),
                 'rmse_m':float(np.sqrt(np.mean(distance**2))),'scale_update':bool(update_scale)})
-    result=min(candidates,key=lambda c:c['score'])
+    result=copy.deepcopy(min(candidates,key=lambda c:c['score']))
     result.update(status='UNVERIFIED',algorithm='original rigid CPD multistart / one-sided NN squared sum',
                   pre_scale=pre_scale,voxel_m=float(voxel),source_points=len(source.points),
                   target_points=len(target.points),candidates=len(candidates),candidate_fits=sorted(candidates,key=lambda c:c['score']),accuracy_verified=False,
                   coordinate_frame='native mesh to selected optical Camera')
+    quality=_module('r2s_pose_quality',Path(__file__).parent/'calibration/registration.py')
+    # target already contains pre_scale. Keep the original candidate ranking;
+    # report quality in the selected optical Camera after the inverse fit.
+    predicted=np.asarray(target.points)@(np.asarray(result['rotation']).T)*(result['scale']/pre_scale)+np.asarray(result['translation'])
+    result['quality']=quality.pose_fit_quality(predicted,np.asarray(source.points),voxel_m=voxel,candidates=candidates)
     path=Path(request['output'])/'fit.json';path.write_text(json.dumps(result,indent=2));return result
 
 

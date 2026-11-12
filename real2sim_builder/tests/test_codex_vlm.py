@@ -147,7 +147,7 @@ def test_stage5_review_receives_before_mask_after_and_blocks_uncertain_edit(tmp_
     rgb=np.full((32,48,3),150,np.uint8);rgb[10:22,16:30]=[220,30,20]
     mask=np.zeros((32,48),np.uint8);mask[10:22,16:30]=255
     mask_path=tmp_path/'mask.png';Image.fromarray(mask).save(mask_path)
-    pred=tmp_path/'input.npz';np.savez(pred,image=rgb[None],depth=np.ones((1,32,48)),intrinsics=np.array([[[60,0,24],[0,60,16],[0,0,1]]]))
+    pred=tmp_path/'input.npz';np.savez(pred,image=rgb[None],depth=np.ones((1,32,48)),conf=np.ones((1,32,48)),intrinsics=np.array([[[60,0,24],[0,60,16],[0,0,1]]]))
     seen=[]
     def provider(op,request,folder):
         folder.mkdir(parents=True,exist_ok=True);seen.append(op)
@@ -166,5 +166,5 @@ def test_stage5_review_receives_before_mask_after_and_blocks_uncertain_edit(tmp_
         pytest.fail('No depth or other model after uncertain removal')
     stage=tmp_path/'stage';stage.mkdir()
     previous={1:{'frames':[]},2:{'prediction':str(pred)},3:{'selected_index':0,'selected_frame_id':'frame'},4:{'camera_to_support':np.eye(4).tolist()}}
-    with pytest.raises(StageNeeds,match='uncertain or conflicting'):decompose(candidate,{},previous,stage,provider)
-    assert seen==['vlm','segments','removal','image_edit','vlm']
+    with pytest.raises(StageNeeds,match='retries exhausted'):decompose(candidate,{},previous,stage,provider)
+    assert seen==['vlm','segments','removal']+['image_edit','vlm']*9

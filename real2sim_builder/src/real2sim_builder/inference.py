@@ -425,10 +425,10 @@ def _run_worker(project,python,kind,request,folder,timeout,*,entrypoint=None):
                 reason='VRAM_OUT_OF_MEMORY'if any(t in tail.lower()for t in('cuda out of memory','outofmemoryerror','cuda error: out of memory'))else'MODEL_EXECUTION_FAILED'
                 raise RuntimeError(kind+' '+reason+'; inspect '+str(folder/'worker.log'))
         finally:
-            if child.poll()is None:
-                os.killpg(child.pid,signal.SIGTERM)
-                try:child.wait(timeout=3)
-                except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait()
+            # A runtime/tool descendant may outlive the group leader, even on
+            # exit 0. Reuse the existing Codex owned-group cleanup boundary.
+            from .codex_cli import stop_child
+            stop_child(child)
     return time.monotonic()-started
 
 

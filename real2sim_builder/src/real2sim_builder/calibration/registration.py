@@ -2,6 +2,35 @@
 import numpy as np
 
 
+def pose_fit_quality(predicted, observed, *, voxel_m, candidates=()):
+    """Bidirectional NN diagnostics at the existing CPD sampling scale.
+
+    Voxel proximity is a sampling-based correspondence diagnostic, not a
+    calibrated sensor tolerance or a certificate of pose/metric accuracy.
+    """
+    from scipy.spatial import cKDTree
+    p,q=np.asarray(predicted,float),np.asarray(observed,float)
+    if any(x.ndim!=2 or x.shape[1:]!=(3,)or not len(x)or not np.isfinite(x).all()for x in (p,q)):
+        raise ValueError('Finite nonempty Nx3 CPD quality points required')
+    if not np.isfinite(voxel_m)or voxel_m<=0:raise ValueError('Positive CPD voxel diagnostic distance required')
+    a=cKDTree(p).query(q)[0];b=cKDTree(q).query(p)[0]
+    ranks=[int(np.linalg.matrix_rank(x-x.mean(0)))for x in (p,q)]
+    singular=[np.linalg.svd(x-x.mean(0),compute_uv=False).tolist()for x in (p,q)]
+    scores=sorted(float(c['score'])for c in candidates if 'score'in c)
+    if scores and not np.isfinite(scores).all():raise ValueError('Nonfinite CPD candidate scores')
+    gap=scores[1]-scores[0]if len(scores)>1 else None
+    tie=gap is not None and gap<=np.finfo(float).eps*max(1.,abs(scores[0]))
+    return {'symmetric_chamfer_rmse_m':float(np.sqrt((np.mean(a*a)+np.mean(b*b))/2)),
+        'observed_to_mesh_rmse_m':float(np.sqrt(np.mean(a*a))),'mesh_to_observed_rmse_m':float(np.sqrt(np.mean(b*b))),
+        'observed_coverage':float(np.mean(a<=voxel_m)),'mesh_coverage':float(np.mean(b<=voxel_m)),
+        'inlier_ratio':float(np.mean(a<=voxel_m)),'correspondence_distance_m':float(voxel_m),
+        'threshold_basis':'existing CPD diag/30 voxel; diagnostic only','rank':ranks,'singular_values':singular,
+        'degenerate':min(ranks)<2,'candidate_score_gap':gap,'candidate_count':len(candidates),
+        'pose_ambiguity':'CANDIDATE_TIE'if tie else'NOT_VERIFIED','symmetry':'NOT_VERIFIED',
+        'independent_views':'NOT_RECORDED','measured_dimensions':'protected by caller; not independently verified',
+        'accuracy_verified':False}
+
+
 def align_points(source,target,*,weights=None,estimate_scale=False):
     """Weighted proper rigid/similarity alignment; caller supplies metric anchors."""
     x,y=np.asarray(source,float),np.asarray(target,float)

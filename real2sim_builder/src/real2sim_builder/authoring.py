@@ -18,7 +18,7 @@ def _codex_guidance():
     if not source.is_file():source=Path(sysconfig.get_path('data'))/'share/real2sim_builder/CODEX_SCENE_GUIDE.md'
     if source.is_symlink()or not source.is_file():raise ValueError('Trusted Codex guidance is missing or a symlink')
     content=source.read_bytes();content.decode('utf-8')
-    return content,{'source':'real2sim_builder/CODEX_SCENE_GUIDE.md','version':'2026-11-10-codex-vlm-v3',
+    return content,{'source':'real2sim_builder/CODEX_SCENE_GUIDE.md','version':'2026-11-13-integration-v5',
         'sha256':hashlib.sha256(content).hexdigest(),'path':'BUILDER_GUIDE.md'}
 
 
@@ -126,6 +126,17 @@ def scene_analysis_schema():
         'dimensions_m':{'type':'array','items':{'type':['number','null']},'minItems':3,'maxItems':3},
         'source':{'type':'string','enum':['user_memo','visual_inference']},'evidence_quote':string,
         'evidence':{'type':'array','items':string},'wall_m':{'type':['number','null']},'support':{'type':['string','null']}}
+    geometry['measurement_claims']={'type':'array','items':record({
+        'field':{'type':'string','enum':['x','y','z','wall']},'object_id':string,
+        'subject_quote':string,'axis_quote':string,'statement_quote':string,
+        'value_quote':string,'value':string,'unit':{'type':'string','enum':['mm','cm','m']}})}
+    geometry['dimension_relations']={'type':'array','items':record({
+        'relation':{'type':'string','enum':['cube','cylinder','axes','equal_dimensions','same_product']},
+        'statement_quote':string,'relation_quote':string,
+        'bindings':{'type':'array','minItems':1,'items':record({'object_id':string,'subject_quote':string})},
+        'measurements':{'type':'array','items':record({'field':{'type':'string','enum':['edge','diameter','radius','x','y','z','wall']},
+            'axis_quote':string,'clause_quote':string,'value_quote':string,'value':string,'unit':{'type':'string','enum':['mm','cm','m']}})},
+        'reference_object_id':{'type':['string','null']}})}
     fields['geometry']={**record(geometry),'type':['object','null']}
     fields['support_relation']={**record({'support':string,'source':{'type':'string','enum':['user_memo','visual_inference']},'evidence_quote':string,'evidence':{'type':'array','items':string},'parallel':{'type':'boolean'}}),'type':['object','null']}
     task=record({'kind':string,'instruction':string,'object_id':{'type':['string','null']},'target_id':{'type':['string','null']},
@@ -134,6 +145,150 @@ def scene_analysis_schema():
                    'capture_layouts':{'type':'array','items':record({'scene_state_id':string,
                        'status':{'type':'string','enum':['SAME_LAYOUT','DIFFERENT_LAYOUT','AMBIGUOUS']},'evidence':string})},
                    'task':{**task,'type':['object','null']},'needs':{'type':'array','items':string}})
+
+
+def memo_dimension_relations(rows, memo):
+    """Validate Codex-selected local witnesses and algebra, never parse Memo prose.
+
+    A relation binds *every* member to an unambiguous literal subject. Equality
+    may inherit only already authenticated measurements, never visual estimates.
+    Relation semantics remain a recorded user-declaration/Codex interpretation.
+    """
+    import re
+    from decimal import Decimal
+    from .codex_cli import validate_answer
+    schema=scene_analysis_schema()['properties']['objects']['items']['properties']['geometry']['properties']['dimension_relations']
+    by_id={r['id']:r for r in rows};derived={};pending=[]
+    def literal(text,word):
+        suffix=r'(?=$|[^\w]|(?:은|는|이|가|의|을|를|과|와|도|들|다|인|에|로|으로|이고|이며|입니다|이다)+(?=$|[^\w]))'if re.search('[가-힣]',word)else r'(?!\w)'
+        return bool(word)and re.search(r'(?<!\w)'+re.escape(word)+suffix,text,re.I)is not None
+    tokens={'cube':{'cube','정육면체'},'cylinder':{'cylinder','원통','diameter','radius','지름','반지름'},
+        'axes':{'dimensions','치수','가로','길이','width','length'},
+        'equal_dimensions':{'same dimensions','같은 치수','동일 치수'},'same_product':{'same product','같은 제품','동일 제품'}}
+    axes={'edge':{'edge','side','한 변'},'diameter':{'diameter','지름'},'radius':{'radius','반지름'},
+        'x':{'x','width','length','너비','폭','가로','길이'},'y':{'y','depth','width','깊이','세로','폭'},
+        'z':{'z','height','thickness','높이','두께'},'wall':{'wall','wall thickness','벽 두께'}}
+    for row in rows:
+        g=row.get('geometry')or{};relations=g.get('dimension_relations',[])
+        validate_answer(relations,schema)
+        for rel in relations:
+            if g.get('source')!='user_memo':raise ValueError('Measurement relation must originate in user Memo')
+            statement=rel['statement_quote'];kind=rel['relation'];members=[b['object_id']for b in rel['bindings']]
+            if (memo['text'].count(statement)!=1 or not statement or statement not in g['evidence_quote']
+                or rel['relation_quote'].casefold()not in tokens[kind]or not literal(statement,rel['relation_quote'])
+                or row['id']not in members or len(set(members))!=len(members)or not set(members)<=by_id.keys()):
+                raise ValueError('Measurement relation quote/Object mismatch')
+            for binding in rel['bindings']:
+                subject=binding['subject_quote'];name=binding['object_id']
+                matching=[n for n,r in by_id.items()if literal(r['id']+' '+r['prompt'],subject)]
+                if not literal(statement,subject)or matching!=[name]:raise ValueError('Ambiguous measurement relation subject/Object binding')
+            if kind in('equal_dimensions','same_product'):
+                if len(members)<2 or rel['reference_object_id']not in members or rel['measurements']:
+                    raise ValueError('Equality relation needs explicit measured reference and member bindings')
+                pending.append((row,rel));continue
+            if rel['reference_object_id']is not None:raise ValueError('Unexpected measurement relation reference')
+            values={};witnesses=set();observed_numbers=[]
+            for measure in rel['measurements']:
+                field=measure['field'];quote=measure['value_quote'];unit=measure['unit'];clause=measure['clause_quote']
+                if field in values or measure['axis_quote'].casefold()not in axes[field]or statement.count(clause)!=1 or not literal(clause,measure['axis_quote']):raise ValueError('Measurement relation axis mismatch')
+                number=re.fullmatch(r'\s*([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m)\s*',quote)
+                numbers=re.findall(r'(?<![\w.])([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m)(?![A-Za-z])',clause)
+                if not number or numbers!=[number.groups()]or number.group(2)!=unit:raise ValueError('Measurement relation number/unit mismatch')
+                observed_numbers+=numbers
+                if clause in witnesses:raise ValueError('Duplicate scalar witness requires explicit shape/equality relation')
+                witnesses.add(clause)
+                if kind=='axes'and measure['axis_quote'].casefold()in('width','폭'):
+                    length=any(m['axis_quote'].casefold()in('length','길이')for m in rel['measurements'])
+                    if field!=('y'if length else'x'):raise ValueError('Width axis needs explicit length/width convention')
+                try:raw=Decimal(measure['value'])
+                except Exception:raise ValueError('Invalid measurement relation value')from None
+                if not raw.is_finite()or raw<=0 or raw!=Decimal(number.group(1)):raise ValueError('Invalid measurement relation number')
+                values[field]=float(raw*{'mm':Decimal('.001'),'cm':Decimal('.01'),'m':Decimal(1)}[unit])
+            statement_numbers=re.findall(r'(?<![\w.])([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m)(?![A-Za-z])',statement)
+            if sorted(statement_numbers)!=sorted(observed_numbers):raise ValueError('Measurement relation contains unbound numeric evidence')
+            if kind=='cube':
+                if set(values)!={'edge'}or g['kind']!='box':raise ValueError('Cube relation needs one edge and box geometry')
+                expected=dict(zip('xyz',[values['edge']]*3))
+            elif kind=='cylinder':
+                if g['kind']not in('cylinder','container')or not set(values)<={'diameter','radius','z','wall'}or not({'diameter','radius'}&values.keys()):raise ValueError('Cylinder relation requires radial measurement')
+                diameter=values.get('diameter',2*values.get('radius',0))
+                if 'radius'in values and abs(diameter-2*values['radius'])>1e-12:raise ValueError('Cylinder radius/diameter relation conflict')
+                expected={'x':diameter,'y':diameter,**{k:v for k,v in values.items()if k in('z','wall')}}
+            else:
+                if not values or not set(values)<={'x','y','z','wall'}:raise ValueError('Axes relation needs scalar axes')
+                expected=values
+            current=derived.setdefault(row['id'],{})
+            for field,number in expected.items():
+                proposed=g['wall_m']if field=='wall'else g['dimensions_m']['xyz'.index(field)]
+                if proposed is None or abs(proposed-number)>1e-12 or(field in current and abs(current[field]-number)>1e-12):raise ValueError('Measurement relation contradicts returned dimension')
+                current[field]=number
+    # Resolve explicit equality only from grounded dimensions, independent of row order.
+    for _ in range(len(pending)+1):
+        remaining=[]
+        for row,rel in pending:
+            ref=rel['reference_object_id'];source=by_id[ref].get('geometry')or{};known=derived.get(ref,{})
+            if source and source['kind']!=row['geometry']['kind']:raise ValueError('Equality relation shape mismatch')
+            if source and source.get('measurement_claims'):
+                if memo_dimension_claims(source,by_id[ref],memo,{}):known={k:v for k,v in zip('xyz',source['dimensions_m'])if v is not None}
+            g=row['geometry'];required={k for k,v in zip('xyz',g['dimensions_m'])if v is not None}
+            if g['wall_m']is not None:required.add('wall')
+            if not required or not required<=known.keys():remaining.append((row,rel));continue
+            if any(abs((g['wall_m']if k=='wall'else g['dimensions_m']['xyz'.index(k)])-known[k])>1e-12 for k in required):raise ValueError('Equality dimension relation conflict')
+            derived.setdefault(row['id'],{}).update({k:known[k]for k in required})
+        if not remaining:break
+        if len(remaining)==len(pending):raise ValueError('Equality relation has no grounded measured dimensions')
+        pending=remaining
+    return derived
+
+
+def memo_dimension_claims(geometry, row, memo, used):
+    """Check explicit scalar witnesses; do not parse the free-form Scene Memo.
+
+    Subject and axis selection remain Codex interpretations. Only a unique,
+    locally bound literal number/unit/axis witness can become user-measured.
+    Unsupported prose/tuple/axis semantics stay estimated pending review.
+    """
+    import re
+    from decimal import Decimal, InvalidOperation
+    claims=geometry.get('measurement_claims',[])
+    if not isinstance(claims,list):raise ValueError('Invalid measurement witnesses')
+    if not claims:return False
+    labels={'x':{'x','width','너비','폭','가로'},'y':{'y','depth','깊이','세로'},
+            'z':{'z','height','높이'},'wall':{'wall','wall thickness','두께','벽 두께'}}
+    def subject_in(text,label):
+        return re.search(r'(?<!\w)'+re.escape(label)+r'(?!\w)',text,re.IGNORECASE)is not None
+    def axis_in(text,label):
+        # Check only the supplied literal label, not the surrounding prose.
+        # Korean particles may follow an axis label; ASCII word fragments may not.
+        return re.search(r'(?<!\w)'+re.escape(label)+r'(?![A-Za-z0-9_])',text,re.IGNORECASE)is not None
+    seen=set()
+    for claim in claims:
+        expected={'field','object_id','subject_quote','axis_quote','statement_quote','value_quote','value','unit'}
+        if not isinstance(claim,dict)or set(claim)!=expected or any(not isinstance(v,str)or not v.strip()for v in claim.values()):raise ValueError('Explicit scalar measurement witness required')
+        field=claim['field'];subject=claim['subject_quote'];statement=claim['statement_quote']
+        if field not in labels or field in seen or claim['object_id']!=row['id']:raise ValueError('Measurement Object/axis mismatch')
+        if (statement not in geometry['evidence_quote']or memo['text'].count(statement)!=1
+            or not subject_in(statement,subject)or not axis_in(statement,claim['axis_quote'])or claim['value_quote']not in statement
+            or claim['axis_quote'].casefold()not in labels[field]
+            or not subject_in(row['id']+' '+row['prompt'],subject)):raise ValueError('Measurement subject/axis quote is ambiguous or inconsistent')
+        number=re.fullmatch(r'\s*([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m)\s*',claim['value_quote'])
+        numbers=re.findall(r'(?<![\w.])([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m)(?![A-Za-z])',statement)
+        if not number or numbers!=[number.groups()]or number.group(2)!=claim['unit']:raise ValueError('Single literal scalar number/unit witness required')
+        try:
+            raw=Decimal(claim['value']);quoted=Decimal(number.group(1))
+            converted=raw*{'mm':Decimal('.001'),'cm':Decimal('.01'),'m':Decimal(1)}[claim['unit']]
+        except (InvalidOperation,KeyError):raise ValueError('Invalid numeric measurement witness')from None
+        proposed=geometry['wall_m']if field=='wall'else geometry['dimensions_m']['xyz'.index(field)]
+        if not raw.is_finite()or raw<=0 or raw!=quoted or proposed is None or abs(Decimal(str(proposed))-converted)>Decimal('1e-12'):
+            raise ValueError('Measurement numeric/unit conversion contradicts returned dimension')
+        witness=(statement,claim['value_quote'])
+        if witness in used and used[witness]!=row['id']:raise ValueError('Same scalar witness assigned to different Objects')
+        subject_binding=('subject',subject.casefold())
+        if subject_binding in used and used[subject_binding]!=row['id']:raise ValueError('Ambiguous Memo subject assigned to different Objects')
+        used[witness]=row['id'];used[subject_binding]=row['id'];seen.add(field)
+    required={axis for axis,v in zip('xyz',geometry['dimensions_m'])if v is not None}
+    if geometry['wall_m']is not None:required.add('wall')
+    return required==seen
 
 
 def task_intent(answer,objects):
@@ -170,6 +325,7 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
         attachments[row['id']]=row.pop('robot_attachment',None)
         relation=row.pop('support_relation',None)
         if relation is not None:support_proposals[row['id']]=relation
+    relation_dimensions=memo_dimension_relations(answer.get('objects',[]),memo)
     if 'asset_groups'not in answer:
         import copy
         fields(answer,('scene_memo_sha256','objects','task','needs'))
@@ -195,7 +351,7 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
     fields(answer,('scene_memo_sha256','objects','asset_groups','needs'))
     if answer['scene_memo_sha256']!=memo['sha256']:raise ValueError('Codex analysis used a stale Scene memo SHA')
     if not isinstance(answer['objects'],list)or not isinstance(answer['asset_groups'],list)or not strings(answer['needs']):raise ValueError('Invalid Codex analysis arrays')
-    objects={};groups={}
+    objects={};groups={};used_measurements={}
     for row in answer['objects']:
         fields(row,('id','prompt','role','category','asset_group','material_variant','modeling_notes','observations','geometry'))
         if not all(isinstance(row[k],str)for k in row if k not in('observations','geometry')):raise ValueError('Invalid semantic object fields')
@@ -207,7 +363,9 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
         if row['material_variant']:spec['material_variant']=identifier(row['material_variant'])
         geometry=row['geometry']
         if geometry is not None:
-            fields(geometry,('kind','dimensions_m','source','evidence_quote','evidence','wall_m','support'))
+            fields(geometry,('kind','dimensions_m','source','evidence_quote','evidence','wall_m','support',
+                *(['measurement_claims']if 'measurement_claims'in geometry else[]),
+                *(['dimension_relations']if 'dimension_relations'in geometry else[])))
             dims=geometry['dimensions_m'];quote=geometry['evidence_quote'];source=geometry['source']
             valid_number=lambda v:type(v)in(int,float)and np.isfinite(v)and v>0
             if geometry['kind']not in('box','cylinder','sphere','container','mesh')or source not in('user_memo','visual_inference'):raise ValueError('Invalid geometry kind/source')
@@ -216,10 +374,23 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
             if source=='visual_inference'and not geometry['evidence']:raise ValueError('Estimated geometry needs observation evidence')
             if geometry['wall_m']is not None and not valid_number(geometry['wall_m']):raise ValueError('Invalid wall dimension')
             if geometry['support']is not None:identifier(geometry['support'])
+            verified=source=='user_memo'and memo_dimension_claims(geometry,row,memo,used_measurements)
+            if geometry.get('dimension_relations'):
+                required={k for k,v in zip('xyz',dims)if v is not None}
+                if geometry['wall_m']is not None:required.add('wall')
+                verified=verified or bool(required and required<=relation_dimensions.get(name,{}).keys())
             spec['geometry']={'kind':geometry['kind'],'dimensions_m':dims[:],
-                'provenance':'measured'if source=='user_memo'else'estimated',
+                'provenance':'measured'if verified else'estimated',
                 'evidence':geometry['evidence']+(['Scene Memo SHA '+memo['sha256']+' quote: '+quote]if quote else[]),
                 'memo_sha256':memo['sha256'],'evidence_quote':quote,'semantics_verified':False}
+            spec['geometry']['numeric_evidence_verified']=verified
+            if source=='user_memo'and not verified:spec['geometry']['measurement_review']='UNVERIFIED_NUMERIC_EVIDENCE'
+            if geometry.get('measurement_claims'):spec['geometry']['measurement_claims']=geometry['measurement_claims']
+            if geometry.get('dimension_relations'):spec['geometry']['dimension_relations']=geometry['dimension_relations']
+            if geometry.get('dimension_relations'):
+                spec['geometry']['derivation']={'origin':'explicit Memo measurements and logical shape/equality relations',
+                    'memo_sha256':memo['sha256'],'verified_dimensions':relation_dimensions.get(name,{}),
+                    'independent_measurement_or_semantics_verified':False}
             if geometry['wall_m']is not None:spec['geometry']['wall_m']=geometry['wall_m']
             if geometry['support']is not None:spec['support']={'support':geometry['support'],'source':'estimated','status':'PROPOSED','evidence':['Legacy geometry support has no separate contact evidence'],'parallel':True}
         if not isinstance(row['observations'],list):raise ValueError('Invalid semantic observations')

@@ -1,6 +1,6 @@
 # SimFoundry Scene Builder — Stage7 Object 제작과 Real/Sim 수정
 
-> 개정판: 2026-11-10-codex-vlm-v3 · **표준 지침 원본**. Builder가 이 원문을 `BUILDER_GUIDE.md`로 복사하고 SHA를 확인한 뒤 실제 CLI 프롬프트에서 읽으라고 지시한다.
+> 개정판: 2026-11-13-integration-v5 · **표준 지침 원본**. Builder가 이 원문을 `BUILDER_GUIDE.md`로 복사하고 SHA를 확인한 뒤 실제 CLI 프롬프트에서 읽으라고 지시한다.
 
 ## 0. 실행 범위와 원본 보호
 
@@ -35,7 +35,11 @@ Wrist는 최우선 정밀 관측, Side는 전역 일관성 기준이다. 한 시
 4. Object별 observations에 실제 image_id와 원본 upright 해상도의 box_xyxy/관측점을 반환한다. 보이지 않는 Box를 만들지 않는다. 좌표는 해상도 안에 있어야 한다. 대표 시점은 같은 image_id의 관측과 연결한다. Python은 이를 설명용 annotation으로 그릴 뿐 SAM Mask라고 표시하지 않는다.
 5. Model Reference를 `model_references`의 exact image_id, LINKED/AMBIGUOUS, 시각 근거로 연결한다. 이름만으로 확정하지 않는다. 실제 URDF Link 부착물은 `robot_attachment`로 별도 표현한다. 하우징 모델링은 optical K/Mount Calibration을 대신하지 않는다.
 6. **Object 1개 : 독립 USDA Asset 1개**가 기본이다. 같은 제품/색/카테고리라고 자동 공유하지 않는다. 사용자가 명시한 기존 Manifest/공유 자산은 그대로 재사용할 수 있다.
-7. 기존 측정은 `tasks.json.measurements`에 있다. 기존 측정을 새 메모 인용으로 꾸미거나 visual_inference로 되풀이하지 않는다. 원문 실측은 정확한 인용과 Memo SHA로 연결한다. Schema 밖의 의미 필드를 만들지 않는다.
+7. 기존 측정은 `tasks.json.measurements`에 있다. 기존 측정을 새 메모 인용으로 꾸미거나 visual_inference로 되풀이하지 않는다. 새 원문 실측은 정확한 인용과 Memo SHA로 연결하고 geometry.measurement_claims에 각 scalar의 Object ID·subject_quote·axis_quote·statement_quote·value_quote·숫자 문자열 value·unit(mm/cm/m)·로컬 field(x/y/z/wall)를 반환한다. subject_quote는 원문과 Object prompt/ID의 명칭에 실제로 나타나야 한다. statement_quote는 원문에서 유일한 대상·축·수치가 확인되는 최소 문장이며 한 숫자/단위만 포함한다. 각 반환 치수의 축/단위/숫자가 정확히 대응해야 한다. 모호한 길이/세로·tuple 축 순서·공통 명칭의 여러 컵을 임의 확정하지 않는다. 근거를 분리할 수 없으면 claims=[]로 두고 estimated/검토 필요를 유지한다. 숫자 일치 검사는 독립적인 자연어 의미·물리 정확도 인증이 아니다. Schema 밖의 의미 필드를 만들지 않는다.
+   명시적 Shape/Equality는 geometry.dimension_relations에 반환한다. relation은 cube/cylinder/axes/equal_dimensions/same_product다. 정확한 statement_quote/relation_quote와 모든 멤버의 object_id/subject_quote bindings를 연결하고, measurements마다 field(edge/diameter/radius/x/y/z/wall), axis_quote, 한 수치/단위만 포함하는 clause_quote, value_quote/value/unit를 쓴다. 정육면체 한 변은 xyz로, 원통 diameter 또는 2*radius는 xy로만 유도하고 높이 z는 독립 수치가 필요하다. 가로·세로·높이는 x/y/z, 길이·폭·두께는 x/y/z다. 부분 치수는 null을 유지한다. shared 측정은 실제 Instance별 명칭이 유일할 때만 모든 ID를 bindings에 넣는다. 동등 치수/같은 제품은 reference_object_id와 명시 관계 인용을 요구하며 이미 근거가 검증된 치수만 상속한다. 추정값에서 measured를 파생하지 않는다. 해당하지 않으면 dimension_relations=[]다. 이 관계는 숫자·관계의 수학 검증이며 제품 Identity나 자연어 의미의 독립 인증이 아니다.
+
+   Stage6 check_valid가 요청되면 identity_preserved/other_objects_present와 assessment의 observed_shape_preserved/foreground_valid/measurement_consistent를 비교 근거로 판단한다. uncertainties는 OBJECT_IDENTITY/FOREGROUND_MASK/OTHER_OBJECT_CONTAMINATION/HIDDEN_GEOMETRY/UNMEASURED_DIMENSIONS/TEXTURE_APPEARANCE/GENERATION_ARTIFACT 중 해당 항목만 쓴다. 숨은 형상·미측정 치수만 불확실하고 모든 관측 보호 조건을 만족하면 uncertain=true를 유지한 ESTIMATED_CONTINUE가 가능하다. 관측 손상·혼입·Alpha·실측 충돌은 검토 대상으로 남긴다. 판단하지 못한 것을 true로 채우지 않는다.
+
 8. 지지·설치 관계는 치수와 별도 `support_relation` 근거로 반환한다. 영상 가설은 PROPOSED, 실제 메모의 관계 인용은 검증 가능한 사용자 선언이다. `geometry.support=null`로 둔다. 치수 인용만으로 접촉을 확정하지 않는다.
 9. `capture_layouts`는 실제 Capture 배치와 SAME_LAYOUT/DIFFERENT_LAYOUT/AMBIGUOUS 및 영상 근거다. 다른 배치의 정적 Object를 동일 Pose로 합치지 않는다.
 10. Object별 modeling_notes에 보이는 형상·재질·디자인과 보이지 않는 부분의 불확실성을 간결하게 남긴다. Task는 지원 Schema로 반환하고 없는 물리/관측을 구현됐다고 하지 않는다.
@@ -103,6 +107,10 @@ Candidate `evidence/index.json`과 `index.html`이 제작 기록이다. 단계�
 
 Stage5 VLM의 Category 갱신과 SAM3/SBERT 의미적 중복 검사를 구분한다. 같은 컵의 물리 Instance ID는 Mask 순서로 결정하지 않는다. 제거 재시도는 mask/outline/bbox 각 seed0–2로 제한하며 실패 RGB에서 Depth를 계속 생성하지 않는다.
 
+Stage5의 overall uncertain은 그대로 보고하며 Object별 assessment에 identity/box/memo와 uncertainties를 구분한다. HIDDEN_GEOMETRY/UNMEASURED_DIMENSIONS/FRONT만 있고 Identity·Box가 확인되고 Memo의 실질 모순이 없으면 estimated Draft를 진행할 수 있다. IDENTITY/BOX/MEMO/REMOVAL_QUALITY 불확실성은 제거를 허용하는 근거가 아니다. 모호한 빈 장면을 종료 성공으로 표시하지 않는다. 실패 Object와 입력 SHA·의존성을 남기며 제거 순서에 의존한 후속 RGB/Depth는 보류한다. 남아 있는 독립 관측과 완료 Cache를 버리지 않는다.
+
+관측 NPZ의 rgb_source/depth_source는 원본(0)/생성(1), low_confidence는 명시된 신뢰도 조건의 제외 영역이다. 원본 Depth도 DA3 추정이며 measured가 아니다. Stage8 기본 CPD는 원본 RGB·원본 추정 Z의 유효 관측만 사용한다. 생성 영역은 명시 point_policy와 근거·original-only 민감도 비교가 있어야 사용할 수 있고 정확도 인증으로 바꾸지 않는다. 정합 품질·대칭/후보 모호성은 별도 미검증 지표다.
+
 Stage6은 Provider-native 종횡비와 Crop/Padding, 선택 Infill, Upsample/RemBG 결과를 전달한다. 생성된 RGB/Alpha에 원관측 Depth가 정합됐다고 가정하지 않는다. Stage7은 source_views의 실제 Photo 또는 Video 프레임과 Memo·개별 연결 Model Reference를 사용한다. Video 프레임은 Candidate 소유 파생 관측이며 Project 원본 사진으로 등록하거나 Capture와 섞지 않는다.
 
 Stage8의 CPD/선택 FoundationPose 및 방향 정규화가 Pose를 소유한다. Codex+Blender의 +Z Native canonical Mesh는 auto Tilt baking 대상이 아니다. 방향 정규화는 새 Asset 내부의 Visual/Collision에 함께 적용하고 Pose를 역보상해 World 형상을 유지한다. 실측 축을 바꾸는 회전은 별도 검토가 필요하다. 의미적 Front가 없는 물체나 대칭/퇴화의 불확실성을 완료로 꾸미지 않는다.
@@ -119,3 +127,9 @@ Stage5의 scene_analysis는 Stage7에서 SHA·메모·원본 이미지·참조·
 성공 처리하지 않는다. 잔존·다른 물체 손상·경계 불연속·불확실성이 있으면 검토 필요로 남긴다.
 Stage6는 관측 RGB/Mask와 생성 이미지를 비교해 Identity와 다른 물체 혼입을 판단한다.
 Stage8은 렌더 후보 중 의미적 Front만 선택한다. NONE/uncertain은 모호함이며 Metric Pose 인증이 아니다.
+
+## 10. 후속 Stage6/Robot World 계약
+
+Stage6 check_valid가 요청되면 identity_preserved/other_objects_present와 assessment의 observed_shape_preserved/foreground_valid/measurement_consistent를 비교 근거로 판단한다. uncertainties는 OBJECT_IDENTITY/FOREGROUND_MASK/OTHER_OBJECT_CONTAMINATION/HIDDEN_GEOMETRY/UNMEASURED_DIMENSIONS/TEXTURE_APPEARANCE/GENERATION_ARTIFACT 중 해당 항목만 쓴다. 숨은 형상·미측정 치수만 불확실하고 모든 관측 보호 조건을 만족하면 uncertain=true를 유지한 ESTIMATED_CONTINUE가 가능하다. 관측 손상·혼입·Alpha·실측 충돌은 검토 대상으로 남긴다. 판단하지 못한 것을 true로 채우지 않는다.
+
+Stage10은 명시적인 독립 Support/Robot World 3D 대응점에서 기존 align_points의 Sim(3)를 추정한다. scale과 rigid Pose는 별도로 유지하며 작업판 크기만으로 Robot Base Pose를 결정하지 않는다. Anchor Train/Holdout을 분리하고 자동 결과는 estimated다. 원점·Identity를 임의 Robot World 답으로 넣지 않는다. Side는 고정 Extrinsic, Wrist는 measured q/FK에 대한 하나의 Link Mount를 유지한다. 기존 register_sensor_views/joint.fit_joint_scene, 명시된 render_refinement만 기존 hybrid.fit_scene/alignment_metrics에 연결한다. 측정 Asset과 Scale 충돌은 corrected-point Stage8 재정합을 요청한다. Stage11–14 승인·실제 물리·독립 센서/Task 기준은 완화하지 않는다.

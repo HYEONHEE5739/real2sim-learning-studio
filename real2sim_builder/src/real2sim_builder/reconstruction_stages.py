@@ -21,12 +21,61 @@ def instance_schema(*,initial=False):
     fields['box_xyxy']={'type':'array','items':{'type':'number'},'minItems':4,'maxItems':4}
     fields['support']={'type':['string','null']}
     fields['relations']={'type':'array','items':{'type':'string'}}
+    fields['assessment']=typed_record({
+        'identity':{'type':'string','enum':['IDENTIFIED','AMBIGUOUS']},
+        'box':{'type':'string','enum':['ASSOCIATED','AMBIGUOUS']},
+        'memo':{'type':'string','enum':['CONSISTENT','CONFLICT','UNKNOWN']},
+        'uncertainties':{'type':'array','items':{'type':'string','enum':['HIDDEN_GEOMETRY','UNMEASURED_DIMENSIONS','FRONT','IDENTITY','BOX','MEMO','REMOVAL_QUALITY']}}})
     props={'objects':{'type':'array','items':typed_record(fields)},'memo_consistent':{'type':'boolean'},
         'uncertain':{'type':'boolean'},'evidence':{'type':'array','items':{'type':'string'},'minItems':1}}
     if initial:
         from .authoring import scene_analysis_schema
         props['scene_analysis']=scene_analysis_schema()
     return typed_record(props)
+
+
+def instance_gate(answer, input_sha256):
+    """Typed uncertainty only; never interpret free-form uncertainty text."""
+    if answer.get('memo_consistent')is False:
+        raise StageNeeds('NEEDS_REVIEW','Scene Memo conflicts with observed layout',code='MEMO_CONFLICT',classification='OBJECT_REVIEW',input_sha256=input_sha256)
+    outcomes=[]
+    for obj in answer['objects']:
+        assessment=obj.get('assessment')
+        if assessment is not None:
+            from .codex_cli import validate_answer
+            validate_answer(assessment,instance_schema()['properties']['objects']['items']['properties']['assessment'])
+            safe=(assessment['identity']=='IDENTIFIED'and assessment['box']=='ASSOCIATED'and assessment['memo']!='CONFLICT'
+                  and not set(assessment['uncertainties'])-{'HIDDEN_GEOMETRY','UNMEASURED_DIMENSIONS','FRONT'})
+        else:safe=not answer.get('uncertain',False)  # Old unscoped uncertainty stays blocked.
+        if not safe:
+            raise StageNeeds('NEEDS_REVIEW','Unresolved Instance identity/Box/Memo: '+obj['id'],code='INSTANCE_ASSOCIATION',
+                classification='OBJECT_REVIEW',scope='object',object_ids=[obj['id']],input_sha256=input_sha256)
+        if assessment and assessment['uncertainties']:
+            outcomes.append({'classification':'ESTIMATED_CONTINUE','scope':'object','object_ids':[obj['id']],
+                'reasons':assessment['uncertainties'],'input_sha256':input_sha256,'physical_verified':False})
+    if answer.get('uncertain')and not answer['objects']:
+        raise StageNeeds('NEEDS_REVIEW','Uncertain empty scene is not termination evidence',code='UNCERTAIN_TERMINATION',classification='OBJECT_REVIEW',input_sha256=input_sha256)
+    return outcomes
+
+
+def pose_point_selection(arrays, options):
+    """Observed RGB with original model-estimated Z is the default CPD input."""
+    mask=np.asarray(arrays['mask'],bool);points=np.asarray(arrays['camera_points'])
+    if points.shape!=(int(mask.sum()),3)or not np.isfinite(points).all():raise ValueError('Point/pixel provenance mismatch')
+    fields=('rgb_source','depth_source','low_confidence')
+    if not all(k in arrays for k in fields):
+        raise StageNeeds('NEEDS_REVIEW','Point provenance NOT_RECORDED; regenerate Stage5 artifact',code='POINT_PROVENANCE',classification='OBJECT_REVIEW')
+    maps=[np.asarray(arrays[k])for k in fields]
+    if any(m.shape!=mask.shape for m in maps)or any(not np.isin(m,[0,1]).all()for m in maps):raise ValueError('Invalid provenance pixel grid/labels')
+    generated=(maps[0].astype(bool)|maps[1].astype(bool))[mask];low=maps[2].astype(bool)[mask]
+    policy=options.get('point_policy','original_only')
+    if policy not in ('original_only','include_generated'):raise ValueError('Unknown CPD point provenance policy')
+    if policy=='include_generated'and not options.get('generated_evidence'):raise ValueError('Generated CPD input requires explicit sensitivity evidence')
+    keep=~low if policy=='include_generated'else~(generated|low)
+    return points[keep],{'policy':policy,'selected_points':int(keep.sum()),'original_points':int((~(generated|low)).sum()),
+        'generated_points':int(generated.sum()),'low_confidence_points':int(low.sum()),
+        'sensitivity_required':policy=='include_generated','confidence_calibrated':False,
+        'depth_provenance':'model-estimated optical Z, never measured','independent_accuracy':False}
 
 
 def prepare(candidate, config, previous, folder, provider):
@@ -263,7 +312,7 @@ def reviewed_removal(edit, answer, *, before=None, mask=None, object_mask=None):
         not isinstance(answer['reason'],str)or not answer['reason'].strip()or
         not isinstance(answer['evidence'],list)or not answer['evidence']or
         any(not isinstance(row,str)or not row.strip()for row in answer['evidence'])):
-        raise StageNeeds('NEEDS_REVIEW','Local FLUX object removal evidence is uncertain or conflicting')
+        raise StageNeeds('NEEDS_REVIEW','Local FLUX object removal evidence is uncertain or conflicting',code='REMOVAL_QUALITY',classification='RETRYABLE',scope='object')
     return True
 
 
@@ -280,8 +329,9 @@ def decompose(candidate, config, previous, folder, provider):
     index=previous[3]['selected_index'];T=np.asarray(previous[4]['camera_to_support'])
     with np.load(previous[2]['prediction'])as a:
         rgb=a['image'][index].copy();z=a['depth'][index].copy();K=a['intrinsics'][index]
-    original_rgb=rgb.copy()
-    h,w=z.shape;memo=scene_memo(candidate.project);objects=[];removed=[];history=[]
+    original_rgb=rgb.copy();rgb_source=np.zeros(z.shape,np.uint8);depth_source=np.zeros(z.shape,np.uint8)
+    with np.load(previous[2]['prediction'])as a:confidence=a['conf'][index].copy()
+    h,w=z.shape;memo=scene_memo(candidate.project);objects=[];removed=[];history=[];gate_outcomes=[]
     limits=config.get('decomposition',{});maximum=limits.get('max_objects',20)
     if type(maximum)is not int or not 1<=maximum<=100:raise ValueError('Invalid bounded decomposition budget')
     current=folder/'initial.png';Image.fromarray(rgb).save(current)
@@ -306,10 +356,11 @@ def decompose(candidate, config, previous, folder, provider):
                 'existing_measurements':config.get('objects',{}),'robot_links':[f.removeprefix('robot_link_')for f in candidate.scene.get('frames',{})if f.startswith('robot_link_')]}
             answer=provider('vlm',{'images':[str(current)]+([r['path']for r in records]if initial else[]),
                 'task':'scene_instances','response_schema':instance_schema(initial=initial),'context':context,
-                'prompt':prompt+' Return category, description, relations, support, occlusion uncertainty and memo consistency. '+
+                'prompt':prompt+' Return category, description, relations, support, occlusion uncertainty and memo consistency. '
+                'For each assessment distinguish identity/Box/Memo conflicts from hidden shape, unmeasured dimensions and front uncertainty. Keep overall uncertain truthful; these last three alone do not forbid a draft. '+
                 ('Also return scene_analysis using guide section 2 for the provided source image IDs, original resolution, memo and model references. This analysis will be reused by Stage7. 'if initial else'')},step/'vlm')['answer'];detection_calls+=1
             if not isinstance(answer,dict)or not isinstance(answer.get('objects'),list):raise ValueError('Expected typed VLM object-instance list')
-            if answer.get('uncertain')or answer.get('memo_consistent')is False:raise StageNeeds('NEEDS_REVIEW','Codex Instance identity or Memo consistency is uncertain')
+            gate_outcomes.extend(instance_gate(answer,sha(current)))
             if initial and 'scene_analysis'in answer:
                 path=step/'scene_analysis.json';write(path,answer['scene_analysis'])
                 from .authoring import _codex_guidance
@@ -325,7 +376,7 @@ def decompose(candidate, config, previous, folder, provider):
         if iteration==maximum:raise StageNeeds('NEEDS_REVIEW','Scene decomposition object budget exhausted')
         ids=set();proposals=[]
         for obj in active:
-            if not {'id','prompt','role','box_xyxy'}<=set(obj)or set(obj)-{'id','prompt','role','box_xyxy','category','description','uncertainty','relations','support'}:raise ValueError('Unexpected VLM instance fields')
+            if not {'id','prompt','role','box_xyxy'}<=set(obj)or set(obj)-{'id','prompt','role','box_xyxy','category','description','uncertainty','relations','support','assessment'}:raise ValueError('Unexpected VLM instance fields')
             name=identifier(obj['id']);box=np.asarray(obj['box_xyxy'],float)
             if name in ids or name in removed or box.shape!=(4,)or not np.isfinite(box).all()or not(0<=box[0]<box[2]<=w and 0<=box[1]<box[3]<=h):
                 raise StageNeeds('NEEDS_REVIEW','Ambiguous/repeated Instance ID or invalid observation bounds')
@@ -336,13 +387,28 @@ def decompose(candidate, config, previous, folder, provider):
         segment=provider('segments',{'image':str(current),'objects':proposals,'world_points':str(world_map)},step/'sam3')
         masks={row['id']:row for row in segment['objects']}
         if set(masks)!=ids or any(row['status']!='UNIQUE_ESTIMATED'for row in masks.values()):
-            raise StageNeeds('NEEDS_REVIEW','SAM3 instance association is missing or ambiguous')
-        clouds=[];camera_points=backproject(z,K)
+            raise StageNeeds('NEEDS_REVIEW','SAM3 instance association is missing or ambiguous',code='MASK_ASSOCIATION',classification='OBJECT_REVIEW',scope='object',object_ids=sorted(ids),input_sha256=sha(current))
+        clouds=[];camera_points=backproject(z,K);snapshots={}
+        threshold=limits.get('minimum_depth_confidence')
+        if threshold is not None and(type(threshold)not in(int,float)or not np.isfinite(threshold)):raise ValueError('Finite explicit Depth confidence threshold required')
+        low_confidence=((~np.isfinite(confidence)) if threshold is None else(~np.isfinite(confidence))|(confidence<threshold))&(depth_source==0)
         for obj in proposals:
             mask=np.asarray(Image.open(masks[obj['id']]['path']).convert('L'))>0
-            if mask.shape!=z.shape or mask.sum()<10:raise StageNeeds('NEEDS_MORE_DATA','Insufficient observed object mask points')
+            if mask.shape!=z.shape:raise ValueError('Object mask and optical-Z pixel grids disagree')
+            if mask.sum()<10:raise StageNeeds('NEEDS_MORE_DATA','Insufficient observed object mask points',code='OBJECT_POINTS',classification='OBJECT_REVIEW',scope='object',object_ids=[obj['id']],input_sha256=sha(current))
             points=camera_points[mask]@T[:3,:3].T+T[:3,3]
             file=step/(obj['id']+'_world_points.npy');np.save(file,points);clouds.append({'id':obj['id'],'points':str(file)})
+            snapshot=step/(obj['id']+'_observed.npz')
+            np.savez_compressed(snapshot,image=rgb,mask=mask,depth=z,K=K,camera_points=camera_points[mask],
+                rgb_source=rgb_source,depth_source=depth_source,low_confidence=low_confidence,confidence=confidence)
+            snapshots[obj['id']]={'observed':str(snapshot),'sha256':sha(snapshot),'mask_sha256':sha(masks[obj['id']]['path']),
+                'input_sha256':sha(current),'status':'OBSERVATION_READY','provenance':'original_and_generated_pixel_maps'}
+        # Every current observation is frozen before the first edit. A failed
+        # removal cannot discard independent, already completed observations.
+        progress={'schema':'decomposition-progress/1','objects':snapshots,'removed':list(removed),
+            'successful_objects':[o['id']for o in objects],'current_rgb_sha256':sha(current),
+            'dependency_policy':'Sequential occlusion/support order; absence of dependency evidence is not independence'}
+        write(step/'object_progress.json',progress)
         result=provider('removal',{'objects':clouds,'camera_to_world':T.tolist()},step/'order')
         order=result['order']
         if not isinstance(order,list)or len(order)!=len(ids)or set(order)!=ids:raise ValueError('Invalid occlusion/support removal ordering')
@@ -351,13 +417,13 @@ def decompose(candidate, config, previous, folder, provider):
         valid_pixel_proportion=float((np.linalg.norm(original_rgb.astype(np.float32)-rgb.astype(np.float32),axis=-1)[mask]<50).mean())
         if valid_pixel_proportion<=limits.get('min_valid_pixel_prop',.10):
             raise StageNeeds('NEEDS_REVIEW','Object contains insufficient pixels aligned to the original canonical RGB: '+name)
-        observed=step/(name+'_observed.npz')
-        np.savez_compressed(observed,image=rgb,mask=mask,depth=z,K=K,camera_points=camera_points[mask])
+        observed=Path(snapshots[name]['observed'])
         observed_rgb=step/(name+'_observed.png');Image.fromarray(rgb).save(observed_rgb)
         objects.append({**obj,'mask':masks[name]['path'],'observed':str(observed),
                         'observed_rgb':str(observed_rgb),
                         'source_frame_id':previous[3]['selected_frame_id'],'iteration':iteration,
-                        'provenance':'observed'if iteration==0 else'observed_and_inpainted_context',
+                        'provenance':'original_rgb_model_estimated_depth'if iteration==0 else'original_and_generated_pixel_maps',
+                        'confidence_policy':{'minimum':threshold,'calibrated':False,'generated_confidence':'UNKNOWN'},
                         'model_reference_ids':[],'original_pixel_agreement':valid_pixel_proportion})
         from .calibration.decomposition import removal_annotation,removal_is_valid,removal_region
         region=removal_region(mask)
@@ -369,6 +435,8 @@ def decompose(candidate, config, previous, folder, provider):
             annotated,check=removal_annotation(rgb,mask,mode)
             annotation=step/('annotated_'+mode+'.png');Image.fromarray(annotated).save(annotation)
             for seed in range(tries):
+                progress.update(active_object=name,active_operation='RGB_REMOVAL',input_sha256=sha(current),dependencies=order[1:])
+                write(step/'object_progress.json',progress)
                 edit=provider('image_edit',{'image':str(annotation),'original_image':str(current),'mask':str(edit_mask),
                     'prompt':'Remove only '+obj['prompt']+' and its cast shadow. Reconstruct the surface and background that it occludes, preserving visible texture, lighting and perspective.',
                     'task':'removal','image_edit_role':'removal','annotation_mode':mode,
@@ -377,22 +445,37 @@ def decompose(candidate, config, previous, folder, provider):
                 image=np.asarray(Image.open(edit['path']).convert('RGB'))
                 if image.shape!=rgb.shape:image=cv2.resize(image,(w,h),interpolation=cv2.INTER_LINEAR)
                 accepted=removal_is_valid(image,check)
-                attempts.append({'mode':mode,'seed':seed,'path':edit['path'],'accepted':accepted})
+                review_folder=step/'removal_review'/mode/('seed_'+str(seed))
+                attempts.append({'mode':mode,'seed':seed,'path':edit['path'],'accepted':False,'annotation_valid':accepted,'review_folder':str(review_folder)})
                 if accepted:
-                    review=None
-                    if edit.get('provider')=='comfy_gguf':
-                        evidence=removal_evidence(edit,before=current,mask=edit_mask,object_mask=masks[name]['path'])
-                        write(step/'removal_pixels.json',evidence)
-                        review=provider('vlm',{'images':[str(current),str(edit_mask),edit['path']],'task':'removal_validity',
-                            'response_schema':removal_review_schema(),'context':{'memo_sha256':memo['sha256'],'object_id':name,'preserved_ids':[o['id']for o in proposals if o['id']!=name],'pixel_evidence':evidence},
-                            'prompt':'Compare before and edited RGB. Confirm the target '+obj['prompt']+
-                            ' is actually absent, its shadow is removed and the exposed support is continuous. A vanished annotation alone is insufficient. '
-                            'Check object_remaining, other_objects_preserved, background_continuous, uncertainty and visible evidence. '
-                            'Return the complete requested JSON Schema.'},step/'removal_review')['answer']
-                    reviewed_removal(edit,review,before=current,mask=edit_mask,object_mask=masks[name]['path']);attempts[-1]['quality_review']=review
-                    edited=image;break
+                    try:
+                        review=None
+                        if edit.get('provider')=='comfy_gguf':
+                            evidence=removal_evidence(edit,before=current,mask=edit_mask,object_mask=masks[name]['path'])
+                            write(step/'removal_pixels.json',evidence)
+                            review=provider('vlm',{'images':[str(current),str(edit_mask),edit['path']],'task':'removal_validity',
+                                'response_schema':removal_review_schema(),'context':{'memo_sha256':memo['sha256'],'object_id':name,'preserved_ids':[o['id']for o in proposals if o['id']!=name],'pixel_evidence':evidence},
+                                'prompt':'Compare before and edited RGB. Confirm the target '+obj['prompt']+
+                                ' is actually absent, its shadow is removed and the exposed support is continuous. A vanished annotation alone is insufficient. '
+                                'Check object_remaining, other_objects_preserved, background_continuous, uncertainty and visible evidence. '
+                                'Return the complete requested JSON Schema.'},review_folder)['answer']
+                        attempts[-1]['quality_review']=review
+                        reviewed_removal(edit,review,before=current,mask=edit_mask,object_mask=masks[name]['path'])
+                    except StageNeeds as error:
+                        if error.code!='REMOVAL_QUALITY':raise  # Never retry auth/Runtime/contract failures as generation.
+                        attempts[-1]['gate']=error.gate
+                    else:
+                        attempts[-1]['accepted']=True;edited=image
+                write(step/'removal_attempts.json',{'object_id':name,'input_sha256':sha(current),'attempts':attempts})
+                if edited is not None:break
             if edited is not None:break
-        if edited is None:raise StageNeeds('NEEDS_REVIEW','Original removal retries exhausted; generated annotation remains in RGB')
+        if edited is None:
+            pending=[o['id']for o in proposals if o['id']!=name]
+            progress['objects'][name].update(status='OBJECT_REVIEW',reason='REMOVAL_RETRIES_EXHAUSTED')
+            progress.update(dependency_blocked=pending,dependency_evidence='Ordered next RGB depends on this accepted removal; independent observation snapshots remain available')
+            write(step/'object_progress.json',progress)
+            raise StageNeeds('NEEDS_REVIEW','Original removal retries exhausted; no unverified RGB/Depth advanced',code='REMOVAL_RETRIES_EXHAUSTED',
+                classification='OBJECT_REVIEW',scope='object',object_ids=[name],dependencies=pending,input_sha256=sha(current))
         before_edit=rgb.copy();rgb=np.where(region[...,None],edited,rgb)
         contract=depth_inpainting_inputs(rgb,before_edit,z,K,region,step/'depth_inputs')
         current=Path(contract['image']);prior=np.load(contract['prior'])
@@ -404,13 +487,47 @@ def decompose(candidate, config, previous, folder, provider):
         restored=np.load(inpaint['path'])
         if restored.shape!=z.shape or not np.isfinite(restored).all()or np.any(restored<=0):raise ValueError('Invalid inpainted optical depth')
         if not np.array_equal(restored[~region],prior[~region]):raise ValueError('Depth inpainting changed retained observed depth')
-        z=restored;removed.append(name);history.append({'removed':name,'rgb_after':str(current),'depth_after':inpaint['path'],
+        z=restored;rgb_source[region]=1;depth_source[region]=1;confidence[region]=np.nan
+        progress['objects'][name]['status']='REMOVAL_COMPLETE';write(step/'object_progress.json',progress)
+        removed.append(name);history.append({'removed':name,'rgb_after':str(current),'depth_after':inpaint['path'],
             'order':order,'depth_input_contract':str(step/'depth_inputs/contract.json'),'removal_attempts':attempts,'new_single_view_pose_used':False,'inpainting_is_measured':False})
     else:
         raise StageNeeds('NEEDS_REVIEW','Category detection budget exhausted before confirming decomposition termination')
-    return {'objects':objects,'scene_analysis':analysis_record,'category_detection_calls':detection_calls,'removal_history':history,'selected_frame_id':previous[3]['selected_frame_id'],
+    return {'objects':objects,'scene_analysis':analysis_record,'category_detection_calls':detection_calls,'removal_history':history,'gate_outcomes':gate_outcomes,'selected_frame_id':previous[3]['selected_frame_id'],
             'selected_index':index,'camera_to_support':T.tolist(),'coordinate_frame':'selected optical Camera; synthetic hidden-surface evidence marked',
             'warnings':['RGB/Depth inpainting is synthesized evidence, never a measured or independently verified observation']}
+
+
+def object_validity_schema():
+    return typed_record({'validity':{'type':'string','enum':['yes','no','unknown']},
+        'identity_preserved':{'type':'boolean'},'other_objects_present':{'type':'boolean'},
+        'uncertain':{'type':'boolean'},'reason':{'type':'string'},
+        'assessment':typed_record({'observed_shape_preserved':{'type':'boolean'},
+            'foreground_valid':{'type':'boolean'},'measurement_consistent':{'type':'boolean'},
+            'uncertainties':{'type':'array','items':{'type':'string','enum':[
+                'OBJECT_IDENTITY','FOREGROUND_MASK','OTHER_OBJECT_CONTAMINATION','HIDDEN_GEOMETRY',
+                'UNMEASURED_DIMENSIONS','TEXTURE_APPEARANCE','GENERATION_ARTIFACT']}}})})
+
+
+def object_validity_gate(answer, object_id, input_sha256):
+    """Keep hidden uncertainty without accepting identity/alpha/observed damage."""
+    safe=False
+    if isinstance(answer,dict):
+        assessment=answer.get('assessment')
+        if assessment is not None:
+            from .codex_cli import validate_answer
+            validate_answer(answer,object_validity_schema())
+            safe=all(assessment[k]is True for k in('observed_shape_preserved','foreground_valid','measurement_consistent'))
+            safe=safe and set(assessment['uncertainties'])<={'HIDDEN_GEOMETRY','UNMEASURED_DIMENSIONS'}
+            safe=safe and (answer.get('uncertain')is False or bool(assessment['uncertainties']))
+        else:safe=answer.get('uncertain')is False  # Historical strict answers only.
+        safe=safe and answer.get('validity')=='yes'and answer.get('identity_preserved')is True and answer.get('other_objects_present')is False
+    if not safe:
+        raise StageNeeds('NEEDS_REVIEW','Generated Object identity/foreground/observed shape/measurement validity unresolved: '+object_id,
+            code='OBJECT_IMAGE_VALIDITY',classification='OBJECT_REVIEW',scope='object',object_ids=[object_id],input_sha256=input_sha256)
+    return {'classification':'ESTIMATED_CONTINUE','object_id':object_id,'input_sha256':input_sha256,
+            'uncertainties':copy.deepcopy(answer.get('assessment',{}).get('uncertainties',[])),
+            'physical_verified':False}
 
 
 def prepare_objects(candidate, config, previous, folder, provider):
@@ -421,7 +538,10 @@ def prepare_objects(candidate, config, previous, folder, provider):
     if type(size)is not int or not 32<=size<=2048:raise ValueError('Invalid bounded object image size')
     for obj in previous[5]['objects']:
         candidate.project.checkpoint();out=folder/obj['id'];out.mkdir(exist_ok=True)
-        with np.load(obj['observed'])as a:rgb=a['image'];mask=a['mask'];points=a['camera_points']
+        with np.load(obj['observed'])as a:
+            rgb=a['image'];mask=a['mask'];points,point_provenance=pose_point_selection(a,config.get('pose',{}))
+            original_points,original_provenance=pose_point_selection(a,{})
+            yy_original,xx_original=np.where(mask & (a['rgb_source']==0)&(a['depth_source']==0)&~a['low_confidence'].astype(bool))
         yy,xx=np.where(mask)
         if not len(xx):raise StageNeeds('NEEDS_MORE_DATA','Cannot crop an empty object mask')
         crops={}
@@ -436,7 +556,7 @@ def prepare_objects(candidate, config, previous, folder, provider):
                               cv2.resize(square[...,3],(size,size),interpolation=cv2.INTER_NEAREST)])
             Image.fromarray(resized).save(path)
             crops[name]={'path':str(path),'crop_xyxy':[x0,y0,x1,y1],'padding_xy':[dx,dy],'size':size,'sha256':sha(path)}
-        enhanced=None;provider_crop=None;infilled=None;validity={'status':'NOT_VERIFIED'}
+        enhanced=None;provider_crop=None;infilled=None;validity={'status':'NOT_VERIFIED'};validity_gate=None
         if setting.get('upsample',True) or setting.get('infill',False):
             description=provider('image_edit',{'task':'describe','image_edit_role':'objects'},out/'provider_metadata')
             if description.get('supported')is False:
@@ -472,13 +592,19 @@ def prepare_objects(candidate, config, previous, folder, provider):
                     raise StageNeeds('NEEDS_REVIEW','RemBG returned no foreground alpha')
                 if setting.get('check_valid',False):
                     validity=provider('vlm',{'images':[obj['observed_rgb'],str(obj['mask']),enhanced['path']],'task':'object_validity',
-                        'response_schema':typed_record({'validity':{'type':'string','enum':['yes','no','unknown']},'identity_preserved':{'type':'boolean'},'other_objects_present':{'type':'boolean'},'uncertain':{'type':'boolean'},'reason':{'type':'string'}}),
+                        'response_schema':object_validity_schema(),
                         'context':{'instance':obj,'scene_analysis':previous[5].get('scene_analysis')},'prompt':
-                        'Compare observed RGB, its Mask and generated RGB for '+obj['prompt']+'. Check intact single-object identity, foreign object mixing and uncertain hidden geometry. Return every field in the requested schema.'},out/'validity')['answer']
-                    if not isinstance(validity,dict) or validity.get('validity')!='yes'or validity.get('identity_preserved')is not True or validity.get('other_objects_present')is not False or validity.get('uncertain')is not False:
-                        raise StageNeeds('NEEDS_REVIEW','Generated object image validity is negative or malformed')
+                        'Compare observed RGB, its Mask and generated RGB for '+obj['prompt']+'. Check intact identity, foreground alpha, observed shape, foreign objects and protected measurements. Separate hidden geometry/unmeasured dimensions from observed damage. Preserve uncertain=true when warranted. Return every requested field.'},out/'validity')['answer']
+                    try:validity_gate=object_validity_gate(validity,obj['id'],sha(enhanced['path']))
+                    except StageNeeds as error:
+                        write(folder/'object_progress.json',{'objects':result,'held_object':obj['id'],'gate':error.gate,
+                            'dependencies':'Subsequent compilation requires all requested Object results; independence not inferred'})
+                        raise
         cloud=out/'camera_points.npy';np.save(cloud,points)
-        result.append({**obj,'crops':crops,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'camera_points':str(cloud)})
+        original_cloud=out/'original_points.npz';np.savez_compressed(original_cloud,camera_points=original_points,uv_processed=np.c_[xx_original,yy_original])
+        result.append({**obj,'crops':crops,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'validity_gate':validity_gate,'camera_points':str(cloud),
+            'point_provenance':point_provenance,'original_points':str(original_cloud),'original_point_provenance':original_provenance})
+        write(folder/'object_progress.json',{'objects':result,'status':'PARTIAL','physical_verified':False})
     return {'objects':result,'selected_frame_id':previous[5]['selected_frame_id'],
             'coordinate_frame':'object crop pixels / observed selected optical Camera XYZ',
             'upsampling_executed':setting.get('upsample',True)}
@@ -578,9 +704,16 @@ def meshes(candidate, config, previous, folder, provider):
 
 
 def poses(candidate, config, previous, folder, provider):
-    result=[]
+    result=[];review=[]
     for obj in previous[7]['objects']:
         candidate.project.checkpoint()
+        if obj.get('point_provenance',{}).get('selected_points',10)<10:
+            review.append(obj['id']);continue
+        if obj.get('point_provenance'):
+            points=np.load(obj['camera_points'])
+            if points.ndim!=2 or points.shape[1]!=3 or not np.isfinite(points).all():raise ValueError('Invalid selected CPD point array')
+            if np.linalg.matrix_rank(points-points.mean(0))<2:
+                review.append(obj['id']);continue
         fit=provider('cpd',{'mesh':obj['mesh'],'points':obj['camera_points'],
             'scale_protected':obj['scale_protected'],'samples':config.get('pose',{}).get('samples',10),
             'surface_samples':config.get('pose',{}).get('surface_samples',10000)},folder/obj['id'])
@@ -588,8 +721,25 @@ def poses(candidate, config, previous, folder, provider):
         if r.shape!=(3,3)or t.shape!=(3,):raise ValueError('Invalid pose dimensions')
         if not np.isfinite(r).all()or not np.isfinite(t).all()or not np.isfinite(s)or s<=0 or not np.allclose(r@r.T,np.eye(3),atol=1e-4)or not np.isclose(np.linalg.det(r),1,atol=1e-4):raise ValueError('Invalid CPD transform')
         if obj['scale_protected']and not np.isclose(s,1,rtol=0,atol=1e-8):raise ValueError('CPD attempted to change protected measured dimensions')
+        quality=fit.get('quality',{'accuracy_verified':False,'status':'NOT_RECORDED'})
+        write(folder/(obj['id']+'_fit_quality.json'),{'object_id':obj['id'],'fit':fit,'point_provenance':obj.get('point_provenance',{'status':'NOT_RECORDED'})})
+        if quality.get('degenerate'):
+            review.append(obj['id']);continue  # Other independent fits may still be retained.
+        if obj.get('point_provenance',{}).get('sensitivity_required'):
+            original=obj.get('original_points')
+            if not original:raise ValueError('Generated fit requires retained original-only sensitivity input')
+            with np.load(original)as a:points=a['camera_points']
+            if len(points)<10 or np.linalg.matrix_rank(points-points.mean(0))<2:
+                review.append(obj['id']);continue
+            comparison=folder/(obj['id']+'_original_only.npy');np.save(comparison,points)
+            baseline=provider('cpd',{'mesh':obj['mesh'],'points':str(comparison),'scale_protected':obj['scale_protected'],
+                'samples':config.get('pose',{}).get('samples',10),'surface_samples':config.get('pose',{}).get('surface_samples',10000)},folder/obj['id']/'original_only')
+            fit['generated_sensitivity']={'original_only_fit':baseline,'selected_fit_uses_generated':True,'accuracy_verified':False,
+                'translation_delta_m':float(np.linalg.norm(t-np.asarray(baseline['translation']))),'scale_delta':float(s-baseline['scale'])}
         if config.get('pose',{}).get('foundationpose',False):
+            cpd_diagnostics=copy.deepcopy(fit)
             fit=provider('foundationpose',{'mesh':obj['mesh'],'observed':obj['observed'],'initial_fit':fit},folder/obj['id']/'foundationpose')
+            fit['cpd_diagnostics']=cpd_diagnostics
         r=np.asarray(fit['rotation'],float);t=np.asarray(fit['translation'],float);s=fit['scale']
         if type(s)not in(int,float)or s<=0 or not np.isfinite(s)or r.shape!=(3,3)or t.shape!=(3,)or not np.isfinite(t).all()or not np.allclose(r@r.T,np.eye(3),atol=1e-4)or not np.isclose(np.linalg.det(r),1,atol=1e-4):raise ValueError('Invalid final native pose transform')
         if obj['scale_protected']and not np.isclose(s,1,rtol=0,atol=1e-8):raise ValueError('Final pose changed protected scale')
@@ -611,6 +761,10 @@ def poses(candidate, config, previous, folder, provider):
         fit={**fit,'rotation':(r@canonical.T).tolist()}
         orientation['rotation']=canonical.tolist();orientation['world_geometry_preserved']=True
         result.append({**obj,'fit':fit,'canonicalization':orientation,'status':'UNVERIFIED','coordinate_frame':'selected optical Camera'})
+        write(folder/'object_progress.json',{'objects':result,'review':review,'accuracy':'NOT_VERIFIED'})
+    if review:
+        write(folder/'object_progress.json',{'objects':result,'review':review,'accuracy':'NOT_VERIFIED'})
+        raise StageNeeds('NEEDS_REVIEW','Degenerate or unsupported observed pose fit',code='CPD_GEOMETRY',classification='OBJECT_REVIEW',scope='object',object_ids=review)
     return {'objects':result,'coordinate_frame':'mesh-to-selected-optical-Camera','accuracy':'NOT_VERIFIED'}
 
 
@@ -623,21 +777,259 @@ def articulate(candidate, config, previous, folder, provider):
             'robot_model_changed':False,'articulation_executed':False}
 
 
+def resolve_stage_world(config, robot, folder):
+    """Reuse proper Sim(3) alignment with independent, explicitly paired anchors.
+
+    Four board corners supply scale only. Robot World requires non-collinear
+    corresponding points in that frame; validation anchors never enter the fit.
+    Scale stays separate from the rigid transform and from calibration approval.
+    """
+    from .calibration.registration import align_points
+    from .scene import transform
+    report={'robot_world':'UNRESOLVED'if robot else'NOT_REQUESTED','metric_scale_estimate':None,
+            'independent_accuracy_verified':False,'needs':[]}
+    anchors=config.get('metric_anchors',[])
+    scales=[]
+    for anchor in anchors:
+        if anchor.get('source')not in('measured','calibrated')or not anchor.get('evidence'):raise ValueError('Metric Anchor provenance required')
+        qa=metric_qa(anchor['observed_corners_camera_m'],anchor['dimensions_xy_m'])
+        p=np.asarray(anchor['observed_corners_camera_m'],float);w,h=anchor['dimensions_xy_m']
+        lengths=np.linalg.norm(np.roll(p,-1,axis=0)-p,axis=1)
+        scales.append(float(lengths@np.array([w,h,w,h])/(lengths@lengths)))
+        report.setdefault('board_qa',[]).append(qa)
+    if scales:report['metric_scale_estimate']=float(np.median(scales))
+    supplied=config.get('world_registration')
+    if supplied:
+        if supplied.get('provenance')not in('measured','calibrated')or not supplied.get('evidence'):raise ValueError('World registration needs independent measured/calibrated provenance')
+        transform(supplied['support_to_world'])
+        report.update(robot_world='EXPLICIT',scale_policy='Existing metric coordinates retained; scale QA is diagnostic')
+        write(folder/'world_resolution.json',report)
+        return copy.deepcopy(supplied),report
+    rows=config.get('sensor_registration',{}).get('world_anchors',[])
+    if rows:
+        expected={'id','group_id','split','support_point','robot_world_point_m','source','evidence'}
+        for r in rows:
+            if set(r)!=expected or r['split']not in('train','validation')or r['source']not in('measured','calibrated')or not r['evidence']or not r['id']or not r['group_id']:
+                raise ValueError('Independent world anchor identity/provenance/split required')
+            for k in('support_point','robot_world_point_m'):
+                if np.asarray(r[k]).shape!=(3,)or not np.isfinite(np.asarray(r[k],float)).all():raise ValueError('Finite world anchor Nx3 correspondence required')
+        if len({r['id']for r in rows})!=len(rows):raise ValueError('Duplicate world anchor ID')
+        train=[r for r in rows if r['split']=='train'];held=[r for r in rows if r['split']=='validation']
+        if {r['group_id']for r in train}&{r['group_id']for r in held}or any(
+            a[k]==b[k]for a in train for b in held for k in('support_point','robot_world_point_m')):
+            raise ValueError('World anchor train/holdout leakage')
+        fit=align_points(np.asarray([r['support_point']for r in train]).reshape(-1,3),
+                         np.asarray([r['robot_world_point_m']for r in train]).reshape(-1,3),estimate_scale=True)
+        report.update(anchor_sha256=stage_digest(rows),fit=fit,train_ids=[r['id']for r in train],holdout_ids=[r['id']for r in held])
+        if fit['status']=='ESTIMATED':
+            R=np.asarray(fit['T_target_source'])[:3,:3];t=np.asarray(fit['T_target_source'])[:3,3];s=fit['scale']
+            residual=[float(np.linalg.norm(s*R@r['support_point']+t-r['robot_world_point_m']))for r in held]
+            report.update(robot_world='ESTIMATED',metric_scale_estimate=s,train_rmse_m=fit['rmse'],
+                holdout_rmse_m=float(np.sqrt(np.mean(np.square(residual))))if residual else None,
+                holdout_residual_m=residual,needs=[]if residual else['Independent validation anchors not recorded'])
+            registration={'support_to_world':fit['T_target_source'],'scale':s,'provenance':'estimated',
+                'evidence':['Independent paired support/Robot World anchors SHA '+stage_digest(rows)],
+                'method':'paired_world_anchors','anchor_sha256':stage_digest(rows)}
+            write(folder/'world_resolution.json',report)
+            return registration,report
+        report['needs'].extend(fit.get('needs',[]))
+    if robot:
+        report['needs']+=['Provide >=3 non-collinear support/Robot World point pairs with measured metric coordinates and evidence',
+            'Board dimensions alone do not determine Robot Base pose; alternatively localize >=4 diverse measured-q Wrist poses against a common metric cloud and review shared FK/mount consistency']
+        write(folder/'world_resolution.json',report)
+        raise StageNeeds('NEEDS_MORE_DATA','Robot World UNRESOLVED: '+ '; '.join(report['needs']),
+            code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    write(folder/'world_resolution.json',report)
+    return None,report
+
+
+def registered_world_pose(registration, support_pose):
+    """Apply a similarity to a pose without scaling its rotation matrix."""
+    from .scene import transform
+    local=transform(support_pose).copy();local[:3,3]*=float((registration or{}).get('scale',1.))
+    return transform(registration['support_to_world'])@local if registration else local
+
+
+def stage_sensor_clouds(candidate, scene, previous, folder, registration):
+    """Retain original pixel/point evidence in an explicit diagnostic gauge."""
+    from .scene import transform
+    scene=copy.deepcopy(scene);clouds=[]
+    for obj in previous[6]['objects']:
+        file=obj.get('original_points')
+        if not file:raise StageNeeds('NEEDS_MORE_DATA','Original pixel/point correspondence required: '+obj['id'],code='SENSOR_CORRESPONDENCES',classification='DEPENDENCY_BLOCK')
+        with np.load(file)as a:points=a['camera_points'];pixels=a['uv_processed']
+        frame=next(f for f in previous[2]['frames']if f['id']==obj['source_frame_id'])
+        if frame['role']!='scene_photo':continue  # Video frames are not Project sensor-binding observations.
+        index=previous[2]['frames'].index(frame);A=np.asarray(previous[2]['original_to_processed'][index],float)
+        if A.shape!=(3,3)or not np.isfinite(A).all()or not np.allclose(A[2],[0,0,1])or abs(np.linalg.det(A))<1e-12:raise ValueError('Valid original-to-processed pixel affine required')
+        if points.shape!=(len(pixels),3)or pixels.shape[1:]!=(2,)or not np.isfinite(points).all()or not np.isfinite(pixels).all():raise ValueError('Original point correspondence mismatch')
+        T=transform(previous[4]['camera_to_support']);W=transform(registration['support_to_world']);scale=float(registration.get('scale',1.))
+        uv=np.c_[pixels,np.ones(len(pixels))]@np.linalg.inv(A).T
+        support_points=points@T[:3,:3].T+T[:3,3]
+        target=folder/(obj['id']+'_sensor_cloud.npz');np.savez_compressed(target,uv_original=uv[:,:2]/uv[:,2:],points_world_m=(support_points*scale)@W[:3,:3].T+W[:3,3])
+        clouds.append({'image_id':frame['id'],'object_id':obj['id'],'path':target.relative_to(candidate.project.root).as_posix(),
+            'sha256':sha(target),'provenance':'original RGB with DA3-estimated Z and anchor-constrained scale; not independently measured points'})
+    scene.setdefault('reconstruction_observations',{})['clouds']=clouds
+    return scene
+
+
+def resolve_sensor_world(candidate, config, scene, previous, folder, world_report):
+    """Initialize Robot Base from metric support + existing shared FK/hand-eye.
+
+    The temporary support gauge is explicitly not Robot World. Only a full-rank
+    measured-q motion fit supplies its transform; partial estimates stay local
+    diagnostic drafts and never replace Candidate calibration.
+    """
+    from . import observations
+    from .scene import transform,value,frame_world
+    report=copy.deepcopy(world_report);scale=report.get('metric_scale_estimate')
+    base=scene.get('frames',{}).get('robot_base',{})
+    if not scene.get('robot_model')or scale is None or config.get('sensor_registration',{}).get('enabled')is False:
+        raise StageNeeds('NEEDS_MORE_DATA','Robot World UNRESOLVED: independent metric corners and archived measured-q Robot model required',code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    if base.get('parent')!='world':
+        raise StageNeeds('NEEDS_REVIEW','Existing Robot Base hierarchy requires explicit Support registration',code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    protected_base=base['transform']['provenance']in('measured','calibrated')
+    protected_world=any(c['frame']=='world'and c['pose']['provenance']in('measured','calibrated')for c in scene.get('cameras',[]))or any(
+        o['frame']=='world'and o['pose']['provenance']in('measured','calibrated')for o in scene.get('objects',[]))
+    if protected_world and not protected_base:
+        raise StageNeeds('NEEDS_MORE_DATA','Preserve existing calibrated World: Robot Base pose or independent Support/World anchors required',code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    out=folder/'support_sensor_initialization';out.mkdir(exist_ok=True)
+    relative={'support_to_world':np.eye(4).tolist(),'scale':scale}  # Support-to-support gauge only.
+    draft=stage_sensor_clouds(candidate,scene,previous,out,relative)
+    local=copy.deepcopy(config)
+    local['image_ids']=[i['id']for i in candidate.project.evidence['images']if i.get('capture_manifest')and i.get('camera_type')=='wrist']
+    if not local['image_ids']:
+        raise StageNeeds('NEEDS_MORE_DATA','Robot World UNRESOLVED: no Wrist Capture with measured q; fixed Side alone cannot locate Robot Base',code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    candidate.project.checkpoint()
+    result=observations.register_sensor_views(candidate,local,scene=draft,persist=False,initialize_base=True)
+    candidate.project.checkpoint()
+    draft=result.pop('scene',draft);write(out/'registration.json',result);write(out/'support_gauge_scene.yaml',draft)
+    motions=[r for r in result.get('diagnostics',[])if r.get('motion',{}).get('status')=='OPTIMIZED'and r['motion'].get('rank',0)>=13]
+    report.update(support_sensor_registration=result,gauge='temporary support metric frame; not Robot World',
+        robot_world='UNRESOLVED',independent_accuracy_verified=False)
+    if not motions:
+        report['needs']=result.get('needs',[])+['Localize >=4 diverse measured-q Wrist poses against unchanged metric Photo points; shared mount/base motion fit must be full rank']
+        write(folder/'world_resolution.json',report)
+        raise StageNeeds('NEEDS_MORE_DATA','Robot World UNRESOLVED: '+'; '.join(report['needs']),code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    motion=motions[0]['motion'];B=transform(motion['T_relative_base'])
+    W=(frame_world(scene,'robot_base')if protected_base else np.eye(4))@np.linalg.inv(B)
+    from scipy.spatial.transform import Rotation
+    for other in motions[1:]:
+        T=transform(other['motion']['T_relative_base'])
+        if np.linalg.norm(T[:3,3]-B[:3,3])>1e-6 or np.linalg.norm(Rotation.from_matrix(T[:3,:3]@B[:3,:3].T).as_rotvec())>1e-6:
+            report['needs']=['Multiple Wrist fits disagree on shared Robot Base; review cross-sensor consistency']
+            write(folder/'world_resolution.json',report)
+            raise StageNeeds('NEEDS_REVIEW',report['needs'][0],code='ROBOT_BASE_CONFLICT',classification='DEPENDENCY_BLOCK')
+    # The new World gauge is the base located by measured-q FK, not an invented identity.
+    if not protected_base:
+        draft['frames']['robot_base']['transform']=value(np.eye(4).tolist(),'estimated',
+            ['Robot Base gauge derived from full-rank shared Wrist FK/mount fit; not independent calibration'])
+    # Photo clouds/registrations are rebuilt below in the resolved World frame.
+    draft.pop('view_registrations',None)
+    registration={'support_to_world':W.tolist(),'scale':scale,'provenance':'estimated','method':'wrist_fk_metric_support',
+        'anchor_sha256':stage_digest(config['metric_anchors']),
+        'evidence':['Explicit full metric Support corners + full-rank measured-q FK/shared mount fit'],
+        'support_from_robot_base':B.tolist()}
+    report.update(robot_world='ESTIMATED',gauge='Existing protected Robot Base World'if protected_base else'Robot Base estimated from shared measured-q FK',
+        needs=['Independent Robot Base/Side/Wrist holdout accuracy remains NOT_VERIFIED'],motion=motion)
+    write(folder/'world_resolution.json',report)
+    return registration,draft,report
+
+
+def register_stage_sensors(candidate, config, scene, previous, folder, *, resolved_registration=None):
+    """Bridge retained original points to existing sensor registration atomically.
+
+    No new Camera solver: explicit metric evidence first, then existing shared
+    Side/PnP and Wrist measured-q/FK routines. Joint refinement still needs
+    reviewed landmarks and independent pairs; it is not silently run here.
+    """
+    from . import observations
+    from .scene import transform
+    captures=[i for i in candidate.project.evidence['images']if i.get('capture_manifest')and i.get('camera_type')in('side','wrist')]
+    options=config.get('sensor_registration',{})
+    if not captures or options.get('enabled')is False:
+        return scene,{'status':'NOT_REQUESTED'if captures else'NOT_AVAILABLE','physical_verified':False,
+                      'needs':['Sensor registration deferred; final approval unverified']if captures else[]}
+    anchors=config.get('metric_anchors',[]);registration=resolved_registration or config.get('world_registration')
+    method=(resolved_registration or{}).get('method')
+    identity=options.get('world_anchors',[])if method=='paired_world_anchors'else anchors
+    automatic=bool(resolved_registration and method in('paired_world_anchors','wrist_fk_metric_support')
+        and resolved_registration.get('anchor_sha256')==stage_digest(identity))
+    if not anchors and not automatic:
+        raise StageNeeds('NEEDS_MORE_DATA','Independent measured Metric Anchor required before Robot World/sensor registration',
+            code='METRIC_ANCHOR_REQUIRED',classification='DEPENDENCY_BLOCK')
+    if not scene.get('robot_model')or not registration:
+        raise StageNeeds('NEEDS_MORE_DATA','Robot model, measured-q mapping and explicit support-to-Robot World registration required',
+            code='ROBOT_WORLD_REQUIRED',classification='DEPENDENCY_BLOCK')
+    if not automatic and(registration.get('provenance')not in('measured','calibrated')or not registration.get('evidence')):raise ValueError('Protected World registration provenance required')
+    for anchor in anchors:
+        if anchor.get('source')not in('measured','calibrated')or not anchor.get('evidence'):raise ValueError('Metric Anchor provenance required')
+        metric_qa(anchor['observed_corners_camera_m'],anchor['dimensions_xy_m'])
+    review=options.get('metric_review',{})
+    if not automatic and(review.get('accepted')is not True or review.get('anchors_sha256')!=stage_digest(anchors)or not review.get('evidence')):
+        raise StageNeeds('NEEDS_REVIEW','Metric QA requires explicit review bound to current Anchor SHA; no automatic scale certification',
+            code='METRIC_REVIEW_REQUIRED',classification='DEPENDENCY_BLOCK',input_sha256=stage_digest(anchors))
+    scene=stage_sensor_clouds(candidate,scene,previous,folder,registration)
+    reports=[]
+    if options.get('view_anchors'):
+        result=observations.register_views(candidate,options['view_anchors'],scene_state=config.get('scene_state_id'),scene=scene,persist=False)
+        scene=result.pop('scene');reports.append(result)
+    result=observations.register_sensor_views(candidate,config,scene=scene,persist=False)
+    scene=result.pop('scene',scene);reports.append(result)
+    ids={r['image_id']for r in result['views']};missing=[i['id']for i in captures if i['id']not in ids]
+    report={'status':result['status'],'reports':reports,'needs':result.get('needs',[]),'missing_capture_ids':missing,
+        'physical_verified':False,'metric_accuracy_verified':False,'joint_refinement':{'status':'NOT_RUN','needs':['Reviewed CAD landmarks and independent measured-q pairs required']}}
+    write(folder/'sensor_registration.json',report)
+    if missing or result.get('needs')or any(r.get('needs')for r in reports):
+        write(folder/'sensor_partial_scene.yaml',scene)
+        raise StageNeeds('NEEDS_MORE_DATA','Sensor registration incomplete: '+('; '.join(report['needs'])or'eligible captures/metric correspondences/measured-q FK missing'),
+            code='SENSOR_REGISTRATION_INCOMPLETE',classification='DEPENDENCY_BLOCK')
+    joint=options.get('joint',{})
+    landmarks=candidate.project.evidence.get('landmarks',[])+scene.get('derived_observations',{}).get('landmarks',[])
+    if joint.get('enabled',True)and landmarks:
+        from .calibration.joint import fit_joint_scene
+        candidate.project.checkpoint()
+        scene,report['joint_refinement']=fit_joint_scene(candidate.project,scene,{k:v for k,v in joint.items()if k!='enabled'})
+        candidate.project.checkpoint()
+    if options.get('render_refinement',{}).get('enabled',False):
+        from .calibration.hybrid import fit_scene,alignment_metrics
+        render_options={k:v for k,v in options['render_refinement'].items()if k!='enabled'}
+        candidate.project.checkpoint()
+        scene,report['render_refinement']=fit_scene(candidate.project,scene,folder/'sensor_fit',render_options)
+        report['render_comparison']=alignment_metrics(candidate.project,scene,folder/'sensor_comparison',render_options)
+        candidate.project.checkpoint()
+    report['verification']={'side_reprojection':'See joint_refinement per-camera groups',
+        'wrist_reprojection':'See joint_refinement per-camera groups',
+        'shared_mount':'See registration motion rank/rmse; measured-q/FK fixed',
+        'robot_base':'estimated consistency only; independent accuracy NOT_VERIFIED',
+        'object_pose':'estimated joint changes; independent accuracy NOT_VERIFIED',
+        'holdout':'See joint holdout groups / optional render comparison; absent means NOT_RECORDED'}
+    write(folder/'sensor_registration.json',report)
+    return scene,report
+
+
 def compile_scene(candidate, config, previous, folder, provider):
     from .scene import value, transform, world_pose, validate
     scene=candidate.scene
-    registration=config.get('world_registration')
     robot=bool(scene.get('robot_model'))or any(o['role']=='reference_robot'for o in scene['objects'])
-    if robot and not registration:
-        raise StageNeeds('NEEDS_MORE_DATA','Explicit support-frame to Robot World registration required; DA3 World is not Robot World')
+    try:registration,world_report=resolve_stage_world(config,robot,folder)
+    except StageNeeds as error:
+        if error.code!='ROBOT_WORLD_REQUIRED'or not scene.get('robot_model')or not config.get('metric_anchors'):raise
+        registration,scene,world_report=resolve_sensor_world(candidate,config,scene,previous,folder,read(folder/'world_resolution.json'))
+    world_scale=float((registration or{}).get('scale',1.))
+    if robot and not config.get('metric_anchors')and not config.get('sensor_registration',{}).get('world_anchors'):
+        raise StageNeeds('NEEDS_MORE_DATA','Independent measured Metric Anchor required before Robot World compilation',code='METRIC_ANCHOR_REQUIRED',classification='DEPENDENCY_BLOCK')
     W=np.eye(4)
     if registration:
-        if registration.get('provenance')not in('measured','calibrated')or not registration.get('evidence'):
+        if registration.get('provenance')not in('measured','calibrated','estimated')or not registration.get('evidence'):
             raise ValueError('World registration needs independent measured/calibrated provenance')
         W=transform(registration['support_to_world'])
     T=transform(previous[4]['camera_to_support']);nodes={o['id']:o for o in scene['objects']}
     for obj in previous[8]['objects']:
-        node=nodes[obj['id']];fit=obj['fit'];scale=float(fit['scale'])
+        node=nodes[obj['id']];fit=obj['fit'];scale=float(fit['scale'])*world_scale
+        if obj['scale_protected']and not np.isclose(world_scale,1,atol=1e-8,rtol=0):
+            raise StageNeeds('NEEDS_REVIEW','Anchor scale changed: refit Stage8 against corrected original points before preserving measured Object '+obj['id'],
+                code='METRIC_SCALE_REQUIRES_REFIT',classification='DEPENDENCY_BLOCK',object_ids=[obj['id']])
         source=np.asarray(obj['source_dimensions']['value'],float)
         canonical=np.asarray(obj.get('canonicalization',{}).get('rotation',np.eye(3)),float)
         rotated=not np.allclose(canonical,np.eye(3),atol=1e-8)
@@ -652,7 +1044,7 @@ def compile_scene(candidate, config, previous, folder, provider):
                 if rotated:raise StageNeeds('NEEDS_REVIEW','Canonical baking requires an independently versioned Native Asset')
                 node['dimensions']=value((source*scale).tolist(),'estimated',['Stage8 CPD estimated scale; accuracy unverified'])
         pose=np.eye(4);pose[:3,:3]=fit['rotation'];pose[:3,3]=fit['translation']
-        pose=W@T@pose
+        pose=registered_world_pose(registration,T@pose)
         # SimFoundry: scale mesh, mesh-to-selected-camera, then camera-to-world.
         local=np.linalg.inv(world_pose(scene,{'frame':node['frame'],'pose':value(np.eye(4).tolist())}))@pose
         if node['pose']['provenance']in('measured','calibrated'):
@@ -664,7 +1056,7 @@ def compile_scene(candidate, config, previous, folder, provider):
             camera=next((c for c in scene['cameras']if c['id']==name),None)
             if camera and camera.get('camera_type')in('side','wrist'):raise ValueError('Photo Camera conflicts with a robot sensor')
             E=np.eye(4);E[:3]=arrays['extrinsics'][i]
-            pose=W@np.asarray(previous[4]['support_from_da3'])@np.linalg.inv(E)
+            pose=registered_world_pose(registration,np.asarray(previous[4]['support_from_da3'])@np.linalg.inv(E))
             # K remains in the exact DA3 processed image frame.
             new={'id':name,'frame':'world','pose':value(pose.tolist(),'estimated',['DA3 multiview World-to-Camera inversion']),
                  'K':value(arrays['intrinsics'][i].tolist(),'estimated',['DA3 processed pixel frame']),
@@ -678,15 +1070,20 @@ def compile_scene(candidate, config, previous, folder, provider):
                 camera.update(new)
             else:scene['cameras'].append(new)
     if config.get('support_asset'):
+        if not np.isclose(world_scale,1,atol=1e-8,rtol=0):
+            raise StageNeeds('NEEDS_REVIEW','Explicit Support Asset transform must be reviewed in corrected metric frame',code='SUPPORT_METRIC_FRAME',classification='DEPENDENCY_BLOCK')
         from .object_assets import support_asset_operation
         from .editing import apply
         operation=support_asset_operation(candidate,config['support_asset'],W,folder/'support_asset')
         scene=apply(scene,[operation],candidate.project.root)
+    scene,sensors=register_stage_sensors(candidate,config,scene,previous,folder,resolved_registration=registration)
     validate(scene,candidate.project.root)
     candidate.save(scene);write(folder/'compiled_scene.yaml',scene)
     return {'scene':str(folder/'compiled_scene.yaml'),'scene_sha256':sha(folder/'compiled_scene.yaml'),
             'coordinate_frame':'Robot World'if robot else'estimated support World',
             'robot_world_registered':bool(registration),'metric_verified':False,
+            'world_resolution':world_report,'world_scale':world_scale,
+            'sensor_registration':sensors,
             'camera_policy':'Photo reference views preserved; Side/Wrist calibration and FK unchanged',
             'warnings':['DA3 metric scale and CPD poses remain unverified']}
 

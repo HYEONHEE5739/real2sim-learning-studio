@@ -4,6 +4,8 @@
 
 체크포인트 포함 범위·최신 검증 한계와 로컬 모델/Runtime 경로 재설정은 [체크포인트 안내](../docs/simfoundry-checkpoint.md)를 따릅니다. 실제 Workspace 설정·가중치·진단 자료는 Git에 포함하지 않습니다.
 
+후속 [차단 정책 감사](../docs/reconstruction-gate-review.md)는 Object별 불확실성·제한된 제거 재시도·Memo scalar 실측 검증·원본/생성 점 구분과 센서 연결 조건을 설명합니다. Draft 진행과 물리/센서 최종 승인은 별도입니다.
+
 Offline project/candidate reconstruction, calibration, review and immutable Scene packages. Runtime files follow the existing Architecture; Native Dataset storage is owned by the Workbench and is unchanged.
 
 기본 진입점은 Scene Prepare의 **Auto Reconstruction**입니다. 기본 엔진은 SimFoundry Stage1–14이며 DA3 Nested Mixed Precision, SAM3/VLM 분해, Codex+Sandbox Blender Mesh, CPD Pose, 기존 USD/MuJoCo/Isaac 경계를 사용합니다. Stage별 Artifact·Stop/Resume와 기존 계정/모델/사용량·제작 기록 UI를 유지합니다. 실제 Runtime 준비와 부분 구현 범위는 [전환 기록](../docs/simfoundry-reconstruction-migration.md), 설정은 [템플릿](config/simfoundry-reconstruction.example.yaml)을 확인하세요. Source 기반 Real/Sim 재정합은 기존 흐름을 유지합니다.
@@ -25,3 +27,5 @@ bash docs/evidence/builder/run_tests.sh scene_contract/tests robot_learning_work
 ```
 
 Static USD/MJCF parsing and EGL/Blender rendering do not establish articulation, PhysX/Fabric, sensor or physical-contact equivalence. Those remain E01/E02 integration gates. No real robot or camera is connected by these APIs.
+
+Stage6/Memo 기하 제약·Robot World/공유 Side–Wrist 정합의 현재 범위와 재설정은 [후속 통합 기록](../docs/reconstruction-integration-followup.md)을 따른다.

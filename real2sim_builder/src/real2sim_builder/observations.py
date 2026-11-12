@@ -152,14 +152,14 @@ def register_sources(project,paths,**metadata):
     return rows
 
 
-def register_views(candidate,anchors=None,*,scene_state=None):
+def register_views(candidate,anchors=None,*,scene_state=None,scene=None,persist=True):
     """Metric PnP for external views; calibrated fixed/mounted cameras stay fixed."""
     from .candidate import exclusive
     from .calibration.registration import camera_from_anchors
     from .scene import frame_world,value,world_pose
     anchors=anchors or{}
     with exclusive(candidate.project):
-        candidate.require_open();scene=candidate.scene;images,state,needs=input_images(candidate.project,scene_state)
+        candidate.require_open();scene=copy.deepcopy(scene)if scene is not None else candidate.scene;images,state,needs=input_images(candidate.project,scene_state)
         if scene.get('reconstruction_state',{}).get('id',state)!=state:raise ValueError('Use one Candidate per static layout')
         cameras={c['id']:c for c in scene['cameras']};registrations=copy.deepcopy(scene.get('view_registrations',{}));rows=[]
         for image in images:
@@ -208,8 +208,11 @@ def register_views(candidate,anchors=None,*,scene_state=None):
                  'metric_scale_verified':True,'provenance':'derived','physical_verified':False,'report':report}
             registrations[image['id']]=row;rows.append(row)
         if rows:
-            scene['view_registrations']=registrations;scene['reconstruction_state']={'id':state,'static_layout_verified':False};candidate.save(scene)
-        return {'status':'REGISTERED_ESTIMATED'if rows and not needs else'NEEDS_MORE_DATA','views':rows,'needs':needs,'scene_state_id':state,'physical_verified':False}
+            scene['view_registrations']=registrations;scene['reconstruction_state']={'id':state,'static_layout_verified':False}
+            if persist:candidate.save(scene)
+        report={'status':'REGISTERED_ESTIMATED'if rows and not needs else'NEEDS_MORE_DATA','views':rows,'needs':needs,'scene_state_id':state,'physical_verified':False}
+        if not persist:report['scene']=scene
+        return report
 
 
 def predict_views(candidate,inferred,options=None):
@@ -394,7 +397,7 @@ def predict_views(candidate,inferred,options=None):
             'physical_verified':False,'metric_alignment':registration,'metric_attempts':metric_attempts,'motion':motion}
 
 
-def register_sensor_views(candidate,config):
+def register_sensor_views(candidate,config,*,scene=None,persist=True,initialize_base=False):
     """Localize Captures against the metric photo Scene, without sensor SfM.
 
     Existing package cameras are reused first. Otherwise original RGB features
@@ -409,7 +412,7 @@ def register_sensor_views(candidate,config):
     from PIL import ImageOps
     from .candidate import exclusive
     with exclusive(candidate.project):
-        scene=candidate.scene;needs=[];diagnostics=[];rows=[]
+        scene=copy.deepcopy(scene)if scene is not None else candidate.scene;needs=[];diagnostics=[];rows=[]
         cameras={c['id']:c for c in scene['cameras']}
         layouts={r['scene_state_id']:r for r in config.get('capture_layouts',[])}
         captures=[]
@@ -450,7 +453,14 @@ def register_sensor_views(candidate,config):
             candidate.project.checkpoint();kind=camera_type(images[0]);cam=cameras.get(name)
             if any(camera_type(i)!=kind or i['resolution']!=images[0]['resolution']for i in images):
                 needs.append(name+': Camera identity/resolution differs within sensor group');continue
-            if cam and all(cam[f]['value']is not None for f in('K','pose','distortion'))and(kind!='wrist'or cam['frame'].startswith('robot_link_')):
+            if kind=='wrist':
+                model=scene.get('robot_model')
+                if not model:
+                    needs.append(name+': archived Robot model and measured-q mapping required');continue
+                if sha(local_path(candidate.project.root,model['path']))!=model['model_sha256']:raise ValueError('Wrist Robot model bytes changed')
+                if any(i.get('joint_names')!=model['joint_names']or i.get('robot_model_sha256')!=model['model_sha256']or
+                       i.get('mapping_sha256')!=model.get('mapping',{}).get('sha256')for i in images):raise ValueError('Sensor q/model/mapping identity mismatch')
+            if cam and all(cam[f]['value']is not None for f in('K','pose','distortion'))and(kind!='wrist'or cam['frame'].startswith('robot_link_'))and not(kind=='wrist'and initialize_base):
                 diagnostics.append({'camera':name,'status':'EXISTING_SHARED_CAMERA','physical_verified':False})
             else:
                 matches={}
@@ -502,7 +512,9 @@ def register_sensor_views(candidate,config):
                     if not fits:needs.append(name+': shared metric FK/mount constraints remain degenerate or inconsistent');continue
                     _,link,motion=min(fits,key=lambda r:r[0]);frame='robot_link_'+link;pose=motion['T_link_camera']
                     base=scene['frames']['robot_base']['transform']
-                    if base['provenance']in('measured','calibrated'):
+                    if initialize_base:
+                        pass  # Relative support gauge only; caller resolves it against the protected World.
+                    elif base['provenance']in('measured','calibrated'):
                         if not np.allclose(frame_world(scene,'robot_base'),motion['T_relative_base'],atol=.005):needs.append(name+': protected Robot Base disagrees with estimated hand-eye');continue
                     else:scene['frames']['robot_base']['transform']=value(motion['T_relative_base'],'estimated',['photo metric features + shared measured-q FK; not physical calibration'])
                     diagnostics.append({'camera':name,'motion':motion,'metric_scale_changed':False})
@@ -523,9 +535,11 @@ def register_sensor_views(candidate,config):
                     'camera_signature':camera_calibration_signature(scene,cam),'calibration_evidence':['shared sensor registration; original Capture identity retained'],
                     'use_for_joint_fitting':True,'physical_verified':False,'metric_scale_verified':False}
                 scene.setdefault('view_registrations',{})[image['id']]=row;rows.append(row)
-        candidate.save(scene)
+        if persist:candidate.save(scene)
         report={'status':'REGISTERED_ESTIMATED'if rows else'NEEDS_MORE_DATA','views':rows,'diagnostics':diagnostics,'needs':needs,'physical_verified':False}
-        write(candidate.root/'sensor-registration.json',report);return report
+        if persist:write(candidate.root/'sensor-registration.json',report)
+        else:report['scene']=scene
+        return report
 
 
 def annotation_evidence(project, scene):

@@ -414,9 +414,13 @@ def fit_joint_scene(project, scene, options=None):
     candidate=copy.deepcopy(scene);nodes={o['id']:o for o in scene['objects']}
     cached={i['id']:observation_scene(scene,i,project.root,complete=False)for i in images}
     observed_cameras={by_id[r['observation']]['camera']for r in train}
+    observed_types={}
     for name in observed_cameras:
         cam=cameras[name]
-        if (name=='wrist')!=_mounted(scene,cam['frame']):
+        kinds={camera_type(by_id[r['observation']])for r in train if by_id[r['observation']]['camera']==name}
+        if len(kinds)!=1:raise ValueError('Conflicting Camera roles in joint observations')
+        kind=next(iter(kinds));observed_types[name]=kind
+        if kind in('side','wrist')and(kind=='wrist')!=_mounted(scene,cam['frame']):
             raise ValueError('Side must be fixed and Wrist must use a shared robot-link mount')
     observed_objects={r.get('object')for r in train}&nodes.keys()
     selected=options.get('objects',[n for n in observed_objects if nodes[n]['role']in('manipulable_object','receptacle')])
@@ -524,7 +528,7 @@ def fit_joint_scene(project, scene, options=None):
         report['needs'].append('Rank-deficient draft: add distinct poses and CAD points at different depths; hard pair projection may also reduce effective dimension')
     if not anchored:
         report['needs'].append('Relative draft only: provide a measured size or known metric/world anchor')
-    for missing_camera in {'side', 'wrist'} - observed_cameras:
+    for missing_camera in {'side', 'wrist'} - set(observed_types.values()):
         report['needs'].append(missing_camera+': add reviewed visible CAD points; this camera was not fitted')
     try:
         validate(candidate, project.root)

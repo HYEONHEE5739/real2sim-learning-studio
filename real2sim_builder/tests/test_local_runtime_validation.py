@@ -57,7 +57,9 @@ def test_shared_rgb_depth_region_and_stage3_5_6_smoke(tmp_path,monkeypatch):
     assert data['planes'][0]['eligible']is False
     # Stage3's retained shape and explicit plane failure are separate contracts.
     with np.load(prediction)as p, np.load(raw)as r:assert r['mask_0_0'].shape==p['depth'][0].shape
-    observed=tmp_path/'observed.npz';np.savez(observed,image=image,mask=mask,camera_points=np.ones((mask.sum(),3)),depth=z,K=K)
+    low=np.zeros(mask.shape,np.uint8);low[12,19]=1  # Binary masks need not be stored as bool.
+    observed=tmp_path/'observed.npz';np.savez(observed,image=image,mask=mask,camera_points=np.ones((mask.sum(),3)),depth=z,K=K,
+        rgb_source=np.zeros(mask.shape,np.uint8),depth_source=np.zeros(mask.shape,np.uint8),low_confidence=low)
     previous={5:{'objects':[{'id':'cup_1','prompt':'cup','observed':str(observed)}],'selected_frame_id':'synthetic'}}
     candidate=SimpleNamespace(project=SimpleNamespace(checkpoint=lambda:None))
     def forbidden(*a,**kw):raise AssertionError('Observed-only Stage6 must not call an image/RemBG model')
@@ -67,6 +69,8 @@ def test_shared_rgb_depth_region_and_stage3_5_6_smoke(tmp_path,monkeypatch):
     focus=Image.open(outputs['objects'][0]['crops']['focus']['path'])
     assert focus.mode=='RGBA' and np.asarray(focus)[...,3].max()==255
     assert outputs['objects'][0]['enhanced']is None
+    with np.load(outputs['objects'][0]['original_points'])as points:
+        assert len(points['camera_points'])==len(points['uv_processed'])==int(mask.sum())-1
 
 
 def test_local_removal_needs_explicit_quality_review():
@@ -87,7 +91,9 @@ def test_physics_child_receives_explicit_installed_usd_library_path(tmp_path,mon
     called=[]
     class Child:
         returncode=0
+        pid=99999999
         def poll(self):return 0
+        def wait(self,timeout=None):return 0
     def launch(*a,**kw):
         called.append(kw['env'])
         return Child()
