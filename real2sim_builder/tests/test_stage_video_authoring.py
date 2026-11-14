@@ -34,6 +34,13 @@ def test_static_inputs_and_memo_reach_stage7_actual_semantic_schema(tmp_path,mon
     before=sha(p.root/'input/evidence.yaml')
     class Models(PoseModels):
         def __call__(self,op,req,folder):
+            if op=='vlm'and req.get('task')=='scene_instances'and not self.identifications:
+                response=super().__call__(op,req,folder)
+                # This fixture specifically exercises Stage7's semantic fallback.
+                # Parent PoseModels now supplies reusable Stage5 analysis, covered
+                # by test_stage_pose/test_codex_vlm; do not skip that fallback here.
+                response['answer'].pop('scene_analysis',None)
+                return response
             if op=='video':
                 folder.mkdir(parents=True,exist_ok=True);frames=[]
                 for i in range(4):
@@ -59,7 +66,17 @@ def test_static_inputs_and_memo_reach_stage7_actual_semantic_schema(tmp_path,mon
                 'model_references':[{'image_id':ref['id'],'status':'LINKED','evidence':'synthetic explicit reference'}]}
             answer={'scene_memo_sha256':task['scene_memo']['sha256'],'objects':[{**obj,'geometry':None}],'task':None,'needs':[]};cli=tmp_path/'codex';fake_cli(cli,memo,json.dumps(answer));seen.append('schema')
             return original(c,executable=cli,timeout_s=20)
-        seen.append('mesh');return fake_codex_mesh(c,**kw)
+        seen.append('mesh')
+        # This is Stage7 analysis, not the parent's retained Stage5 response.
+        # Authenticate that actual fallback answer before mocking Mesh creation.
+        configuration=read(c.root/'reconstruction-config.yaml');analysis=configuration['scene_analysis']
+        assert analysis['memo_sha256']==task['scene_memo']['sha256']
+        assert sha(p.root/analysis['path'])==analysis['sha256']
+        assert configuration['objects']['block']['model_references'][0]['image_id']==ref['id']
+        assert task['status']=='WAITING_FOR_CODEX'and task['groups']['block']['references']
+        c.edit([{'op':'add_object','id':'block','role':'manipulable_object','dimensions':[.1]*3,
+            'visual':{'type':'box'},'collision':{'type':'box'},'unknown_pose':True}])
+        return {'status':'REGISTERED_UNVALIDATED'}
     monkeypatch.setattr('real2sim_builder.authoring.run_codex_modeling',codex)
     cfg={'scene_state_id':'layout','execute_modeling':True,'support':{'frame_selection':{'mode':'heuristic','min_component_px':4}},'image_preparation':{'size':32}}
     result=_run_stage_pipeline(p,candidate='test',config=cfg,worker=Models(),through_stage=7)

@@ -133,6 +133,11 @@ def episode_plot(source: str, selection_id: str) -> dict:
 def execute(request: dict) -> dict:
     """Explicit existing function calls, not an extensible operation registry."""
     op=request['operation'];args=request.get('arguments',{})
+    if op=='object_library':
+        from real2sim_builder.project import Project
+        from real2sim_builder.asset_view import library_action
+        arguments=dict(args);project=Project(arguments.pop('project'));action=arguments.pop('action')
+        return library_action(project,action,**arguments)
     if op=='precision_profile':
         from ..robot.calibration import load_profile,JOINTS
         from ..data.native import file_sha256

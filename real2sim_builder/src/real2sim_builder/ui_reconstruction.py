@@ -9,7 +9,7 @@ import time
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl,QProcess,QProcessEnvironment,QThread,QTimer,QSettings,pyqtSignal
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,
-    QPushButton,QPlainTextEdit,QGroupBox,QProgressBar,QGridLayout)
+    QPushButton,QPlainTextEdit,QGroupBox,QProgressBar,QGridLayout,QCheckBox,QSpinBox)
 from .project import Project
 from .files import read,write
 from . import codex_cli
@@ -48,7 +48,7 @@ def runtime_needs(config,*,refit=False):
 
 
 class ReconstructionDialog(QDialog):
-    def __init__(self,project,python,parent=None,*,refit=False,source_scene=None,capture_ids=None):
+    def __init__(self,project,python,parent=None,*,refit=False,source_scene=None,capture_ids=None,engine=None):
         super().__init__(parent)
         self.project=Project(project);self.python=str(python);self.refit=refit
         self.source_identity=None
@@ -124,6 +124,10 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
             for index,title in enumerate(STAGE_NAMES):
                 label=QLabel('○ '+str(index+1)+'. '+title);label.setWordWrap(True)
                 grid.addWidget(label,index//2,index%2);self.stage_labels[str(index+1)]=(label,str(index+1)+'. '+title)
+        self.numeric=None;self.refit_engine=engine
+        if refit:
+            self.numeric=QCheckBox('실측 q 기반 수치 공동 정합 (Codex 호출 없음)');self.numeric.setChecked(saved_configuration(self.project,self.candidate.text()).get('numeric_refinement',{}).get('enabled',True));layout.addWidget(self.numeric)
+            self.rounds=QSpinBox();self.rounds.setRange(1,20);self.rounds.setValue(4);self.rounds.setPrefix('최대 반복 ');layout.addWidget(self.rounds)
         self.current=QLabel('저장된 작업 확인 중…');self.current.setWordWrap(True);steps.addWidget(self.current)
         row=QHBoxLayout();layout.addLayout(row)
         self.start=QPushButton('생성 시작 / 이어서 실행');self.start.clicked.connect(self.run);row.addWidget(self.start)
@@ -142,6 +146,10 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
     def configuration(self):
         result=saved_configuration(self.project,self.candidate.text())
         if self.refit:
+            if self.numeric is not None:
+                result.setdefault('numeric_refinement',{})['enabled']=self.numeric.isChecked()
+                result['numeric_refinement']['max_iterations']=self.rounds.value()
+            if self.refit_engine:result.setdefault('fitting',{})['engine']='isaac'if self.refit_engine=='isaaclab'else self.refit_engine
             if self.source_identity:result['refit_source_identity']=self.source_identity
             if self.capture_ids:result['refit_capture_ids']=self.capture_ids
             # Select the saved Pair layout, not the earlier Scene Prepare layout.
@@ -270,20 +278,26 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
 
     def run(self):
         if self.busy()or self.query is not None:return
+        if self.numeric is not None and self.numeric.isChecked():
+            try:self.launch()
+            except Exception as error:self.summary.setPlainText(str(error))
+            return
         self.pending_start=True;self.refresh_account();self.controls()
 
     def launch(self):
-        config=self.configuration();needs=runtime_needs(config,refit=self.refit)
+        config=self.configuration();numeric=self.refit and config.get('numeric_refinement',{}).get('enabled',False)
+        needs=runtime_needs(config,refit=self.refit and not numeric)
         if needs:raise ValueError('\n'.join(needs)+'\n기존 설치 환경의 Reconstruction 설정을 복원하세요. 자동 설치하지 않습니다.')
-        if self.account and self.account.get('logged_in'):
+        if not numeric and self.account and self.account.get('logged_in'):
             codex_cli.selection_args(self.model.currentText(),self.effort.currentData(),self.account['models'])
         if (self.project.root/'working/run.lock').exists():raise ValueError('이 Project가 실행 중입니다. 기존 작업 종료 후 재개하세요.')
         if self.temporary:self.temporary.cleanup()
         self.temporary=tempfile.TemporaryDirectory(prefix='real2sim-reconstruct-')
         path=Path(self.temporary.name)/'configuration.yaml';write(path,config)
-        args=['refit-pairs'if self.refit else'reconstruct',str(self.project.root),'--candidate',self.candidate.text(),'--config',str(path),'--run-modeling']
+        args=['refit-pairs'if self.refit else'reconstruct',str(self.project.root),'--candidate',self.candidate.text(),'--config',str(path)]
+        if not numeric:args+=['--run-modeling']
         if self.refit:args+=['--scene-state',config.get('scene_state_id','')]
-        self.preferences.setValue('model',self.model.currentText());self.preferences.setValue('effort',self.effort.currentData()or'')
+        if not numeric:self.preferences.setValue('model',self.model.currentText());self.preferences.setValue('effort',self.effort.currentData()or'')
         self.start_cli(args)
 
     def start_cli(self,args):
@@ -311,6 +325,10 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         try:
             state=self.project.state;report=json.loads((root/'reconstruction.json').read_text())if(root/'reconstruction.json').is_file()else{}
             stages=report.get('stages',{});stage=state.get('stage')if self.busy() else None
+            if self.refit and report.get('pipeline')=='numeric-pairs/1':
+                self.current.setText('수치 정합 반복 '+str(report.get('current_iteration',0))+' · 개선 채택 '+str(report.get('accepted_iterations',0))+' · Best/Current 별도 보존')
+                if not self.busy():self.show_report(report)
+                return
             if not self.refit:
                 from .stage_artifacts import STAGE_NAMES
                 for key,(label,title)in self.stage_labels.items():
@@ -351,11 +369,17 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
     def show_report(self,report):
         status=report.get('status','FAILED');code=report.get('error_code')
         names={'VISUAL_DRAFT_REVIEWED':'완료 · 시각 초안','NEEDS_MORE_DATA':'추가 자료 필요','STOPPED':'중단 · 이어서 실행 가능',
-               'DRAFT_READY':'초안 Package 생성 · 센서/물리 정확도 별도 검증',
+               'DRAFT_READY':'초안 Package 생성 · 센서/물리 정확도 별도 검증','REFINED_DRAFT':'수치 정합 초안 · 독립 정확도/물리/Task 미검증',
                'NEEDS_RUNTIME':'Runtime/인증 필요 · 완료 Stage 보존','NOT_SUPPORTED':'미지원 기능 · 완료 Stage 보존','NEEDS_REVIEW':'검토 필요 · 완료 Stage 보존',
                'FAILED':'실패 · 저장된 작업 보존','USAGE_LIMIT':'사용량 한도 도달 · 계정 전환 후 이어서 실행',
                'AUTHENTICATION_FAILED':'인증 필요 · 로그인 후 이어서 실행','MODEL_UNAVAILABLE':'모델 접근 불가 · 모델을 다시 선택하세요.'}
         self.summary.setPlainText(names.get(code,names.get(status,status))+'\n'+str(report.get('error',''))+'\n'+'\n'.join(report.get('needs',[])))
+        if report.get('completion'):
+            c=report['completion'];self.summary.appendPlainText('Object 재구성: '+c['object_reconstruction']+' / Scene 좌표 합성: '+c['scene_compilation']+' / 센서·물리·Task 정확도: NOT_VERIFIED')
+        for row in report.get('history',[]):
+            if 'metrics'in row:
+                values=['%s/%s MAE %.5f'%(r.get('camera_type','?'),r['split'],r['mae'])for r in row['metrics'].get('images',[])]
+                self.summary.appendPlainText('반복 '+str(row['iteration']+1)+' · '+('Best 채택'if row['accepted']else'Best 유지')+' · '+'; '.join(values))
 
     def finished(self,code,*_):
         self.discard_output();self.report_started=False

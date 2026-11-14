@@ -54,7 +54,7 @@ class RealSimPage(QWidget):
             save_reconstruction_memo(Project(self.project['project']),self.refinement_memo.toPlainText(),self.scene_combo.currentData()['scene'])
         except Exception as error:self.show_error(str(error));return
         from real2sim_builder.ui_reconstruction import ReconstructionDialog
-        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True,source_scene=self.scene_combo.currentData()['scene'],capture_ids=[r['id']for r in self.rows])
+        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True,source_scene=self.scene_combo.currentData()['scene'],capture_ids=[r['id']for r in self.rows],engine=self.engine.currentData())
         dialog.exec()
     @property
     def rows(self):return self.snapshot_table.rows

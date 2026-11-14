@@ -22,6 +22,15 @@ class BackendJob(QObject):
         if self.process.state()!=QProcess.ProcessState.NotRunning:raise RuntimeError('이 작업이 끝난 뒤 다시 실행하세요')
         from PyQt6.QtCore import QProcessEnvironment
         env=QProcessEnvironment.systemEnvironment()
+        if operation=='object_library':
+            from real2sim_builder.project import Project
+            from real2sim_builder.stage_runtime import workspace_configuration
+            source=workspace_configuration(Project(arguments['project']),{}).get('runtimes',{}).get('physics',{}).get('source')
+            if source:
+                import os
+                from pathlib import Path
+                env.insert('PYTHONPATH',str(source)+os.pathsep+env.value('PYTHONPATH'))
+                env.insert('LD_LIBRARY_PATH',str(Path(source)/'bin')+os.pathsep+env.value('LD_LIBRARY_PATH'))
         if operation=='hub_resolve':env.insert('HF_HUB_OFFLINE','0')
         self.process.setProcessEnvironment(env)
         self.buffer.clear();self.process.start(self.python,['-B','-m','robot_learning_workbench.ui.operations'])
@@ -30,6 +39,7 @@ class BackendJob(QObject):
         self.buffer.extend(bytes(self.process.readAllStandardOutput()))
         try:result=json.loads(self.buffer)
         except ValueError:result={'ok':False,'error':{'message':'Backend 응답을 읽을 수 없습니다 (exit '+str(self.process.exitCode())+'). '+self.buffer.decode(errors='replace')[-2000:]}}
+        self.buffer.clear()
         self.finished.emit(result)
     def stop(self):
         if self.process.state()!=QProcess.ProcessState.NotRunning:self.process.terminate()

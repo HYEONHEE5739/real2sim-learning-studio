@@ -70,3 +70,15 @@ Precision Calibration, 명시 landmark/수치 joint fitting, Teleop/Capture, Tas
 [설정 템플릿](config/simfoundry-reconstruction.example.yaml)의 기존 Python/소스/모델 경로를 해당 Workspace 실행 설정에 명시한다. 자동 설치·다운로드는 없다. 영상 후보15장과 DA3 batch4장은 별도다. 4×336, overlap3이 기본이며 퇴화한 Camera 중심 정합은 거부한다. 인증이 없어도 가능한 초기 Stage를 저장하며 Stage7 Codex 또는 Stage3/5 서비스에서 필요한 인증을 안내한다.
 
 Candidate `reconstruction/simfoundry/stage_XX/attempt_XXX/artifact.json`에 입출력 SHA·설정·Runtime·좌표·단위·Mock 여부를 보존한다. 실패는 별도 `failures/` Artifact, 완료된 Stage/하위 Worker는 SHA 검사 후 재사용한다. 기존 제작 기록 버튼은 같은 Evidence index를 연다. 원본·Camera Calibration·측정 q는 바꾸지 않는다.
+
+## Workspace Library / 수치 Pair 재정합
+
+Workbench Scene Prepare의 **Object Library · 3D 보기**는 검증된 실제 USDA의 Visual/Collision을 읽는다. Orbit(우클릭), Zoom(휠), Pan(가운데), Reset 및 버전 선택을 지원한다. 추가/버전 지정은 선택 Candidate에만 적용한다.
+
+Viewer는 PyQt6 OpenGL Depth Buffer를 사용한다. Desktop OpenGL4.1 이상/X11 등 실제 GL Context가 필요하며 QPA offscreen은 지원하지 않는다. GPU가 없는 환경에서는 명시 오류를 표시하고, 원본 USDA는 바꾸지 않는다. Texture/양면/투명 Collision 지원 범위와 실제 컵 Before/After는 [렌더링 수정 기록](../docs/cup-viewer-rendering-fix.md)을 따른다.
+
+기본 표시 설정은 **Visual100% / Collision Front0% / Collision Hidden0%** 세 슬라이더다. Front100%/Hidden20%로 기존 X-Ray를 표시하고 두 Collision 값을0%로 돌리면 Visual Only다. Visual0%에서도 Edge 판정용 Depth는 유지한다. 청록 실선은 보이는 Collision, 주황 점선은 가려진 Collision이다. Reset은 Camera만 초기화한다. [현재 UI 사용·검증](../docs/object-library-viewer-ui.md)을 따른다.
+
+X-Ray·Feature Edges25°를 기본 방식으로 준비하고, 접힌 Advanced / Debug에서 Visible Only/All Edges/Angle·Collision Only를 사용한다. Collision Only 토글을 해제하면 기존 세 슬라이더와 표시 상태로 복귀한다. 기본 자산 정보는 크기/충돌 검증 상태이며 추가 메타데이터는 고급 영역에 있다. Feature는 기존 인접 면의 각도·Boundary·구조적 Edge와 시점 Silhouette을 사용하며 원본 Asset을 바꾸지 않는다. [Feature 수학·실제 컵 비교](../docs/object-library-wireframe-readability.md)를 따른다.
+
+Real/Sim의 **촬영 자료로 Scene 재정합**은 기본 수치 공동 정합을 선택할 수 있다. 기존 Source/Capture identity, measured-q, 공유 Side/Wrist, Train/Holdout 및 Best/Stop/Resume를 유지한다. 그리퍼 초기 Mount의 필요 입력·지원 범위와 검증/미검증 상태는 [통합 기록](../docs/studio-integration.md)을 따른다. Viewer/정합 성공을 Physics/Task 승인으로 사용하지 않는다.

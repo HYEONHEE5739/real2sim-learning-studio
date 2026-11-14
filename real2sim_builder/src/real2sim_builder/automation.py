@@ -97,6 +97,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
             project.checkpoint()
             return result
         def publish_report():
+            report['completion']={'object_reconstruction':'COMPLETE'if '8'in report['stages']else'INCOMPLETE',
+                'scene_compilation':'COMPLETE'if '10'in report['stages']else'UNRESOLVED',
+                'sensor_accuracy':'NOT_VERIFIED','physical_task':'NOT_VERIFIED'}
             report['resume']={'available':True,'candidate':candidate,'incomplete_stage':report.get('failed_stage'),
                               'completed_stages':[k for k,s in report['stages'].items()if s['status']=='COMPLETE']}
             index['candidate_scene_sha256']=digest(selected.scene);write(index_path,index)
@@ -630,6 +633,97 @@ def pair_source(project,images):
     return None,None,'PAIR_SOURCE_UNRESOLVED','Verified source Revision unavailable: '+'; '.join(failures)
 
 
+def refine_numeric_pairs(candidate, config):
+    """Bounded sensor rounds using existing solvers, render metrics and Best closure.
+
+    Train views select Best. Holdout diagnostics never feed the solve/selection.
+    Physics/Task approval and optional structural remodeling remain separate.
+    """
+    from .calibration import joint,hybrid
+    from .editing import preserve
+    from .observations import register_sensor_views
+    from .stage_artifacts import digest
+    from .visual_evidence import record
+    project=candidate.project;options=config.get('numeric_refinement',{});limit=options.get('max_iterations',4)
+    if type(limit)is not int or not 1<=limit<=20:raise ValueError('Numeric refinement iterations must be 1..20')
+    fitting={**config.get('fitting',{}),'optimize_dimensions':False,'optimize_appearance':False,'optimize_lighting':False,
+             'optimize_depth_scale':False,'holdout_policy':'report_only'}
+    fitting.setdefault('robot_base',True)
+    path=candidate.root/'numeric_refinement.json';identity=digest([config,project.evidence,candidate.info.get('source_revision')])
+    prior=read(path)if path.is_file()else{}
+    history=prior.get('history',[])if prior.get('identity')==identity else[]
+    report={'pipeline':'numeric-pairs/1','candidate':candidate.name,'identity':identity,'status':'NEEDS_MORE_DATA',
+        'history':history,'physical_verified':False,'holdout_used_for_selection':False,'needs':[],
+        'accepted_iterations':sum(r.get('accepted',False)for r in history),'stages':{}}
+    best=None;project.control('resume');candidate.require_open()
+    (candidate.root/'fitting').mkdir(exist_ok=True)
+    write(candidate.root/'reconstruction-config.yaml',config)
+    try:
+        registration=register_sensor_views(candidate,config,scene=candidate.scene,persist=False)
+        if registration.get('needs'):report['needs']=registration['needs'];return report
+        candidate.save(registration.get('scene',candidate.scene))
+        # Reuse approved silhouette constraints without fabricating sensor Z.
+        from .observations import annotation_evidence
+        from .inference import build_render_observations
+        from .scene import local_path
+        import shutil
+        evidence=annotation_evidence(project,candidate.scene);segments=[]
+        for row in evidence.get('masks',[]):
+            if row.get('mask_kind')!='silhouette'or row.get('occluded')is not False or row.get('confidence',1)<.2:continue
+            source=local_path(project.root,row['path'])
+            if sha(source)!=row['sha256']:raise ValueError('Reviewed sensor Mask changed')
+            folder=candidate.root/'.cache/refit_masks';folder.mkdir(parents=True,exist_ok=True);target=folder/(sha(source)+'.png')
+            if not target.exists():shutil.copyfile(source,target)
+            segments.append({'image_id':row['observation'],'object_id':row['object'],
+                'association':{'status':'ASSIGNED_ESTIMATED','mask_path':str(target),'mask_sha256':sha(target)}})
+        if segments:build_render_observations(candidate,{'segments':segments,'images':[{'id':r['image_id']}for r in segments]},same_layout=True)
+        from .initialization import project_supports
+        baseline,physical=project_supports(candidate.scene,fitting.get('supports'),project.root)
+        baseline=hybrid.reproject_observations(project,baseline,{},candidate.root/'fitting/baseline_observations')
+        metrics=hybrid.alignment_metrics(project,baseline,candidate.root/'fitting/final',fitting)
+        if not fitting_scores(metrics):report['needs']=metrics.get('needs',[])+['Comparable finite training renders required'];return report
+        candidate.save(baseline)
+        write(candidate.root/'metrics.json',metrics)
+        best=retain_fitting(candidate,None,report)
+        if best is None:report['needs']=metrics.get('needs',[])+['Comparable finite train Side/Wrist render metrics required'];return report
+        for index in range(len(history),limit):
+            report['current_iteration']=index+1;report['selected_checkpoint']=str(best)
+            write(candidate.root/'reconstruction.json',report)
+            project.update(status='RUNNING',stage='FITTING',candidate=candidate.name,task='Shared sensor refinement '+str(index+1))
+            project.checkpoint();before=candidate.scene;round_dir=numbered_path(candidate.root/'fitting/rounds','iteration');round_dir.mkdir(parents=True)
+            write(round_dir/'before.yaml',before);write(round_dir/'before-metrics.json',metrics)
+            settings={**fitting,'round':index}
+            trial,solver=joint.fit_joint_scene(project,before,settings)
+            if solver.get('status')=='IMPROVED'and(solver.get('jacobian_rank',-1)<solver.get('parameter_count',0)):
+                trial=before;solver={**solver,'status':'UNRESOLVED','needs':solver.get('needs',[])+['Rank-deficient shared Camera/Base/Object fit retained as diagnostic; Best is unchanged']}
+            trial=hybrid.reproject_observations(project,trial,{},round_dir/'joint_observations')
+            if options.get('render_fit',bool(trial.get('reconstruction_observations',{}).get('clouds'))):trial,render=hybrid.fit_scene(project,trial,round_dir/'render_fit',settings);solver['render']=render
+            project.checkpoint();preserve(before,trial)
+            from .scene import validate
+            validate(trial,project.root)
+            candidate.save(trial)
+            after=hybrid.alignment_metrics(project,trial,round_dir/'after',settings)
+            write(candidate.root/'metrics.json',after);write(round_dir/'after.yaml',trial)
+            previous=best;best=retain_fitting(candidate,best,report);accepted=best!=previous
+            history.append({'iteration':index,'accepted':accepted,'solver':solver,'before_metrics':metrics,'metrics':after,'folder':str(round_dir),
+                            'training_ids':[r['image_id']for r in after['images']if r['split']=='train'],
+                            'holdout_ids':[r['image_id']for r in after['images']if r['split']=='validation']})
+            report['accepted_iterations']+=int(accepted);write(path,report)
+            if not accepted:restore_fitting(candidate,best);report['needs']=solver.get('needs',[]);break
+            metrics=after
+        report['status']='REFINED_DRAFT'if report['accepted_iterations']else'NEEDS_MORE_DATA'
+        report['stages']['fitting']={'solver_executed':True,'scope':'shared sensor/CAD pose draft; not independent calibration'}
+    except InterruptedError:report['status']='STOPPED'
+    except Exception as error:report.update(status='FAILED',needs=[str(error)])
+    finally:
+        if best is not None:restore_fitting(candidate,best);report['selected_checkpoint']=str(best)
+        report['input_signature']=project.signature(candidate.scene);report['resume']={'available':True,'candidate':candidate.name}
+        write(path,report);write(candidate.root/'reconstruction.json',report)
+        project.update(status='DRAFT_READY'if report['status']=='REFINED_DRAFT'else report['status'],candidate=candidate.name,needs=report['needs'])
+        record(candidate,'06_final_comparison','NOT_VERIFIED'if report['status']=='REFINED_DRAFT'else report['status'],files=[path],summary='Numeric Pair refinement; passive Physics/Task not executed',details=report)
+    return report
+
+
 def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include_flagged_reason=None,run_modeling=False,max_modeling_calls=6,max_review_calls=3):
     """Existing Pair reader/import -> layout-specific Candidate -> cached fitting.
 
@@ -700,7 +794,7 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
         if scene.get('reconstruction_observations'):
             scene['reconstruction_observations']['clouds']=[r for r in scene['reconstruction_observations']['clouds']if r['image_id']in ids]
         selected.save(scene)
-        result=reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=True,
+        result=refine_numeric_pairs(selected,config)if config.get('numeric_refinement',{}).get('enabled',False)else reconstruct(project,candidate=candidate,config=config,scene_state=scene_state,refit_only=True,
             run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,max_review_calls=max_review_calls)
         result['source_revision']=revision
         result['pair_diagnostics']={'observations':[i['id']for i in paired],

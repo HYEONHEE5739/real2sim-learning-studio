@@ -95,7 +95,7 @@ def main(argv=None):
         result=refit_pairs(project,candidate=args.candidate,dataset=args.dataset,scene_state=args.scene_state,
             config=read(args.config)if args.config else None,include_flagged_reason=args.include_flagged_reason,run_modeling=args.run_modeling,
             max_modeling_calls=args.max_modeling_calls,max_review_calls=args.max_review_calls)
-        print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED')else 2
+        print(json.dumps(result,indent=2));return 0 if result['status']in('DRAFT_READY','VISUAL_DRAFT_REVIEWED','REFINED_DRAFT')else 2
     if args.command=='register-rgb':
         from .observations import register_sources
         rows=register_sources(project,args.paths,camera=args.camera,camera_type=args.type,scene_state=args.scene_state,split=args.split,

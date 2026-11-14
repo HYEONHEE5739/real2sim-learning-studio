@@ -549,6 +549,7 @@ def fit_joint_scene(project, scene, options=None):
         initial=seed[0]if kind=='object'else seed
         if np.any(abs(pose[:3,3]-initial[:3,3])>translation+1e-9):
             return scene,{**report,'status':'NOT_IMPROVED','reason':'Support/distance projection exceeded pose bounds: '+name}
-    if after['behind_camera'] or regressions or held_regressed or held_regressions or after['rmse_px'] >= before['rmse_px']-1e-6:
+    holdout_veto=options.get('holdout_policy')!='report_only'and(held_regressed or held_regressions)
+    if after['behind_camera'] or regressions or holdout_veto or after['rmse_px'] >= before['rmse_px']-1e-6:
         return scene, {**report, 'status': 'NOT_IMPROVED', 'reason': 'No aggregate improvement or a camera/pose/object regressed'}
     return candidate, {**report, 'status': 'IMPROVED'}

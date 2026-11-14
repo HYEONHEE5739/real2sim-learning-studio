@@ -990,6 +990,8 @@ def register_stage_sensors(candidate, config, scene, previous, folder, *, resolv
         from .calibration.joint import fit_joint_scene
         candidate.project.checkpoint()
         scene,report['joint_refinement']=fit_joint_scene(candidate.project,scene,{k:v for k,v in joint.items()if k!='enabled'})
+        from .calibration.hybrid import reproject_observations
+        scene=reproject_observations(candidate.project,scene,{},folder/'joint_observations')
         candidate.project.checkpoint()
     if options.get('render_refinement',{}).get('enabled',False):
         from .calibration.hybrid import fit_scene,alignment_metrics
@@ -1011,6 +1013,13 @@ def register_stage_sensors(candidate, config, scene, previous, folder, *, resolv
 def compile_scene(candidate, config, previous, folder, provider):
     from .scene import value, transform, world_pose, validate
     scene=candidate.scene
+    if not scene.get('robot_model'):
+        captures=[i for i in candidate.project.evidence['images']if i.get('capture_manifest')and i.get('q_measured')is not None]
+        if captures:
+            from .automation import captured_robot
+            robot_reference=captured_robot(candidate,captures);write(folder/'robot_reference.json',robot_reference);scene=candidate.scene
+    from .calibration.wrist import initialize_gripper_mount
+    scene,gripper=initialize_gripper_mount(candidate,scene,config,folder)
     robot=bool(scene.get('robot_model'))or any(o['role']=='reference_robot'for o in scene['objects'])
     try:registration,world_report=resolve_stage_world(config,robot,folder)
     except StageNeeds as error:
@@ -1083,6 +1092,7 @@ def compile_scene(candidate, config, previous, folder, provider):
             'coordinate_frame':'Robot World'if robot else'estimated support World',
             'robot_world_registered':bool(registration),'metric_verified':False,
             'world_resolution':world_report,'world_scale':world_scale,
+            'gripper_initialization':gripper,
             'sensor_registration':sensors,
             'camera_policy':'Photo reference views preserved; Side/Wrist calibration and FK unchanged',
             'warnings':['DA3 metric scale and CPD poses remain unverified']}
