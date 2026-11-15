@@ -20,6 +20,21 @@ def _scene_digest(scene):
     return _digest({k: v for k, v in scene.items() if k != 'derived_observations'})
 
 
+def _record_holdout_usage(project, images, scene, purpose):
+    """Record inspected validation IDs before they can influence later choices.
+
+    This extends the existing Candidate journal to numerical/direct callers;
+    it does not reclassify evidence splits or certify independent accuracy.
+    """
+    ids=sorted({image['id'] for image in images if image.get('id')
+                and image.get('eligible') is not False and image.get('split')=='validation'})
+    if ids:
+        journal=project.root/'working/calibration_holdout_usage.jsonl'
+        with journal.open('a') as stream:
+            stream.write(json.dumps({'target':purpose,'holdout_observations':ids,
+                'scene_sha256':_scene_digest(scene),'independent_verification':False},allow_nan=False)+'\n')
+
+
 def input_images(project,scene_state=None):
     """Identity-checked RGB inputs, including unregistered external views."""
     images=[i for i in project.evidence['images']if i.get('id')and i.get('scene_state_id')and i.get('role')!='model_reference']
@@ -47,7 +62,7 @@ def input_images(project,scene_state=None):
 
 
 def camera_type(image):
-    kind=image.get('camera_type','wrist'if image['camera']=='wrist'else'side'if image['camera']=='side'else'external')
+    kind=image['camera_type']if 'camera_type'in image else 'wrist'if image['camera']=='wrist'else'side'if image['camera']=='side'else'external'
     if kind not in('side','wrist','external'):raise ValueError('Camera type must be side, wrist or external')
     return kind
 
@@ -453,13 +468,16 @@ def register_sensor_views(candidate,config,*,scene=None,persist=True,initialize_
             candidate.project.checkpoint();kind=camera_type(images[0]);cam=cameras.get(name)
             if any(camera_type(i)!=kind or i['resolution']!=images[0]['resolution']for i in images):
                 needs.append(name+': Camera identity/resolution differs within sensor group');continue
-            if kind=='wrist':
-                model=scene.get('robot_model')
-                if not model:
-                    needs.append(name+': archived Robot model and measured-q mapping required');continue
+            model=scene.get('robot_model')
+            if kind=='wrist'and not model:
+                needs.append(name+': archived Robot model and measured-q mapping required');continue
+            if model:
                 if sha(local_path(candidate.project.root,model['path']))!=model['model_sha256']:raise ValueError('Wrist Robot model bytes changed')
                 if any(i.get('joint_names')!=model['joint_names']or i.get('robot_model_sha256')!=model['model_sha256']or
                        i.get('mapping_sha256')!=model.get('mapping',{}).get('sha256')for i in images):raise ValueError('Sensor q/model/mapping identity mismatch')
+                from .capture import validate_joint_units
+                for image in images:
+                    validate_joint_units(local_path(candidate.project.root,model['path']),image['joint_names'],image.get('joint_units',[]))
             if cam and all(cam[f]['value']is not None for f in('K','pose','distortion'))and(kind!='wrist'or cam['frame'].startswith('robot_link_'))and not(kind=='wrist'and initialize_base):
                 diagnostics.append({'camera':name,'status':'EXISTING_SHARED_CAMERA','physical_verified':False})
             else:

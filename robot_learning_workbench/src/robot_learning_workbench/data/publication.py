@@ -57,6 +57,7 @@ def publish_attempt(owner,segment,claim,ep,media,report,events):
     if saved:publish_event(owner.root,eid,events)
     rows=history(owner.root);successes=sum(row['status']=='success' for row in rows)
     summary=dict(attempts=len(rows),successes=successes,failures=sum(row['status']=='failure' for row in rows),cancelled=sum(row['status']=='cancelled' for row in rows),
+        initial_state_satisfied=sum(row.get('diagnostics',{}).get('category')=='initial_state_satisfied'for row in rows),
         safety_rejections=sum(row.get('diagnostics',{}).get('category')=='action_safety_rejection' for row in rows),success_rate=successes/len(rows) if rows else None,
         denominator='all recorded attempts, including rejection/errors/cancellation',completed_episodes=len(load_catalog(owner.root).episodes),latest=summary_report)
     atomic_json(owner.root/'evaluation-summary.json',summary)

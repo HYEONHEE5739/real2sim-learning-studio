@@ -65,8 +65,8 @@ class TrainingJsonDialog(QDialog):
             target=Path(path).resolve()
             if not target.suffix:target=target.with_suffix('.json')
             if target.suffix.lower()!='.json':raise ValueError('JSON 파일로 저장하세요.')
-            protected=('/home/hyeonhee/soarm_isaaclab','/home/hyeonhee/miniconda3','/home/hyeonhee/IsaacLab')
-            if any(target.is_relative_to(p)for p in protected)or any(target.is_relative_to(self.page.workspace/p)for p in('scenes','devices','runtime','.assets')):raise ValueError('원본/자산 대신 scripts/train에 저장하세요.')
+            from .paths import protected_destination
+            if protected_destination(target,backend_python=self.page.backend_python,workspace=self.page.workspace):raise ValueError('원본/자산 대신 scripts/train에 저장하세요.')
             target.parent.mkdir(parents=True,exist_ok=True)
             with target.open('x')as stream:json.dump(data,stream,ensure_ascii=False,indent=2)
             self.page.settings.set_inputs({'training_config':str(target)});self.status.setText('현재 YAML의 Dataset·출력·Mode에 맞춰 JSON 저장됨 · YAML도 저장 및 적용하세요.');self.page.ready=None

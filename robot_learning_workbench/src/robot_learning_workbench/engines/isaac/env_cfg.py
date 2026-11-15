@@ -11,6 +11,74 @@ import math
 import numpy as np
 
 
+_PINHOLE_SCHEMA='OmniLensDistortionOpenCvPinholeAPI'
+_PINHOLE_PREFIX='omni:lensdistortion:opencvPinhole:'
+_PINHOLE_COEFFICIENTS=('k1','k2','p1','p2','k3','k4','k5','k6','s1','s2','s3','s4')
+
+
+def _pinhole_properties(matrix, resolution, focal_length=24.):
+    """Checked USD pinhole parameters; native lens schema owns RTX projection."""
+    raw=np.asarray(matrix)
+    if raw.shape!=(3,3)or raw.dtype.kind not in 'fiu'or not np.isfinite(raw).all():raise ValueError('Finite numeric 3x3 Camera K required')
+    k=raw.astype(float)
+    if k[0,0]<=0 or k[1,1]<=0:raise ValueError('Positive Camera focal lengths required')
+    if k[0,1]!=0 or k[1,0]!=0 or not np.array_equal(k[2],[0.,0.,1.]):raise ValueError('NOT_SUPPORTED: zero-skew homogeneous pinhole K required')
+    if len(resolution)!=2 or any(type(n)is not int or n<=0 for n in resolution):raise ValueError('Positive integer Camera resolution required')
+    if type(focal_length)not in(int,float)or not math.isfinite(focal_length)or focal_length<=0:raise ValueError('Positive finite USD focal length required')
+    width,height=resolution
+    # Same USD convention as Builder's exporter/IsaacRenderer. Physical camera
+    # attributes alone do not preserve these intrinsics in the installed Lab.
+    properties={'focal_length':focal_length,'horizontal_aperture':focal_length*width/k[0,0],
+        'vertical_aperture':focal_length*height/k[1,1],
+        'horizontal_aperture_offset':(width/2-k[0,2])*focal_length/k[0,0],
+        'vertical_aperture_offset':(k[1,2]-height/2)*focal_length/k[1,1]}
+    with np.errstate(over='ignore',under='ignore'):
+        native_k=k.astype(np.float32);native_properties=np.asarray(list(properties.values()),dtype=np.float32)
+    if not np.isfinite(native_k).all()or native_k[0,0]<=0 or native_k[1,1]<=0 or not np.isfinite(native_properties).all()or np.any(native_properties[:3]<=0):
+        raise ValueError('Camera parameters outside finite positive USD float32 range')
+    return properties
+
+
+def _set_native_pinhole(sensor,matrix,resolution,properties):
+    """Same schema/attributes as Isaac Sim5.1 Camera.set_opencv_pinhole_properties.
+
+    Use the existing Lab sensor, not another SDK Camera/render product. Author
+    only its runtime session layer, never a referenced Scene or calibration.
+    """
+    from pxr import Gf,Usd,Tf
+    prim=sensor.GetPrim();stage=prim.GetStage()
+    try:can_apply=prim.CanApplyAPI(_PINHOLE_SCHEMA)
+    except Tf.ErrorException as error:raise NotImplementedError('NOT_SUPPORTED: native OpenCV pinhole schema unavailable')from error
+    if not can_apply:raise NotImplementedError('NOT_SUPPORTED: native OpenCV pinhole schema unavailable')
+    with Usd.EditContext(stage,stage.GetSessionLayer()):
+        if not prim.ApplyAPI(_PINHOLE_SCHEMA):raise NotImplementedError('NOT_SUPPORTED: cannot apply native OpenCV pinhole schema')
+        attributes={'omni:lensdistortion:model':'opencvPinhole',
+            _PINHOLE_PREFIX+'imageSize':Gf.Vec2i(*resolution)}
+        attributes.update({_PINHOLE_PREFIX+name:float(value)for name,value in
+            [('fx',matrix[0,0]),('fy',matrix[1,1]),('cx',matrix[0,2]),('cy',matrix[1,2])]})
+        attributes.update({_PINHOLE_PREFIX+name:0. for name in _PINHOLE_COEFFICIENTS})
+        # Physical USD attributes remain consistent for downstream inspection;
+        # RTX projection is driven by the lens schema, not aperture offsets.
+        for name,value in properties.items():
+            first,*rest=name.split('_')
+            attributes[first+''.join(word.capitalize()for word in rest)]=float(value)
+        for name,value in attributes.items():
+            attr=prim.GetAttribute(name)
+            if not attr or not attr.Set(value):raise NotImplementedError('NOT_SUPPORTED: cannot set Camera attribute '+name)
+
+
+def _native_pinhole_matrix(sensor,resolution):
+    prim=sensor.GetPrim()
+    if not prim.HasAPI(_PINHOLE_SCHEMA)or prim.GetAttribute('omni:lensdistortion:model').Get()!='opencvPinhole':
+        raise NotImplementedError('NOT_SUPPORTED: calibrated native OpenCV pinhole schema required')
+    if tuple(prim.GetAttribute(_PINHOLE_PREFIX+'imageSize').Get())!=tuple(resolution):raise ValueError('Camera lens calibration resolution changed')
+    if any(prim.GetAttribute(_PINHOLE_PREFIX+name).Get()!=0. for name in _PINHOLE_COEFFICIENTS):raise ValueError('Undistorted pinhole Camera required')
+    fx,fy,cx,cy=[prim.GetAttribute(_PINHOLE_PREFIX+name).Get()for name in ('fx','fy','cx','cy')]
+    k=np.array([[fx,0.,cx],[0.,fy,cy],[0.,0.,1.]])
+    if not np.isfinite(k).all()or fx<=0 or fy<=0:raise ValueError('Invalid native Camera intrinsic values')
+    return k
+
+
 def execution_inputs(package, settings):
     """Bind explicit engine settings to this immutable package.
 
@@ -144,6 +212,7 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     settings is explicit bound engine input, not a PreparedRun/Recipe runner.
     """
     inputs=execution_inputs(package,settings)
+    camera_properties={name:_pinhole_properties(camera['K'],camera['resolution'])for name,camera in inputs['profile']['cameras'].items()}
     if type(num_envs) is not int or num_envs<1:raise ValueError('Positive num_envs required')
     if device not in ('cpu','cuda:0'):raise ValueError('Explicit supported device required')
     from scipy.spatial.transform import Rotation
@@ -162,7 +231,37 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     def pose(matrix):
         matrix=np.asarray(matrix);quat=Rotation.from_matrix(matrix[:3,:3]).as_quat()
         return tuple(matrix[:3,3]),tuple(quat[[3,0,1,2]])
+    # InteractiveScene expands ENV_REGEX_NS in copied CameraCfg prim paths.
+    # The unique terminal Camera name survives that expansion.
+    camera_intrinsics={'Camera_'+name:np.array(row['K'],dtype=float,copy=True)for name,row in inputs['profile']['cameras'].items()}
     class RuntimeCamera(Camera):
+        def _initialize_impl(self):
+            self._workbench_intrinsics_initialized=False
+            super()._initialize_impl()
+        def set_intrinsic_matrices(self,matrices,focal_length=None,env_ids=None):
+            import torch
+            raw=matrices.detach().cpu().numpy()if isinstance(matrices,torch.Tensor)else np.asarray(matrices)
+            ids=list(range(len(self._sensor_prims)))if env_ids is None else np.asarray(
+                env_ids.detach().cpu().numpy()if isinstance(env_ids,torch.Tensor)else env_ids)
+            ids=np.asarray(ids)
+            if ids.ndim!=1 or ids.dtype.kind not in 'iu'or len(set(ids.tolist()))!=len(ids)or np.any(ids<0)or np.any(ids>=len(self._sensor_prims)):
+                raise ValueError('Distinct valid Camera env_ids required')
+            if raw.shape!=(len(ids),3,3):raise ValueError('One 3x3 intrinsic matrix per Camera env_id required')
+            resolution=(self.cfg.width,self.cfg.height)
+            focal=self.cfg.spawn.focal_length if focal_length is None else focal_length
+            # Validate the entire batch before writing any Camera prim/buffer.
+            properties=[_pinhole_properties(k,resolution,focal)for k in raw]
+            for index,k,params in zip(ids,raw,properties):_set_native_pinhole(self._sensor_prims[index],k,resolution,params)
+            self._workbench_intrinsics_initialized=True
+            self._update_intrinsic_matrices(ids)
+        def _update_intrinsic_matrices(self,env_ids):
+            if not getattr(self,'_workbench_intrinsics_initialized',False):
+                k=camera_intrinsics[self.cfg.prim_path.rsplit('/',1)[-1]]
+                self.set_intrinsic_matrices(np.broadcast_to(k,(len(self._sensor_prims),3,3)))
+                return
+            for index in env_ids:
+                k=_native_pinhole_matrix(self._sensor_prims[index],(self.cfg.width,self.cfg.height))
+                self._data.intrinsic_matrices[index]=self._data.intrinsic_matrices.new_tensor(k)
         def _update_poses(self,env_ids):
             if '/Robot/'not in self.cfg.prim_path:return super()._update_poses(env_ids)
             import torch
@@ -209,10 +308,10 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     scene.ee_frame=FrameTransformerCfg(prim_path='{ENV_REGEX_NS}/Robot/base',debug_vis=False,target_frames=[FrameTransformerCfg.FrameCfg(prim_path='{ENV_REGEX_NS}/Robot/tool0',name='tool0')])
     scene.dome_light=AssetBaseCfg(prim_path='/World/Light',spawn=sim.DomeLightCfg(intensity=1000.,color=(.75,.75,.75)))
     for view,camera in inputs['profile']['cameras'].items():
-        width,height=camera['resolution'];raw=np.asarray(camera['K']);f=(raw[0,0]+raw[1,1])/2;pos,quat=pose(camera['T_parent_camera'])
+        width,height=camera['resolution'];pos,quat=pose(camera['T_parent_camera'])
         path='Robot/'+camera['parent']+'/'if camera['parent']!='world'else''
         setattr(scene,'camera_'+view,CameraCfg(class_type=RuntimeCamera,prim_path='{ENV_REGEX_NS}/'+path+'Camera_'+view,width=width,height=height,data_types=['rgb'],update_period=0.,update_latest_camera_pose=True,
-            spawn=sim.PinholeCameraCfg(focal_length=24.,horizontal_aperture=24*width/f,vertical_aperture=24*height/f,clipping_range=(.001,100.),f_stop=0.),offset=CameraCfg.OffsetCfg(pos=pos,rot=quat,convention='ros')))
+            spawn=sim.PinholeCameraCfg(**camera_properties[view],clipping_range=(.001,100.),f_stop=0.),offset=CameraCfg.OffsetCfg(pos=pos,rot=quat,convention='ros')))
     for name,link in ([('grasp_fixed_contact','gripper'),('grasp_moving_contact','jaw')]if inputs['active_object_ids']else[]):
         setattr(scene,name,ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/'+link,update_period=0.,filter_prim_paths_expr=['{ENV_REGEX_NS}/'+n for n in inputs['active_object_ids']]))
     @configclass

@@ -13,17 +13,20 @@ def discover_datasets(workspace):
     linked external directories. External/custom locations can still be opened.
     """
     rows=[]
+    from .lerobot import _publication_pending
     for category,directory in (('source','source'),('annotation','annotation'),('datagen','datagen'),('lerobot','dataset')):
         base=Path(workspace).resolve()/directory
         if not base.is_dir():continue
         for current,children,_ in os.walk(base,followlinks=False):
             root=Path(current);info=root/'meta/info.json';record=root/'run.json'
+            if root.name.endswith('.staging'):children[:]=[];continue
             if not info.is_file()and not record.is_file():
                 children[:]=sorted(name for name in children if not name.startswith('.')and name not in('segments','data','videos','meta','preview','media')and not(root/name).is_symlink())
                 continue
             children[:]=[]
             row=dict(path=str(root),name=root.name,category=category,episodes=0,frames=0,readable=False,error='',modified_ns=(info if info.is_file()else record).stat().st_mtime_ns)
             try:
+                if info.is_file()and _publication_pending(root):continue
                 catalog=load_catalog(root);stage=catalog.execution.get('stage')
                 row.update(kind=catalog.kind,category='lerobot'if catalog.kind=='lerobot'else stage or category,
                            episodes=len(catalog.episodes),frames=sum((e.num_frames if e.stop is None else e.stop)-e.start for e in catalog.episodes),readable=True)

@@ -4,7 +4,7 @@ from pathlib import Path
 import time,yaml
 from PyQt6.QtGui import QImage,QPixmap
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit,QAbstractItemView
 from .jobs import BackendJob
 from .session_client import SessionClient
 from .snapshot_table import SnapshotTable
@@ -37,6 +37,8 @@ class RealSimPage(QWidget):
         box.addWidget(QLabel('이번 실행의 Paired Capture · Real Side / Sim Side / Real Wrist / Sim Wrist'))
         self.run_folder=QLabel();self.run_folder.setWordWrap(True);self.run_folder.hide();box.addWidget(self.run_folder)
         self.snapshot_table=SnapshotTable(paired=True,parent=self);self.snapshot_table.error.connect(self.show_error);box.addWidget(self.snapshot_table,1)
+        self.snapshot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.snapshot_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         refinement=QHBoxLayout();box.addLayout(refinement)
         self.refinement_memo=QPlainTextEdit();self.refinement_memo.setFixedHeight(64)
         self.memo_source=None
@@ -49,13 +51,22 @@ class RealSimPage(QWidget):
     def open_refinement(self):
         if self.active()or not self.project:return
         try:
+            from dataclasses import asdict
+            from scene_contract.package import load_scene
+            from real2sim_builder.automation import select_refit_pairs
             from real2sim_builder.evidence import save_reconstruction_memo
             from real2sim_builder.project import Project
-            save_reconstruction_memo(Project(self.project['project']),self.refinement_memo.toPlainText(),self.scene_combo.currentData()['scene'])
+            from real2sim_builder.ui_reconstruction import ReconstructionDialog
+            project=Project(self.project['project']);source=self.scene_combo.currentData()['scene']
+            # Current SnapshotStore row IDs are archive snapshot IDs, not
+            # dataset paths or observation-image IDs. Never substitute all rows.
+            capture_ids=[self.rows[i.row()]['id']for i in sorted(self.snapshot_table.selectionModel().selectedRows(),key=lambda i:i.row())]
+            selected=select_refit_pairs(project,capture_ids=capture_ids,source_identity=asdict(load_scene(source).identity))
+            if selected.get('code'):raise ValueError(selected['code']+': '+'; '.join(selected['needs']))
+            save_reconstruction_memo(project,self.refinement_memo.toPlainText(),source)
+            dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True,source_scene=source,capture_ids=capture_ids,engine=self.engine.currentData())
+            dialog.exec()
         except Exception as error:self.show_error(str(error));return
-        from real2sim_builder.ui_reconstruction import ReconstructionDialog
-        dialog=ReconstructionDialog(self.project['project'],self.job.python,self,refit=True,source_scene=self.scene_combo.currentData()['scene'],capture_ids=[r['id']for r in self.rows],engine=self.engine.currentData())
-        dialog.exec()
     @property
     def rows(self):return self.snapshot_table.rows
     def active(self):return self.client.active()

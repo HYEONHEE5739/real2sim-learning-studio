@@ -289,6 +289,9 @@ from real2sim_builder.observations import annotation_evidence
 
 def metrics(project,scene,rows):
     observations={i.get('id'):i for i in annotation_evidence(project,scene)['images'] if i.get('id')}
+    from ..observations import _record_holdout_usage
+    _record_holdout_usage(project,[observations[r['observation']]for r in rows
+        if r.get('visible',True)and r.get('weight',1)>0 and observations[r['observation']].get('eligible',False)],scene,'pose_metrics')
     grouped={};errors=[];behind=0
     for row in rows:
         if row.get('visible',True) is False or row.get('weight',1)<=0:continue
@@ -500,6 +503,8 @@ def assess_camera(project,scene,name,options):
     train=[r for r in rows if images[r['observation']]['split']=='train'];held=[r for r in rows if images[r['observation']]['split']=='validation']
     def missing(need,**extra):return scene,{**extra,'status':'NEEDS_MORE_DATA','target':'quality:'+name,'need':need}
     if len(train)<12 or len(held)<6:return missing('At least 12 train and 6 independent-session verification landmarks required')
+    if node['frame'].startswith('robot_link_') and not scene.get('robot_model',{}).get('mapping_verified'):
+        return missing('Wrist FK/joint mapping is manually estimated; camera physical calibration remains unverified')
     journal=project.root/'working/calibration_holdout_usage.jsonl'
     if journal.exists():
         import json
@@ -514,8 +519,6 @@ def assess_camera(project,scene,name,options):
         if r.get('object'):
             obj=next(o for o in scene['objects'] if o['id']==r['object'])
             if any(obj[k]['provenance'] not in ('measured','calibrated') for k in ('pose','dimensions')):return missing('Metric object anchors must be locked and measured')
-    if node['frame'].startswith('robot_link_') and not scene.get('robot_model',{}).get('mapping_verified'):
-        return missing('Wrist FK/joint mapping is manually estimated; camera physical calibration remains unverified')
     if node['K']['value'] is None or node['pose']['value'] is None:return missing('Initialize camera first')
     k=np.asarray(node['K']['value']);t=np.asarray(node['pose']['value'])
     x=np.r_[k[0,0],k[1,1],k[0,2],k[1,2],t[:3,3],Rotation.from_matrix(t[:3,:3]).as_rotvec()]

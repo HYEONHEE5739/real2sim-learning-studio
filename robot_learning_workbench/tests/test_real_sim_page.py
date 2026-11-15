@@ -26,16 +26,27 @@ import sys
 from PyQt6.QtWidgets import QApplication,QPushButton
 from robot_learning_workbench.ui.real_sim_page import RealSimPage
 from real2sim_builder.project import Project
+from real2sim_builder.files import write
 from real2sim_builder import evidence,ui_reconstruction
+from scene_contract import package
+from scene_contract.package import SceneIdentity
+from types import SimpleNamespace
 app=QApplication([]);root=Path(sys.argv[1]);project=Project.create(root/'scenes','memo')
+RealSimPage.refresh_scenes=lambda self,force=False:None
 page=RealSimPage('/no/worker',[],root);page.catalog_timer.stop();page.client.timer.stop()
 row={'project':str(project.root),'scene':str(project.root/'exports/source/scene.json'),'engines':['mujoco']}
 page.scene_combo.blockSignals(True);page.scene_combo.addItem('selected',row);page.scene_combo.blockSignals(False)
 page.project={'project':str(project.root),'name':'memo'}
+identity=SceneIdentity('source','rev','a'*64)
+package.load_scene=lambda path:SimpleNamespace(identity=identity)
+observations=project.evidence;observations['images']=[{'id':'pair_side','snapshot_id':'chosen','scene_state_id':'layout',
+ 'runtime_baseline':{'scene_identity':{'scene_id':'source','revision':'rev','manifest_sha256':'a'*64},'workspace_context':{'content_sha256':'a'*64}}}]
+write(project.root/'input/evidence.yaml',observations)
+page.snapshot_table.append({'id':'chosen','path':str(root/'capture')});page.snapshot_table.selectRow(0)
 seen=[]
 evidence.save_reconstruction_memo=lambda p,text,source:seen.append((p.root,text,source))
 class Dialog:
- def __init__(self,*args,**kwargs):assert kwargs['refit']is True
+ def __init__(self,*args,**kwargs):assert kwargs['refit']is True and kwargs['capture_ids']==['chosen']
  def exec(self):seen.append('opened existing refit dialog')
 ui_reconstruction.ReconstructionDialog=Dialog
 page.refinement_memo.setPlainText('The wrist gripper looks too small.')

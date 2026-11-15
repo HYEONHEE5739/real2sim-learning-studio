@@ -11,6 +11,22 @@ import shutil
 CAPTURE_SCHEMA = 'real2sim.capture/1'
 
 
+def _sensor_fields(manifest, camera):
+    """Carry the validated archive's observation identity, without inventing it."""
+    from .observations import camera_type
+    stream = {'camera': camera['id']}
+    if 'camera_type' in camera:
+        stream['camera_type'] = camera['camera_type']
+    # Old capture writers had fixed side/wrist stream IDs. Arbitrary IDs need
+    # an explicit role; an image filename or a mount guess is never evidence.
+    kind = camera_type(stream)
+    if kind not in ('side', 'wrist'):
+        raise ValueError('Capture sensor requires an explicit side/wrist camera_type')
+    return dict(camera_type=kind, robot_model_sha256=manifest['files'][manifest['robot']['path']],
+                mapping_sha256=manifest['joint_mapping'].get('sha256'),
+                joint_units=copy.deepcopy(manifest['joint_units']))
+
+
 def image_quality_reasons(sample,image):
     reasons=[]
     if image.get('stale'):reasons.append('stale_camera_sample')
@@ -25,6 +41,7 @@ def register_unbound(project, destination, manifest, samples):
     Registration is intentionally not robot import or calibration approval.
     """
     evidence=project.evidence;observed=[]
+    sensors={c['id']:_sensor_fields(manifest,c)for c in manifest['cameras']}
     for sample in samples:
         for image in sample['images']:
             relative=(destination/image['path']).relative_to(project.root).as_posix()
@@ -32,11 +49,11 @@ def register_unbound(project, destination, manifest, samples):
             row=dict(role='capture',id=manifest['session_id']+'_'+sample['id']+'_'+image['camera'],path=relative,camera=image['camera'],
                      split=sample.get('split',manifest['split']),group_id=sample.get('group_id',manifest['group_id']),session_id=manifest['session_id'],
                      sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
-                     scene_state_id=manifest.get('scene_state_id'),snapshot_id=sample['id'],joint_units=manifest['joint_units'],
-                     robot_model_sha256=sha(destination/manifest['robot']['path']),mapping_sha256=manifest['joint_mapping'].get('sha256'),
+                     scene_state_id=manifest.get('scene_state_id'),snapshot_id=sample['id'],
                      joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
                      exclusion_reasons=['unbound_capture_calibration',*quality],capture_quality_reasons=quality,quality_override=manifest.get('quality_override'),
                      capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
+            row.update(sensors[image['camera']])
             if image.get('runtime_baseline'):
                 row['runtime_baseline']=copy.deepcopy(image['runtime_baseline'])
                 for key in ('path','pair_path'):row['runtime_baseline'][key]=(destination/image['runtime_baseline'][key]).relative_to(project.root).as_posix()
@@ -93,9 +110,15 @@ def mapping_contract(manifest):
     if not profile.get('joints'):
         raise ValueError('Precision profile requires joint evidence')
     for name, entry in profile.get('joints', {}).items():
-        if name not in manifest['joint_names'] or entry.get('status') not in ('REVIEWED_MANUAL', 'VALIDATED_MANUAL'):
+        # This is the portable observation contract used by both Capture and
+        # Snapshot readers, including current PrecisionSession calculations.
+        # All three states remain manual, never independent physical approval.
+        if name not in manifest['joint_names'] or entry.get('status') not in ('CALIBRATED_MANUAL', 'REVIEWED_MANUAL', 'VALIDATED_MANUAL'):
             raise ValueError('Unsupported precision joint review state')
-        if not np.isfinite(entry.get('rad_per_count', np.nan)) or entry['rad_per_count'] == 0:
+        if entry.get('physical_verified', False) is not False:
+            raise ValueError('Manual precision joint is not externally physically verified')
+        coefficient = entry.get('rad_per_count')
+        if type(coefficient) not in (int, float) or not np.isfinite(coefficient) or coefficient == 0:
             raise ValueError('Invalid precision mapping coefficient')
     if manifest['robot'].get('mapping_verified') and (not mapping.get('physical_verified', False)):
         raise ValueError('Manual precision mapping cannot be relabelled physically verified')
@@ -183,6 +206,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     m, samples, events = loaded or load_session(root)
     if not samples:
         raise ValueError('Capture has no measured samples')
+    sensors={c['id']:_sensor_fields(m,c)for c in m['cameras']}
     known_groups = {i.get('group_id'): i['split'] for i in project.evidence['images'] if i.get('group_id')}
     if m['group_id'] in known_groups and known_groups[m['group_id']] != m['split']:
         raise ValueError('Train/holdout group leakage')
@@ -232,6 +256,8 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     sessions = project.evidence.get('capture_sessions', [])
     if sessions:
         original = read(local_path(project.root, sessions[0]['path']))
+        if {c['id']:_sensor_fields(original,c)['camera_type']for c in original['cameras']} != {n:s['camera_type']for n,s in sensors.items()}:
+            raise ValueError('Recorded sensor Camera role changed between sessions')
         if original['cameras'] != m['cameras']:
             keys = ('id', 'parent', 'resolution', 'K', 'distortion')
             same_sensor = sorted([{k: c[k] for k in keys} for c in original['cameras']], key=lambda c: c['id']) == sorted([{k: c[k] for k in keys} for c in m['cameras']], key=lambda c: c['id'])
@@ -284,6 +310,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
                 q = None
             relative = (destination / image['path']).relative_to(project.root).as_posix()
             observation = {'role':'capture','id': m.get('source_dataset_id', m['session_id']) + '_' + sample['id'] + '_' + image['camera'], 'path': relative, 'camera': image['camera'], 'split': sample.get('split', m['split']), 'snapshot_id': sample['id'] if m['purpose'] == 'snapshot' else None, 'scene_state_id': m.get('scene_state_id'), 'resolution': image['resolution'], 'sha256': sha(project.root / relative), 'timestamp_ns': t, 'group_id': sample.get('group_id', m['group_id']), 'session_id': m['session_id'], 'q_measured': q, 'joint_names': m['joint_names'], 'eligible': not reasons or bool(m.get('quality_override')), 'exclusion_reasons': [] if m.get('quality_override') else reasons, 'capture_quality_reasons': reasons, 'quality_override': m.get('quality_override'), 'capture_manifest': (destination / 'capture_manifest.yaml').relative_to(project.root).as_posix()}
+            observation.update(sensors[image['camera']])
             if image.get('runtime_baseline'):
                 observation['runtime_baseline'] = copy.deepcopy(image['runtime_baseline'])
                 observation['runtime_baseline']['path'] = (destination / image['runtime_baseline']['path']).relative_to(project.root).as_posix()

@@ -59,6 +59,7 @@ class ReconstructionDialog(QDialog):
             path=Path(source_scene).resolve()
             if not path.is_relative_to(self.project.root):raise ValueError('Refit source belongs to another Project')
             self.source_identity=asdict(load_scene(path).identity)
+        selection=self._refit_selection()if refit else None
         if Path(codex_cli.environment()['CODEX_HOME']).is_relative_to(self.project.root):raise ValueError('Codex 인증 폴더는 Project 밖에 있어야 합니다.')
         self.process=QProcess(self);self.auth_process=QProcess(self)
         self.query=None;self.account=None;self.pending_start=False;self.pending_close=False
@@ -71,9 +72,7 @@ class ReconstructionDialog(QDialog):
             root=self.project.root/'scratch/agent'/name
             info=read(root/'candidate.json')if(root/'candidate.json').is_file()else{}
             scene=read(root/'candidate_scene.yaml')if(root/'candidate_scene.yaml').is_file()else{}
-            states=[i.get('scene_state_id')for i in self.project.evidence['images']if i.get('runtime_baseline')and i.get('scene_state_id')]
-            layout=states[-1]if states else None
-            if not info.get('source_revision')or scene.get('reconstruction_state',{}).get('id')!=layout or(self.source_identity and info['source_revision']['identity']!=self.source_identity):name=numbered_path(self.project.root/'scratch/agent','refit').name
+            if info.get('status')!='OPEN'or not info.get('source_revision')or scene.get('reconstruction_state',{}).get('id')!=selection['scene_state_id']or info['source_revision']['identity']!=selection['source_identity']:name=numbered_path(self.project.root/'scratch/agent','refit').name
         from .scene import identifier
         identifier(name);self.candidate=QLabel(name)
         self.setWindowTitle('Auto Reconstruction');self.resize(800,830)
@@ -143,6 +142,12 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
         self.usage_timer=QTimer(self);self.usage_timer.setInterval(60000);self.usage_timer.timeout.connect(self.refresh_account);self.usage_timer.start()
         self.clear_account();self.update_progress();QTimer.singleShot(0,self.refresh_account)
 
+    def _refit_selection(self):
+        from .automation import select_refit_pairs
+        selected=select_refit_pairs(self.project,capture_ids=self.capture_ids,source_identity=self.source_identity)
+        if selected.get('code'):raise ValueError(selected['code']+': '+'; '.join(selected['needs']))
+        return selected
+
     def configuration(self):
         result=saved_configuration(self.project,self.candidate.text())
         if self.refit:
@@ -150,11 +155,10 @@ QProgressBar::chunk { background:#16a085; border-radius:4px; }
                 result.setdefault('numeric_refinement',{})['enabled']=self.numeric.isChecked()
                 result['numeric_refinement']['max_iterations']=self.rounds.value()
             if self.refit_engine:result.setdefault('fitting',{})['engine']='isaac'if self.refit_engine=='isaaclab'else self.refit_engine
-            if self.source_identity:result['refit_source_identity']=self.source_identity
-            if self.capture_ids:result['refit_capture_ids']=self.capture_ids
-            # Select the saved Pair layout, not the earlier Scene Prepare layout.
-            states=[i.get('scene_state_id')for i in self.project.evidence['images']if i.get('runtime_baseline')and i.get('scene_state_id')]
-            if states:result['scene_state_id']=states[-1]
+            selected=self._refit_selection()
+            result['refit_source_identity']=selected['source_identity']
+            result['refit_capture_ids']=selected['capture_ids']
+            result['scene_state_id']=selected['scene_state_id']
         return result
 
     def busy(self):return self.process.state()!=QProcess.ProcessState.NotRunning

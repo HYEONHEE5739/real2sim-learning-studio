@@ -84,12 +84,23 @@ def test_final_log_preserves_closed_checkpoint_and_frozen_config(tmp_path,monkey
     class ExitedChild:
         pid=123
         def __init__(self,*args,stdout,**kwargs):
+            import sys
+            from lerobot.configs.policies import PreTrainedConfig
+            argv=args[0];snapshot=Path(next(a.split('=',1)[1]for a in argv if a.startswith('--config_path=')))
+            parsed=TrainPipelineConfig.from_pretrained(snapshot,local_files_only=True)
+            with monkeypatch.context()as context:
+                context.setattr(sys,'argv',['lerobot_train',*argv])
+                parsed.validate()  # Official Trainer validates before mkdir.
             target=plan.output_path/'checkpoints/000001'
             for p in source.rglob('*'):
                 if not p.is_file() or p.name=='workbench-checkpoint.json':continue
                 dest=target/p.relative_to(source);dest.parent.mkdir(parents=True,exist_ok=True)
                 if p.name=='train_config.json':
-                    doc=json.loads(p.read_text());doc.update(output_dir=cfg['output_dir'],steps=cfg['steps']);dest.write_text(json.dumps(doc))
+                    # Match official validate/save semantics, including filled
+                    # defaults/features; this fake child does no optimization.
+                    saved_policy=PreTrainedConfig.from_pretrained(source/'pretrained_model',local_files_only=True)
+                    parsed.policy.input_features=saved_policy.input_features;parsed.policy.output_features=saved_policy.output_features
+                    parsed.save_pretrained(dest.parent)
                 else:os.link(p,dest)
             (target.parent/'last').symlink_to('000001')
             stdout.write(b'step:1 loss:1.0\n'+(b'step:2 loss:nan\n' if nonfinite else b''))

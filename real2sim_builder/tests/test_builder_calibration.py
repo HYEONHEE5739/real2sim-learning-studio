@@ -30,6 +30,7 @@ def test_metric_camera_fit_preserves_geometry_and_heldout(scene):
     for i,point in enumerate([[-.1,-.1,0],[.1,-.1,0],[-.1,.1,0],[.1,.1,0],[0,0,.1],[.04,-.05,.12],[.02,.02,.05]]):
         row={'camera':'side','point_m':point,'split':'train' if i<6 else 'validation'};row['uv']=project_point(truth,truth['cameras'][0],row)[0].tolist();rows.append(row)
     scene['cameras'][0]['pose']['value'][0][3]+=.035
+    scene['cameras'][0]['pose']['provenance']='estimated'
     before=copy.deepcopy(scene);fitted,report=fit_cameras(scene,rows)
     assert landmark_metrics(fitted,[rows[-1]])['rmse_px']<.01
     assert fitted['objects']==before['objects'] and scene==before
@@ -47,6 +48,7 @@ def test_calibrated_corners_recover_object_pose(scene):
 
 
 def test_collinear_metric_landmarks_rejected(scene):
+    scene['cameras'][0]['pose']['provenance']='estimated'
     rows=[{'camera':'side','point_m':[i*.01,0,0],'uv':[1,1]} for i in range(5)]
     with pytest.raises(ValueError,match='collinear'):fit_cameras(scene,rows)
 
@@ -55,7 +57,13 @@ def test_unchanged_camera_solvers_match_existing_source():
     import real2sim_builder.calibration.camera as new
     old=ast.parse((B/'calibration/camera.py').read_text());actual=ast.parse(Path(new.__file__).read_text())
     # Projection now shares the EXIF-aware lens model with RGB/depth rendering.
-    # Keep the historical solver comparison; test changed projection numerically.
+    # The required protection gate is the only intentional solver difference.
+    # Assert that exact gate, then retain the original algorithm AST comparison.
+    fitted=next(n for n in actual.body if isinstance(n,ast.FunctionDef)and n.name=='fit_cameras')
+    loop=next(n for n in fitted.body if isinstance(n,ast.For))
+    guard=ast.parse("if camera['pose']['provenance'] in PROTECTED: continue").body[0]
+    assert ast.dump(loop.body[0],include_attributes=False)==ast.dump(guard,include_attributes=False)
+    loop.body.pop(0)
     funcs=lambda tree:{n.name:ast.dump(n,include_attributes=False) for n in tree.body if isinstance(n,ast.FunctionDef) and n.name!='project_point'}
     assert funcs(actual)==funcs(old)
 

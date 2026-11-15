@@ -724,6 +724,62 @@ def refine_numeric_pairs(candidate, config):
     return report
 
 
+def select_refit_pairs(project, *, capture_ids=None, scene_state=None, source_identity=None):
+    """Resolve the complete requested Snapshot set before layout/source filtering.
+
+    Metadata-only for the UI; refit_pairs still verifies RGB, Pair and native
+    package/model/mapping closure before creating or changing a Candidate.
+    """
+    def unavailable(code,reason):return {'status':'NEEDS_MORE_DATA','code':code,'needs':[reason]}
+    explicit=capture_ids is not None
+    if explicit:
+        if not isinstance(capture_ids,(list,tuple))or not capture_ids or any(not isinstance(n,str)or not n for n in capture_ids):
+            return unavailable('PAIR_SOURCE_UNRESOLVED','Select a nonempty set of recorded Capture IDs')
+        requested=set(capture_ids)
+        images=[i for i in project.evidence['images']if i.get('snapshot_id')in requested]
+        if requested!={i.get('snapshot_id')for i in images}:
+            return unavailable('PAIR_SOURCE_UNRESOLVED','Selected Capture IDs are missing from registered observations')
+        if any(not i.get('id')or not i.get('scene_state_id')or not i.get('runtime_baseline')for i in images):
+            return unavailable('PAIR_SOURCE_UNRESOLVED','Selected Capture lacks image, Layout or Pair metadata')
+        for name in requested:
+            archives={(i.get('session_id'),i.get('capture_manifest'))for i in images if i['snapshot_id']==name}
+            if len(archives)!=1:return unavailable('PAIR_SOURCE_MISMATCH','Capture ID is ambiguous across recorded archives')
+    else:
+        # The existing CLI can select a complete group by an explicit layout.
+        # The UI always supplies IDs and cannot fall back to the latest layout.
+        if not scene_state:return unavailable('PAIR_LAYOUT_MISMATCH','Select Capture IDs or an explicit Scene Layout')
+        from .observations import input_images
+        rows,_,needs=input_images(project,scene_state)
+        images=[i for i in rows if i.get('runtime_baseline')]
+    if not images:return unavailable('PAIR_SOURCE_UNRESOLVED','Select a completed registered Real/Sim Pair session in this layout')
+    from .scene import local_path
+    selected=[];identities=[]
+    for image in images:
+        baseline=image['runtime_baseline'];identity=baseline.get('scene_identity')
+        if baseline.get('pair_path'):
+            path=local_path(project.root,baseline['pair_path'])
+            if not path.is_file()or sha(path)!=baseline.get('pair_sha256'):
+                return unavailable('PAIR_SOURCE_MISMATCH','Recorded Pair SHA mismatch')
+            archived=read(path).get('scene_identity')
+            if identity and identity!=archived:return unavailable('PAIR_SOURCE_MISMATCH','Registered and archived Pair source identities disagree')
+            identity=archived
+        if not isinstance(identity,dict)or set(identity)!={'scene_id','revision','manifest_sha256'}or any(not isinstance(v,str)or not v for v in identity.values()):
+            return unavailable('PAIR_SOURCE_UNRESOLVED','Pair lacks a complete source Scene identity')
+        if source_identity and identity!=source_identity:
+            if explicit:return unavailable('PAIR_SOURCE_MISMATCH','Selected Capture belongs to a different source Revision')
+            continue
+        if baseline.get('workspace_context',{}).get('content_sha256')!=identity['manifest_sha256']:
+            return unavailable('PAIR_SOURCE_MISMATCH','Pair source identity disagrees with its recorded manifest')
+        selected.append(image);identities.append(identity)
+    if not selected:return unavailable('PAIR_SOURCE_UNRESOLVED','No recorded Pair belongs to the selected source Revision')
+    states={i.get('scene_state_id')for i in selected}
+    if len(states)!=1 or not next(iter(states))or(scene_state and states!={scene_state}):
+        return unavailable('PAIR_LAYOUT_MISMATCH','Select Captures from one matching physical Layout')
+    if any(i!=identities[0]for i in identities):return unavailable('PAIR_SOURCE_MISMATCH','Select one source Revision per refit group')
+    return {'status':'SELECTED','images':selected,'scene_state_id':next(iter(states)),
+        'source_identity':identities[0],'capture_ids':list(dict.fromkeys(capture_ids))if explicit else sorted({i['snapshot_id']for i in selected if i.get('snapshot_id')})}
+
+
 def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include_flagged_reason=None,run_modeling=False,max_modeling_calls=6,max_review_calls=3):
     """Existing Pair reader/import -> layout-specific Candidate -> cached fitting.
 
@@ -737,8 +793,6 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
     identifier(candidate)
     def unavailable(code,needs):
         result={'candidate':candidate,'status':'NEEDS_MORE_DATA','code':code,'needs':needs,'physical_verified':False}
-        target=project.root/'scratch/agent'/candidate
-        if(target/'candidate.json').exists():write(target/'reconstruction.json',result)
         project.update(status=result['status'],needs=needs,task='Pair source/layout requires review')
         return result
     with exclusive(project):
@@ -747,25 +801,12 @@ def refit_pairs(project,*,candidate,scene_state,dataset=None,config=None,include
             session=manifest['session_id']
             if not any(r['id']==session for r in project.evidence.get('capture_sessions',[])):
                 import_paired(project,dataset,scene_state=scene_state,include_flagged_reason=include_flagged_reason)
+        selection=select_refit_pairs(project,capture_ids=(config or{}).get('refit_capture_ids'),
+            scene_state=scene_state,source_identity=(config or{}).get('refit_source_identity'))
+        if selection.get('code'):return unavailable(selection['code'],selection['needs'])
         images,_,needs=input_images(project,scene_state)
-        paired=[i for i in images if i.get('runtime_baseline')]
-        capture_ids=(config or{}).get('refit_capture_ids')
-        if capture_ids:paired=[i for i in paired if i.get('snapshot_id')in capture_ids]
-        expected=(config or{}).get('refit_source_identity')
-        if expected:
-            matched=[]
-            for image in paired:
-                baseline=image['runtime_baseline'];identity=baseline.get('scene_identity')
-                if identity is None and baseline.get('pair_path'):
-                    from .scene import local_path
-                    path=local_path(project.root,baseline['pair_path'])
-                    if sha(path)!=baseline.get('pair_sha256'):return unavailable('PAIR_SOURCE_MISMATCH',['Recorded Pair SHA mismatch'])
-                    identity=read(path).get('scene_identity')
-                if identity==expected:matched.append(image)
-            paired=matched
-        if not paired:return unavailable('PAIR_SOURCE_UNRESOLVED',needs+['Select a completed registered Real/Sim Pair session in this layout'])
-        if any(i.get('scene_state_id')!=scene_state for i in paired):
-            return unavailable('PAIR_LAYOUT_MISMATCH',['Select one physical layout per refit'])
+        ids={i['id']for i in selection['images']};paired=[i for i in images if i['id']in ids]
+        if {i['id']for i in paired}!=ids:return unavailable('PAIR_SOURCE_UNRESOLVED',needs+['Selected Capture observations are unavailable'])
         source,revision,code,reason=pair_source(project,paired)
         if code:return unavailable(code,[reason])
         exists=(project.root/'scratch/agent'/candidate/'candidate.json').exists()

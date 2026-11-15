@@ -75,16 +75,23 @@ installation or automatic Isaac/CUDA provisioning is claimed.
 
 ## Usage
 
-On the original configured workstation:
+After provisioning the existing Qt and backend environments:
 
 ```bash
 ./run_workbench_ui.sh
 ```
 
-That script currently contains workstation-specific interpreter/Isaac Lab paths.
-For a separately provisioned workstation, the existing UI entry point accepts explicit
-interpreters and paths. From the repository root, with `QT_PYTHON`, `BACKEND_PYTHON`,
-`ISAACLAB_ROOT` and `WORKBENCH_WORKSPACE` set to your own existing installations:
+The launcher resolves its repository from its own location. `QT_PYTHON`,
+`BACKEND_PYTHON`, `ISAACLAB_ROOT` and `WORKBENCH_WORKSPACE` select your existing
+installations and output root. Defaults are the repository's
+`workbench_runs/runtime/qt/bin/python3.11`, the current account's
+`~/miniconda3/envs/lerobot-arena/bin/python`, and `workbench_runs`. If
+`ISAACLAB_ROOT` is unset, `~/IsaacLab/source/isaaclab` is added only when it exists;
+MuJoCo-only UI use does not require that source path. Explicit missing runtime
+paths fail with their setting name. Existing `--backend-python` and `--workspace`
+CLI overrides keep precedence. No interpreter or model is installed automatically.
+
+For example, the same existing UI entry point accepts explicit paths:
 
 ```bash
 PYTHONPATH="$PWD/scene_contract/src:$PWD/real2sim_builder/src:$PWD/robot_learning_workbench/src:$ISAACLAB_ROOT/source/isaaclab" \

@@ -123,7 +123,7 @@ def execution_contract(plan,settings):
     from ...recipe import _plain
     from .env_cfg import execution_inputs
     from ...data.native import file_sha256
-    return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
+    return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),**({'source_functions':{k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}}if any(b.kind!='placement'for b in plan.function_bindings.values())else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
         model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),partition='unpartitioned',
         task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={k:v for k,v in plan.effective_settings['code_files'].items()},
         rng_policy='entropy_placement_per_call_v1',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
@@ -210,9 +210,6 @@ def run(plan,*,events,commands,leader=None):
         try:
             env=ManagerBasedEnv(cfg=build_env_cfg(plan.scene,settings,runtime_directory=Path(temporary)/'runtime'));env.reset()
             execution=execution_contract(plan,settings)
-            if any(b.kind!='placement'for b in plan.function_bindings.values()):
-                from ...recipe import _plain
-                execution['source_functions']={k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}
             execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
             previous=plan.resolved_inputs.get('resume_dataset');owner=resume_to(previous['path'],plan.output_path,execution) if previous else NativeRun(plan.output_path,execution,append=opts.get('resume',False))
             count=len(load_catalog(owner.root).episodes)
@@ -361,7 +358,7 @@ def collect_vector(plan,owner,env,kin,catalog,opts,*,events,commands):
                 if plan.object_order:restore_episode(env,[i],baseline[i]);reset_placements(plan, env, env_index=i)
                 else:restore_episode(env,[i],recorded_initial(recorded),is_relative=True)
                 segment=owner.segment('source-'+str(attempt));claim=owner.claim_attempt(segment)
-                streams[i]=collection_steps(env, segment, kinematics[i], episode_id='source-' + str(attempt), frames=len(targets), read_target=lambda stream=iter(targets): next(stream), events=send, commands=polls[i], env_index=i)
+                streams[i]=collection_steps(env, segment, kinematics[i], plan=plan, episode_id='source-' + str(attempt), frames=len(targets), read_target=lambda stream=iter(targets): next(stream), events=send, commands=polls[i], env_index=i)
                 pending[i]=(segment,claim,source)
             if not streams:break
             send.refresh()

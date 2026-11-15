@@ -109,7 +109,7 @@ class NativeRenderer:
                 sensor=env.scene['camera_'+name];sensor.update(env.physics_dt,force_recompute=True)
                 images[name]=sensor.data.output['rgb'][0,:,:,:3].detach().cpu().numpy().copy()
                 quaternion=sensor.data.quat_w_ros[0].detach().cpu().numpy();transform=np.eye(4);transform[:3,:3]=Rotation.from_quat(quaternion[[1,2,3,0]]).as_matrix();transform[:3,3]=sensor.data.pos_w[0].detach().cpu().numpy()
-                cameras[name]={'resolution':[640,480],'K':sensor.data.intrinsic_matrices[0].detach().cpu().numpy().tolist(),'T_world_optical':transform.tolist()}
+                cameras[name]={'resolution':[images[name].shape[1],images[name].shape[0]],'K':sensor.data.intrinsic_matrices[0].detach().cpu().numpy().tolist(),'T_world_optical':transform.tolist()}
             applied=robot.data.joint_pos[0,ids].detach().cpu().numpy().copy()
             for name,asset in env.scene.rigid_objects.items():
                 matrix=np.eye(4);quaternion=asset.data.root_quat_w[0].detach().cpu().numpy()

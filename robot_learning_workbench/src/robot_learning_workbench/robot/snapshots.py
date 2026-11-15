@@ -35,7 +35,7 @@ class SnapshotStore:
         atomic_json(shot/'metadata.json',metadata);(shot/'COMPLETE').write_text('complete\n')
         manifest=dict(schema='real2sim.snapshot/1',dataset_id=identifier,session_id=identifier,clock={'domain':'host_monotonic_ns','hardware_synchronized':False,'timestamp_kind':'host_receipt_not_exposure'},
             joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',joint_mapping=self.mapping,
-            source_robot_sha256=file_sha256(self.model),robot={'path':model_relative,'mapping_verified':False},cameras=[{'id':n,'resolution':[640,480]}for n in('side','wrist')],
+            source_robot_sha256=file_sha256(self.model),robot={'path':model_relative,'mapping_verified':False},cameras=[{'id':n,'camera_type':n,'resolution':[640,480]}for n in('side','wrist')],
             files=files,snapshots=[{'id':identifier,'scene_state_id':layout_id,'path':str(shot.relative_to(staging)),'metadata_sha256':file_sha256(shot/'metadata.json')}],
             project_id=self.project_id,session_identity=self.session_id,command_source='measured_observation_no_training_action',device_source=state.get('device_source','unspecified'),
             static_layout_verified=False,physical_verified=False)

@@ -143,6 +143,8 @@ def validate_scene(project, scene, renderer, folder, thresholds):
     from .observations import annotation_evidence
     evidence = annotation_evidence(project, scene)
     images = evidence['images']
+    from .observations import _record_holdout_usage
+    _record_holdout_usage(project,images,scene,'scene_validation')
     masks = [m for m in evidence.get('masks', []) if m.get('mask_kind', 'silhouette') == 'silhouette']
     rows = []
     rendered = {}
@@ -230,6 +232,10 @@ def validate_scene(project, scene, renderer, folder, thresholds):
     if multipose['validation']['count']:
         geometric = geometric and multipose['validation']['rmse_px'] <= thresholds['reprojection_px'] and (multipose['validation']['behind_camera'] == 0)
     report = {'camera_calibration': camera_quality, 'excluded_observations': excluded, 'multipose': multipose, 'physics_status': 'PHYSICS_NOT_VALIDATED', 'validation_scope': 'MULTIPOSE_GEOMETRY_VALIDATED' if not needs and photometric and geometric and pose_rows else 'VISUAL_ONLY', 'passed': not needs and photometric and geometric, 'images': rows, 'landmarks': calibration, 'needs': needs, 'thresholds': thresholds, 'train_mae': float(np.mean([r['mae'] for r in rows if r['split'] == 'train'])) if any((r['split'] == 'train' for r in rows)) else None, 'holdout_used_for_fitting': False, 'input_signature': project.signature(scene)}
+    # These observations support repeated draft selection, not a fresh final test.
+    report.update(independent_verification=False,final_independent_test='NOT_RECORDED')
+    if report['validation_scope']=='MULTIPOSE_GEOMETRY_VALIDATED':
+        report['validation_scope']='MULTIPOSE_GEOMETRY_DIAGNOSTIC'
     report['diagnosis'] = diagnose(report)
     report['coverage'] = coverage(report)
     return (report, rendered)
@@ -263,6 +269,7 @@ def refine_visual(project, scene, rendered):
 
 def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, destination=None):
     project.require_writable()
+    from .editing import preserve
     from real2sim_builder.calibration.camera import fit_cameras, fit_geometry, landmark_metrics
     from real2sim_builder.rendering import Renderer
     thresholds = thresholds or {'mae': 0.12, 'reprojection_px': 5.0, 'silhouette_iou': 0.8}
@@ -278,17 +285,37 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
     import os
     handle.write(str(os.getpid()))
     handle.close()
+    current = project.root / 'working/current_scene.yaml'
+    baseline_bytes = baseline = None
+    backup = None
+    current_written = completed = False
+
+    def stage_scene(candidate):
+        # Match Candidate.save's validation/protection, without publishing trial
+        # estimates into Current while this legacy loop can still fail or stop.
+        validate(candidate, project.root)
+        if baseline is not None:
+            preserve(baseline, candidate)
+        write(project.root / 'scratch/candidate/scene.yaml', candidate)
+
     try:
+        baseline_bytes = current.read_bytes() if current.exists() else None
+        baseline = project.scene if baseline_bytes is not None else None
         project.update(status='RUNNING', needs=[], error=None)
         project.checkpoint()
         project.update(stage='ANALYZE', task='Extract video frames and inventory evidence')
         extract_videos(project)
-        from real2sim_builder.calibration.geometry import undistort_evidence
-        undistort_evidence(project)
+        # Renderer uses a transient pinhole camera and warps back through the
+        # authored lens. Do not rectify source evidence/calibration in place.
         if not project.evidence['images']:
             return project.update(status='NEEDS_MORE_DATA', decision='NEEDS_MORE_DATA', needs=[{'need': 'one real workspace image or video', 'reason': 'No visual evidence was imported'}])
         scene = analyze(project)
-        project.save_scene(scene)
+        stage_scene(scene)
+        if baseline is None:
+            # Preserve the public image-only CLI's first unresolved draft.
+            project.save_scene(scene)
+            baseline_bytes = current.read_bytes()
+            baseline = copy.deepcopy(scene)
         start = project.state.get('iteration', 0)
         for iteration in range(start, start + max_iterations):
             project.checkpoint()
@@ -299,7 +326,7 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
             from real2sim_builder.calibration.geometry import fit_depth_geometry
             candidate, depth_report = fit_depth_geometry(candidate, project.evidence, project.root)
             scene = candidate
-            project.save_scene(scene)
+            stage_scene(scene)
             project.update(metrics={'camera_fit': fit_report, 'geometry_fit': geometry_report, 'depth_bounds': depth_report})
             needs = missing_geometry(scene)
             if needs:
@@ -317,7 +344,7 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
                         scene, motion_report = fit(scene, project.root, project.root / 'scratch', project.evidence['motions'])
                     except ValueError as exc:
                         return project.update(status='NEEDS_MORE_DATA', decision='NEEDS_MORE_DATA', needs=[{'need': 'measured passive-motion evidence sufficient to separate mass, support contact and timing', 'reason': str(exc)}])
-                    project.save_scene(scene)
+                    stage_scene(scene)
                     if any((r['split'] == 'validation' and r['rmse_m'] > 0.005 for r in motion_report)):
                         return project.update(status='NEEDS_MORE_DATA', decision='NEEDS_MORE_DATA', needs=[{'need': 'independent contact geometry/timing measurements for the failed passive-motion case', 'reason': 'Held-out dynamics error exceeds 5 mm; physics parameters must not hide geometry/timing errors'}])
                 data = engine.mj.MjData(engine.model)
@@ -331,12 +358,31 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
             write(folder / 'report.json', report)
             project.update(metrics={'train_mae': report['train_mae'], 'holdout_landmarks': report['landmarks']['validation']}, task='Diagnose dominant mismatch')
             if report['passed']:
+                project.checkpoint()
+                stage_scene(scene)
+                if current.read_bytes() != baseline_bytes:
+                    raise ValueError('Current Scene changed during reconstruction; refusing publication')
+                # Export consumes Current. Retain exact prior bytes until both
+                # publication and its status update finish successfully.
+                import tempfile
+                with tempfile.NamedTemporaryFile(dir=current.parent, prefix='.reconstruction-', delete=False) as stream:
+                    backup = Path(stream.name)
+                    stream.write(baseline_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                current_written = True
+                project.save_scene(scene)
+                project.checkpoint()
                 project.update(stage='EXPORT', decision='CONTINUE', task='Write and load dual-engine package')
                 if destination is None:
-                    return project.update(status='DRAFT', stage='VALIDATION', decision='CONTINUE', task='Validation passed; select a new explicit export destination', needs=[])
+                    result = project.update(status='DRAFT', stage='VALIDATION', decision='CONTINUE', task='Validation passed; select a new explicit export destination', needs=[])
+                    completed = True
+                    return result
                 from real2sim_builder.export import export_revision
                 identity = export_revision(project, destination=Path(destination))
-                return project.update(status='ACCEPTED', decision='ACCEPTED', export=str(Path(destination).resolve()), export_identity={'scene_id':identity.scene_id,'revision':identity.revision,'manifest_sha256':identity.manifest_sha256}, needs=[])
+                result = project.update(status='ACCEPTED', decision='ACCEPTED', export=str(Path(destination).resolve()), export_identity={'scene_id':identity.scene_id,'revision':identity.revision,'manifest_sha256':identity.manifest_sha256}, needs=[])
+                completed = True
+                return result
             if report['needs']:
                 return project.update(status='NEEDS_MORE_DATA', decision='NEEDS_MORE_DATA', needs=report['needs'])
             candidate, changes = refine_visual(project, scene, rendered)
@@ -347,7 +393,7 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
             if report['train_mae'] is None or trial['train_mae'] is None or trial['train_mae'] >= report['train_mae'] - 1e-05:
                 return project.update(status='NEEDS_MORE_DATA', decision='NEEDS_MORE_DATA', needs=[{'need': 'material/lighting reference for ' + ', '.join(changes), 'reason': 'Train render response does not improve; color and illumination remain ambiguous'}])
             scene = candidate
-            project.save_scene(scene)
+            stage_scene(scene)
             project.update(decision='RETRY', task='Train fit improved; rerender without geometry changes')
         return project.update(status='FAILED', decision='FAILED', error='Iteration budget exhausted without validation acceptance')
     except InterruptedError:
@@ -356,7 +402,13 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
         project.update(status='FAILED', decision='FAILED', error=type(exc).__name__ + ': ' + str(exc))
         raise
     finally:
-        lock.unlink(missing_ok=True)
+        try:
+            if current_written and not completed:
+                os.replace(backup, current)
+        finally:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+            lock.unlink(missing_ok=True)
 
 
 def evaluate_project(project, engine='blender', renderer='software-egl'):

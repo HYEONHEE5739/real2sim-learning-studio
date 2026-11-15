@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import uuid
 import re
 import time
@@ -75,6 +76,51 @@ def inspect_usda(path):
     return stage,closure
 
 
+def _face_triangles(points):
+    """Return original corner indices, clipping planar concave USD polygons.
+
+    Keep the existing convex fan; clip concave ears without changing UV corner
+    addressing. Non-planar concave/self-intersecting n-gons fail explicitly.
+    """
+    count=len(points)
+    if count==3:return [(0,1,2)]
+    centered=np.asarray(points,float)-np.mean(points,axis=0)
+    extent=float(np.max(np.ptp(centered,axis=0)))
+    epsilon=np.finfo(float).eps*max(extent*extent,np.finfo(float).tiny)*count*32
+    normal=np.sum(np.cross(centered,np.roll(centered,-1,axis=0)),axis=0)
+    length=float(np.linalg.norm(normal))
+    if length<=epsilon:
+        if np.linalg.matrix_rank(centered)<2:return [(0,i,i+1)for i in range(1,count-1)]
+        raise ValueError('Unsupported degenerate/self-intersecting USD polygon; triangulate in the authoring tool')
+    xy=np.delete(centered,int(np.argmax(abs(normal))),axis=1)
+    def cross(a,b,c):
+        u=b-a;v=c-a
+        return float(u[0]*v[1]-u[1]*v[0])
+    signed=sum(cross(np.zeros(2),xy[i],xy[(i+1)%count])for i in range(count))
+    sign=1 if signed>0 else -1
+    for i in range(count):
+        for j in range(i+2,count):
+            if i==0 and j==count-1:continue
+            a,b=xy[i],xy[(i+1)%count];c,d=xy[j],xy[(j+1)%count]
+            if cross(a,b,c)*cross(a,b,d)<-epsilon**2 and cross(c,d,a)*cross(c,d,b)<-epsilon**2:
+                raise ValueError('Unsupported self-intersecting USD polygon')
+    if all(sign*cross(xy[i-1],xy[i],xy[(i+1)%count])>=-epsilon for i in range(count)):
+        return [(0,i,i+1)for i in range(1,count-1)]
+    if np.max(abs(centered@(normal/length)))>max(extent*1e-6,np.finfo(float).eps):
+        raise ValueError('Unsupported non-planar concave USD n-gon; triangulate in the authoring tool')
+    remaining=list(range(count));triangles=[]
+    while len(remaining)>3:
+        for index,b in enumerate(remaining):
+            a,c=remaining[index-1],remaining[(index+1)%len(remaining)]
+            if sign*cross(xy[a],xy[b],xy[c])<=epsilon:continue
+            if any(all(sign*cross(xy[u],xy[v],xy[p])>=-epsilon for u,v in((a,b),(b,c),(c,a)))
+                   for p in remaining if p not in(a,b,c)):continue
+            triangles.append((a,b,c));remaining.pop(index);break
+        else:raise ValueError('Unsupported degenerate USD polygon; triangulate in the authoring tool')
+    triangles.append(tuple(remaining))
+    return triangles
+
+
 def _convert(stage,folder):
     """Bake mesh transforms/UV seams, separate material subsets and collision.
 
@@ -122,8 +168,8 @@ def _convert(stage,folder):
         subset_by_face={int(face):sub.GetPrim()for sub in subsets for face in sub.GetIndicesAttr().Get()}
         for face,count in enumerate(counts):
             material=subset_by_face.get(face,prim);key=str(material.GetPath());group=groups.setdefault(key,{'prim':material,'rows':[]})
-            for index in range(1,count-1):
-                corners=[offset,offset+index,offset+index+1]
+            for triangle in _face_triangles(points[indices[offset:offset+count]]):
+                corners=[offset+index for index in triangle]
                 if mesh.GetOrientationAttr().Get()=='leftHanded':corners.reverse()
                 for corner in corners:
                     vertex=indices[corner];texcoord=[0.,0.]
@@ -208,6 +254,7 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
             version=f'v{number:03d}';dest=base/version
             local_path(project.root,os.path.relpath(dest/'manifest.json',project.root))
             manifest.update(version=version,content_sha256=content_sha256,source_fingerprint=source_fingerprint,created_ns=time.time_ns())
+            manifest['semantic_sha256']=_semantic_digest(manifest)
             if generation_id:manifest['generation_request_id']=generation_id
             manifest['manifest']=os.path.relpath(dest/'manifest.json',project.root)
             write(pending/'manifest.json',manifest);pending.rename(dest)
@@ -215,6 +262,14 @@ def register_object_asset(project,path,*,asset_id,dimensions=None,origin='author
             shutil.rmtree(pending,ignore_errors=True);raise
         verify_object_asset(project,manifest)
         return manifest
+
+
+def _semantic_digest(record):
+    # Storage path/version and creation time are deliberately not geometry.
+    fields=('entry','default_prim','dimensions','origin','units','up_axis','visual','collision','collision_status','physical_verified','source_blend')
+    content={'schema':'real2sim.object-asset-semantics/1','content_sha256':record['content_sha256'],
+             **{key:record.get(key)for key in fields}}
+    return __import__('hashlib').sha256(json.dumps(content,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
 def verify_object_asset(project,record):
@@ -235,7 +290,21 @@ def verify_object_asset(project,record):
         if not target.is_relative_to(base)or not target.is_file()or sha(target)!=digest:raise ValueError('Object asset dependency changed: '+relative)
     content={k:record[k]for k in('files','dimensions','origin','default_prim','units','up_axis')}
     if __import__('hashlib').sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()!=record['content_sha256']:raise ValueError('Object asset content digest mismatch')
-    inspect_usda(base/record['entry'])
+    if record['entry']not in record['files']:raise ValueError('Object asset entry must be a verified dependency')
+    stage,_=inspect_usda(base/record['entry'])
+    if record.get('semantic_sha256')is not None:
+        if record['semantic_sha256']!=_semantic_digest(record):raise ValueError('Object asset semantic digest mismatch')
+    else:
+        # Legacy immutable manifests retain their content/version SHA. Derive
+        # their consumed metadata from native USD in temporary storage only.
+        with tempfile.TemporaryDirectory(prefix='real2sim-asset-verify-')as folder:
+            visual,collision,_=_convert(stage,Path(folder))
+        if record['visual']!=visual or record['collision']!=collision:
+            raise ValueError('Legacy Object asset semantics disagree with native USDA')
+        if record['default_prim']!=str(stage.GetDefaultPrim().GetPath()):raise ValueError('Object asset default Prim changed')
+        expected='AUTHORED_UNVALIDATED'if collision else'UNRESOLVED'
+        if record['collision_status']!=expected or record.get('physical_verified')is not False:
+            raise ValueError('Object asset collision verification is not authored geometry')
     return record
 
 

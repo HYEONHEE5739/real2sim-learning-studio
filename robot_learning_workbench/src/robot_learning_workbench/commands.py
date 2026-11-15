@@ -14,7 +14,14 @@ def control_commands(rows,state,events,*,tick,episode_id,env_index=0):
         elif kind=='pause':state['paused']=True
         elif kind=='resume':state['paused']=False
         elif kind=='step':
-            if state['steps']:raise ValueError('A step command is already in progress')
+            if state['steps']:
+                # Replayed IDs must keep waiting for the original completion ACK.
+                if state.get('step_command')!=row['command_id']:
+                    events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'A step command is already in progress'}})
+                continue
+            if state.get('cancelled'):
+                events({'kind':'command_ack','payload':{'command_id':row['command_id'],'status':'rejected','reason':'Run is cancelled'}})
+                continue
             state['steps']=payload['count'];state['paused']=True;state['step_command']=row['command_id']
             continue
         elif kind=='skip':state['skipped']=True

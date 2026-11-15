@@ -38,17 +38,6 @@ def _support(scene, obj, explicit=None,root=None):
     return {'relation':row,'pose':supported_pose(scene,name,row,pose,root),'root':root}
 
 
-def _posed(candidate, cached):
-    result = copy.deepcopy(candidate)
-    result['frames'].update({k:v for k,v in cached['frames'].items()if k.startswith('robot_link_')})
-    reference = {o['id']: o for o in cached['objects'] if o.get('link')}
-    for obj in result['objects']:
-        if obj['id'] in reference:
-            obj['frame'] = reference[obj['id']]['frame']
-            obj['pose'] = reference[obj['id']]['pose']
-    return result
-
-
 def parameter_blocks(scene,observations,options,*,root=None):
     """One parameter definition for raw-depth and native-render optimization."""
     blocks=[];bounds=[];cams={c['id']:c for c in scene['cameras']};nodes={o['id']:o for o in scene['objects']}
@@ -333,6 +322,8 @@ def fit_depth_bundle(project,scene,options=None):
         world_cloud_reprojection='raw optical rays on each solver evaluation')
     held=[r for r in rows if r[0]['split']=='validation']
     if held:
+        from ..observations import _record_holdout_usage
+        _record_holdout_usage(project,[images[r[0]['image_id']]for r in held if r[0]['image_id']in images],scene,'depth_bundle_diagnostics')
         report['holdout_before_rmse_m']=rmse(zero,held)
         report['holdout_after_rmse_m']=rmse(solution.x,held)
     if rank<len(radius):return scene,{**report,'status':'UNRESOLVED','needs':needs+['Camera/Object/scale gauge or coverage is ambiguous; add a fixed visible reference or distinct wrist poses']}
@@ -412,7 +403,8 @@ def fit_joint_scene(project, scene, options=None):
     from ..initialization import project_supports
     scene,physical=project_supports(scene,options.get('supports'),project.root)
     candidate=copy.deepcopy(scene);nodes={o['id']:o for o in scene['objects']}
-    cached={i['id']:observation_scene(scene,i,project.root,complete=False)for i in images}
+    # Validate every registered view up front, including views without landmarks.
+    for image in images:observation_scene(scene,image,project.root,complete=False)
     observed_cameras={by_id[r['observation']]['camera']for r in train}
     observed_types={}
     for name in observed_cameras:
@@ -454,7 +446,9 @@ def fit_joint_scene(project, scene, options=None):
         for row in rows_to_measure:
             key = row['observation']
             if key not in posed:
-                posed[key] = _posed(candidate, cached[key])
+                # Re-adapt the trial Camera/K/pixel grid and measured-q FK;
+                # a baseline-only cache loses per-view extrinsics and updates.
+                posed[key] = observation_scene(candidate, by_id[key], project.root, complete=False)
             cam = next(c for c in posed[key]['cameras'] if c['id'] == by_id[key]['camera'])
             uv, depth = project_point(posed[key], cam, row)
             result.append((row, uv-np.asarray(row['uv'], float), float(depth)))
@@ -493,6 +487,8 @@ def fit_joint_scene(project, scene, options=None):
     # Measure after physical initialization; optimizing pixels cannot undo contact.
     candidate = copy.deepcopy(scene)
     before = summarize(train)
+    from ..observations import _record_holdout_usage
+    _record_holdout_usage(project,[by_id[r['observation']]for r in held],scene,'joint_fit_diagnostics')
     held_before = summarize(held)
     solution = least_squares(residual, np.zeros(len(lower)), bounds=(lower, upper), loss='soft_l1',
                              max_nfev=int(options.get('max_nfev', 100)))

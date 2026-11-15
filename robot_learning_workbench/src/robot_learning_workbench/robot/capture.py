@@ -361,7 +361,7 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
         joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',
         joint_mapping=mapping,source_robot_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
         robot=dict(path=model_relative,mapping_verified=False),
-        cameras=[dict(id=n,resolution=[640,480],color='rgb')for n in ('side','wrist')],samples='samples.json',events='events.json',files=files,
+        cameras=[dict(id=n,camera_type=n,resolution=[640,480],color='rgb')for n in ('side','wrist')],samples='samples.json',events='events.json',files=files,
         quality=dict(incomplete=False),**metadata)
     if scene is not None:
         from scene_contract.transforms import resolve_transform
@@ -371,7 +371,7 @@ def save_session(root: Path|str, *, model: Path|str, mapping: dict, samples: lis
         for name in ('side','wrist'):
             camera=scene.scene['cameras'][name];frame=frames[camera['frame_id']];parent=frame['parent']
             if parent not in ('world','robot_base') and not parent.startswith('robot_link_'):raise ValueError('Explicit Scene camera mount link required')
-            manifest['cameras'].append(dict(id=name,parent=parent.removeprefix('robot_link_'),resolution=list(camera['resolution']),K=copy.deepcopy(camera['K']),
+            manifest['cameras'].append(dict(id=name,camera_type=name,parent=parent.removeprefix('robot_link_'),resolution=list(camera['resolution']),K=copy.deepcopy(camera['K']),
                 distortion=copy.deepcopy(camera.get('distortion')),T_parent_camera=copy.deepcopy(frame['T_parent_from_frame']),
                 provenance={key:'inherited_scene_unverified'for key in ('K','distortion','T_parent_camera')}))
     atomic_json(root/'capture_manifest.yaml',manifest)

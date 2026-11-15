@@ -26,11 +26,18 @@ def main(argv=None):
     p=commands.add_parser('status');p.add_argument('run_dir')
     p=commands.add_parser('events');p.add_argument('run_dir');p.add_argument('--after-seq',type=int,default=0);p.add_argument('--limit',type=int,default=200)
     p=commands.add_parser('command');p.add_argument('run_dir');p.add_argument('--id',required=True);p.add_argument('--kind',required=True);p.add_argument('--payload',default='{}');p.add_argument('--episode-id');p.add_argument('--env-index',type=int)
-    p=commands.add_parser('worker',help=argparse.SUPPRESS);p.add_argument('run_dir')
+    p=commands.add_parser('worker',help=argparse.SUPPRESS);p.add_argument('run_dir');p.add_argument('--monitor',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args(argv)
     try:
         if args.command=='worker':
             from .run import load_worker_request,execute
+            if args.monitor:
+                import subprocess
+                from .run import _monitor,_worker_environment
+                # Stay with the execution child even after a short-lived UI start call.
+                with subprocess.Popen([sys.executable,'-B','-m','robot_learning_workbench.cli','worker',args.run_dir],env=_worker_environment(),stdin=subprocess.DEVNULL,close_fds=True) as process:
+                    code=_monitor(process,Path(args.run_dir))
+                return code if code>=0 else 128-code
             result=execute(load_worker_request(Path(args.run_dir)))
             return 0 if result.status in ('completed','cancelled') else 1
         if args.command in ('run','status','events','command'):

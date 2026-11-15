@@ -32,6 +32,8 @@ Scene Photo의 virtual/reference Camera와 실제 Side/Wrist 센서는 역할 �
 
 Scene 생성은 Depth/Metric Registration 성공을 필수로 하지 않는다. 실제 RGB/실측으로 초안을 추정하되, 같은 train 입력의 이미지 잔차를 독립 정확도라고 부르지 않는다. holdout은 수정 판단/모델링/최선 선택에 넣지 않는다.
 
+여기서 최종 holdout은 **Scene을 고정한 뒤 평가할 미사용 독립 Test**다. 기존 저장 `split=validation`과 `holdout_policy`라는 이름은 호환성을 유지하지만, Solver veto·Candidate 비교·사용자 반복 검토에 쓰인 자료는 선택용 Validation이며 최종 Test가 아니다. 직접 수치/렌더 호출도 기존 `working/calibration_holdout_usage.jsonl`에 사용을 남긴다. 과거 사용 기록이 없다는 사실만으로 독립성을 인정하지 않는다. 새 Side/Wrist 세션을 오차 확인 전에 분리하고, 고정 Scene·Asset·K/Mount·URDF/Mapping SHA와 measured q로만 평가한다. 결과를 본 뒤 수정에 사용했다면 그 자료는 소진된 Validation이고 다음 독립 평가에는 새 자료가 필요하다. 절차·관측 지표는 [Phase 2B 감사](../docs/reviews/phase2b-final-architecture-audit.md)를 따른다. 진단 기준 통과는 독립 Calibration·Physics·Task 인증을 대신하지 않는다.
+
 최초 Scene과 각 수정 Before는 저장 후 덮어쓰지 않는다. 실제 렌더/스크립트/자산/Scene 파일만 Evidence에 연결한다. Box annotation은 SAM Mask가 아니다. 후처리나 추정 이미지를 실제 물리 결과처럼 제시하지 않는다. 공개할 판단은 관측 근거·선택한 설계·적용한 변경 요약이며 비공개 사고 과정이 아니다.
 
 모든 비교 가능한 train View가 악화되지 않은 개선만 최선으로 채택한다. 동률/트레이드오프/실패/Stop/예산 종료는 기존 최선을 유지하며 전체 최적해를 보장하지 않는다. 같은 원본의 재개는 검증된 결과를 재사용하고 다른 입력/Memo의 기록은 새 run_identity로 구분한다.

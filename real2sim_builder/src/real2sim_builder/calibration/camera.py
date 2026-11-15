@@ -7,6 +7,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 from real2sim_builder.scene import transform, world_pose, frame_world, value
+from ..editing import PROTECTED
 
 
 def point_world(scene,row):
@@ -44,6 +45,7 @@ def landmark_metrics(scene,rows):
 def fit_cameras(scene,landmarks):
     candidate=copy.deepcopy(scene);report=[]
     for camera in candidate['cameras']:
+        if camera['pose']['provenance'] in PROTECTED:continue
         rows=[r for r in landmarks if r['camera']==camera['id'] and r.get('split','train')=='train']
         if len(rows)<4 or camera['K']['value'] is None:continue
         points=np.array([point_world(candidate,r) for r in rows]);uv=np.array([r['uv'] for r in rows],float)

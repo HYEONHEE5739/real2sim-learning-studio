@@ -35,7 +35,11 @@ d.close()
 
 def test_advanced_refit_progress_maps_to_single_screen_and_preserves_auth_controls(tmp_path):
     qt_check(tmp_path,'''
-d=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
+identity={'scene_id':'source','revision':'rev','manifest_sha256':'a'*64}
+evidence=p.evidence;evidence['images']=[{'id':'pair_side','snapshot_id':'chosen','scene_state_id':'layout',
+ 'runtime_baseline':{'scene_identity':identity,'workspace_context':{'content_sha256':'a'*64}}}]
+write(p.root/'input/evidence.yaml',evidence)
+d=ui.ReconstructionDialog(p.root,sys.executable,refit=True,capture_ids=['chosen'])
 d.busy=lambda:True
 for stage,phrase,key in [('CODEX ANALYSIS','Codex','analysis'),('SCENE_COMPOSITION','Camera','camera'),('FITTING','렌더','fitting')]:
  p.update(status='RUNNING',stage=stage)

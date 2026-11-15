@@ -22,7 +22,8 @@ def run_outcome(record: dict) -> dict:
         'completed_episodes':record.get('completed_episodes'),
         'goal_reached':summary.get('target_reached'),'budget_exhausted':summary.get('budget_exhausted'),
         'needs_resume':summary.get('fresh_worker_required',False),'task_success':summary.get('latest',{}).get('success'),
-        'error':record.get('error'),'summary':summary}
+        'error':record.get('error'),'summary':summary,
+        'exit_code':record.get('exit_code'),'process_finished':record.get('exit_code') is not None,'process_error':record.get('process_error')}
 
 
 def prepared(path: str,modules: str) -> dict:

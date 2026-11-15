@@ -13,6 +13,9 @@ def accept_annotation(physical_passed,frames,mode,marks):
 
 
 def evaluation_result(*,placed,grasp,steps,limit):
+    if placed and steps==0:
+        return dict(success=False,category='initial_state_satisfied',steps=0,grasp_latched=bool(grasp),placement=True,
+                    initial_state_success=True,policy_executed=False)
     return dict(success=bool(placed),category='task_success' if placed else 'max_steps' if steps>=limit else 'task_failure',
                 steps=steps,grasp_latched=bool(grasp),placement=bool(placed))
 

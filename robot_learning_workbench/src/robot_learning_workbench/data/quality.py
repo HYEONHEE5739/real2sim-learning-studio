@@ -31,7 +31,9 @@ def initial_positions(catalog,ep):
 
 def episode_quality(catalog,ep,official):
     native=ep.format=='isaac_hdf5';clock='obs/timestamp'if native else'timestamp';target='joint_targets'if native else'action'
-    result=dict(flags=[],flag_details=[],duration=None,stop_fraction=None,command_stop_fraction=None,jitter=None,gripper_jitter=None,initial_objects=initial_positions(catalog,ep),target_movement_m=None,lift_height_m=None)
+    names=task_object_ids(catalog.execution);pick=names[0]if len(names)==1 else None
+    result=dict(flags=[],flag_details=[],duration=None,stop_fraction=None,command_stop_fraction=None,jitter=None,gripper_jitter=None,initial_objects=initial_positions(catalog,ep),target_movement_m=None,lift_height_m=None,
+        target_object_id=pick,target_objects=list(names),target_metric_status='NO_TASK_OBJECT'if not names else'MULTIPLE_TASK_OBJECTS'if len(names)>1 else'NOT_RECORDED')
     with ExitStack()as stack:
         group=None
         if native:
@@ -41,13 +43,15 @@ def episode_quality(catalog,ep,official):
         if _field_semantics(catalog,target)['unit']!='rad':result['reason']='관절 단위 근거 없음';return result
         eef_key='obs/datagen_info/eef_pose/tool0'
         eef=_chunks((ep,),eef_key,2048,official)if group is not None and metric_poses and eef_key in group else None
-        pick=next(iter(catalog.execution.get('active_objects',())),None);object_key='obs/datagen_info/object_pose/'+str(pick)
-        objects=_chunks((ep,),object_key,2048,official)if group is not None and metric_poses and object_key in group else None
+        object_key='obs/datagen_info/object_pose/'+str(pick)
+        objects=_chunks((ep,),object_key,2048,official)if pick is not None and group is not None and metric_poses and object_key in group else None
+        if objects is not None:result['target_metric_status']='AVAILABLE'
         last_t=last_q=last_v=last_ee=last_obj=None;first=None;last=None;idle=cmd_idle=count=acc_count=0;accsum=np.zeros(6);movement=0.;initial_z=top_z=None
         for values,times in zip(_chunks((ep,),target,2048,official),_chunks((ep,),clock,2048,official)):
             times=np.asarray(times).reshape(-1);values=np.asarray(values)
             if values.shape!=(len(times),6)or not np.isfinite(times).all()or not np.isfinite(values).all():raise ValueError('Invalid aligned motion quality data')
             ee=next(eef)[:,:3,3]if eef is not None else None;obj=next(objects)[:,:3,3]if objects is not None else None
+            if obj is not None and(obj.shape!=(len(times),3)or not np.isfinite(obj).all()):raise ValueError('Invalid recorded Task Object positions')
             for i,(t,q)in enumerate(zip(times,values)):
                 if first is None:first=float(t)
                 if last_t is not None:

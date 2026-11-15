@@ -25,8 +25,16 @@ class RecipeEditor(QWidget):
         target=Path(path).resolve() if path else self.path
         if target is None:raise ValueError('저장 위치를 선택하세요')
         # Never overwrite historical evidence or original project Recipes.
-        protected=('/home/hyeonhee/soarm_isaaclab/','/home/hyeonhee/miniconda3/','/home/hyeonhee/IsaacLab/')
-        if str(target).startswith(protected) or ('docs' in target.parts and 'evidence' in target.parts and target.exists()):
+        from .paths import protected_destination
+        from .jobs import BackendJob
+        owner=self.parentWidget();backend=None
+        while owner is not None:
+            backend=getattr(owner,'backend_python',None)or getattr(owner,'python',None)
+            if not backend:
+                backend=next((child.python for child in owner.children()if isinstance(child,BackendJob)),None)
+            if backend:break
+            owner=owner.parentWidget()
+        if protected_destination(target,backend_python=backend) or ('docs' in target.parts and 'evidence' in target.parts and target.exists()):
             raise ValueError('보존 자료입니다. 다른 이름으로 저장하세요')
         target.parent.mkdir(parents=True,exist_ok=True);target.write_text(self.text.toPlainText())
         self.path=target;self.dirty=False;self.state='저장됨';self.label.setText('저장됨 · '+target.name);self.changed.emit()

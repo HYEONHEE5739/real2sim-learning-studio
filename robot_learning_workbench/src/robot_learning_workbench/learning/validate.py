@@ -3,7 +3,7 @@ from pathlib import Path
 import time,resource
 import numpy as np
 from ..data.native import load_catalog,DatasetIdentity,atomic_json,DataError,read_json
-from ..data.lerobot import control_contract
+from ..data.lerobot import control_contract,episode_overlap
 from .policy import load_policy,infer,predict
 
 
@@ -20,15 +20,13 @@ def evaluate(plan,*,events,commands):
     else:
         if contract!=record['control_contract'] or declared is not None and declared!=contract:raise DataError('POLICY_INCOMPATIBLE','dataset','Scene/model/control/feature semantics differ')
         source='checkpoint'
-    def ids(catalog):return {e.metadata['official_episode_metadata'].get('workbench/source_episode_uid') for e in catalog.episodes}
     overlap=None
     if record.get('dataset_path'):
         training=load_catalog(record['dataset_path'],expected=DatasetIdentity(**record['dataset_identity']))
         if dataset.identity==training.identity:raise DataError('DATA_LEAKAGE','validation','Training Dataset is not independent validation')
-        if None not in ids(dataset) and None not in ids(training):
-            overlap=len(ids(dataset)&ids(training))
-            if overlap:raise DataError('DATA_LEAKAGE','validation','Original train/validation Episodes overlap')
-        elif contract is not None:raise DataError('DATA_LEAKAGE','validation','Known Workbench lineage missing')
+        overlap=episode_overlap(training,dataset)
+        if overlap:raise DataError('DATA_LEAKAGE','validation','Original train/validation Episodes or Native aliases overlap')
+        if overlap is None and contract is not None:raise DataError('DATA_LEAKAGE','validation','Original Episode/Resume lineage is unproven')
     from lerobot.datasets.utils import dataset_to_policy_features
     metadata=read_json(dataset.root/'meta/info.json');available=dataset_to_policy_features(metadata['features'])
     inputs=policy.config.input_features or {};outputs=policy.config.output_features or {}

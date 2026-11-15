@@ -205,6 +205,11 @@ class Candidate:
             self.require_open()
             scene, report = fit(self.project, self.scene, target, options)
             if report['status'] == 'IMPROVED':
+                if target == 'joint:scene':
+                    self.check_scope(scene)
+                    preserve(self.scene, scene)
+                    from .calibration.hybrid import reproject_observations
+                    scene = reproject_observations(self.project, scene, {}, self.root / 'fit-observations')
                 self.save(scene)
             write(self.root / 'fit.json', report)
             if target == 'joint:scene':

@@ -542,6 +542,15 @@ def prepare_objects(candidate, config, previous, folder, provider):
             rgb=a['image'];mask=a['mask'];points,point_provenance=pose_point_selection(a,config.get('pose',{}))
             original_points,original_provenance=pose_point_selection(a,{})
             yy_original,xx_original=np.where(mask & (a['rgb_source']==0)&(a['depth_source']==0)&~a['low_confidence'].astype(bool))
+        if mask.shape!=rgb.shape[:2]:raise ValueError('Observed RGB/Mask/Depth grids differ')
+        # Crop-only callers can supply the self-contained observation NPZ.
+        # Validate separate Stage5 references whenever they are supplied.
+        if obj.get('observed_rgb') and np.asarray(Image.open(obj['observed_rgb'])).shape[:2]!=mask.shape:
+            raise ValueError('Observed RGB/Mask/Depth grids differ')
+        if obj.get('mask'):
+            observed_mask=np.asarray(Image.open(obj['mask']).convert('L'))>0
+            if observed_mask.shape!=mask.shape or not np.array_equal(observed_mask,mask):
+                raise ValueError('Observed mask identity differs from the depth observation')
         yy,xx=np.where(mask)
         if not len(xx):raise StageNeeds('NEEDS_MORE_DATA','Cannot crop an empty object mask')
         crops={}
@@ -578,6 +587,10 @@ def prepare_objects(candidate, config, previous, folder, provider):
             if setting.get('infill',False):
                 infilled=provider('image_edit',{'image':source,'task':'infill','image_edit_role':'objects','object_prompt':obj['prompt'],'prompt':''},out/'infill')
                 infilled=provider('background_remove',{'image':infilled['path'],'max_side':setting.get('remove_bg_max_side',1024)},out/'infill_alpha')
+                infilled.update(alpha_source='rembg',depth_frame='observed_original_only')
+                image=np.asarray(Image.open(infilled['path']))
+                if image.ndim!=3 or image.shape[-1]!=4 or not np.any(image[...,3]>0):
+                    raise StageNeeds('NEEDS_REVIEW','RemBG returned no foreground alpha')
                 source=infilled['path']
             if setting.get('upsample',True):
                 enhanced=provider('image_edit',{'image':source,'task':'upsample','image_edit_role':'objects','object_prompt':obj['prompt'],'prompt':''},out/'upsample')
@@ -586,23 +599,26 @@ def prepare_objects(candidate, config, previous, folder, provider):
                     enhanced['alpha_source']='rembg'
                 else:enhanced['alpha_source']='NOT_REFINED'
                 enhanced['depth_frame']='observed_original_only'
-                image=np.asarray(Image.open(enhanced['path']))
-                if image.ndim!=3 or not np.isfinite(image).all() or image.shape[-1]not in(3,4):raise ValueError('Invalid generated object image')
-                if setting.get('remove_background',True) and(image.shape[-1]!=4 or not np.any(image[...,3]>0)):
-                    raise StageNeeds('NEEDS_REVIEW','RemBG returned no foreground alpha')
-                if setting.get('check_valid',False):
-                    validity=provider('vlm',{'images':[obj['observed_rgb'],str(obj['mask']),enhanced['path']],'task':'object_validity',
-                        'response_schema':object_validity_schema(),
-                        'context':{'instance':obj,'scene_analysis':previous[5].get('scene_analysis')},'prompt':
-                        'Compare observed RGB, its Mask and generated RGB for '+obj['prompt']+'. Check intact identity, foreground alpha, observed shape, foreign objects and protected measurements. Separate hidden geometry/unmeasured dimensions from observed damage. Preserve uncertain=true when warranted. Return every requested field.'},out/'validity')['answer']
-                    try:validity_gate=object_validity_gate(validity,obj['id'],sha(enhanced['path']))
-                    except StageNeeds as error:
-                        write(folder/'object_progress.json',{'objects':result,'held_object':obj['id'],'gate':error.gate,
-                            'dependencies':'Subsequent compilation requires all requested Object results; independence not inferred'})
-                        raise
+            generated=enhanced or infilled
+            image=np.asarray(Image.open(generated['path']))
+            if image.ndim!=3 or not np.isfinite(image).all() or image.shape[-1]not in(3,4):raise ValueError('Invalid generated object image')
+            if setting.get('remove_background',True) and(image.shape[-1]!=4 or not np.any(image[...,3]>0)):
+                raise StageNeeds('NEEDS_REVIEW','RemBG returned no foreground alpha')
+            if setting.get('check_valid',False):
+                validity=provider('vlm',{'images':[obj['observed_rgb'],str(obj['mask']),generated['path']],'task':'object_validity',
+                    'response_schema':object_validity_schema(),
+                    'context':{'instance':obj,'scene_analysis':previous[5].get('scene_analysis')},'prompt':
+                    'Compare observed RGB, its Mask and generated RGB for '+obj['prompt']+'. Check intact identity, foreground alpha, observed shape, foreign objects and protected measurements. Separate hidden geometry/unmeasured dimensions from observed damage. Preserve uncertain=true when warranted. Return every requested field.'},out/'validity')['answer']
+                try:validity_gate=object_validity_gate(validity,obj['id'],sha(generated['path']))
+                except StageNeeds as error:
+                    write(folder/'object_progress.json',{'objects':result,'held_object':obj['id'],'gate':error.gate,
+                        'dependencies':'Subsequent compilation requires all requested Object results; independence not inferred'})
+                    raise
         cloud=out/'camera_points.npy';np.save(cloud,points)
         original_cloud=out/'original_points.npz';np.savez_compressed(original_cloud,camera_points=original_points,uv_processed=np.c_[xx_original,yy_original])
-        result.append({**obj,'crops':crops,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'validity_gate':validity_gate,'camera_points':str(cloud),
+        final=enhanced or infilled or crops['focus']
+        prepared_image={'path':final['path'],'sha256':sha(final['path']),'source':'enhanced'if enhanced else'infilled'if infilled else'observed_crop','depth_frame':'observed_original_only'}
+        result.append({**obj,'crops':crops,'prepared_image':prepared_image,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'validity_gate':validity_gate,'camera_points':str(cloud),
             'point_provenance':point_provenance,'original_points':str(original_cloud),'original_point_provenance':original_provenance})
         write(folder/'object_progress.json',{'objects':result,'status':'PARTIAL','physical_verified':False})
     return {'objects':result,'selected_frame_id':previous[5]['selected_frame_id'],
@@ -655,8 +671,8 @@ def meshes(candidate, config, previous, folder, provider):
     for obj in objects:
         local['objects'].setdefault(obj['id'],{'prompt':obj['prompt'],'role':obj['role']})
     local['prepared_objects']={o['id']:{'image':o['observed_rgb'],'image_id':o['source_frame_id'],
-        'mask':o['mask'],'observed':o['observed'],'crops':[x['path']for x in o['crops'].values()]+
-        ([o['enhanced']['path']]if o.get('enhanced')else[]),'provenance':o['provenance']}for o in objects}
+        'mask':o['mask'],'observed':o['observed'],'crops':list(dict.fromkeys([x['path']for x in o['crops'].values()]+
+        ([(o.get('prepared_image')or o.get('enhanced')or o.get('infilled'))['path']]if o.get('prepared_image')or o.get('enhanced')or o.get('infilled')else[]))),'provenance':o['provenance']}for o in objects}
     local['composition_feedback']={'stage_owner':'Stage8 CPD owns final object pose; author Mesh only',
                                    'required_instance_ids':sorted(expected)}
     maximum=config.get('max_modeling_calls',6)
@@ -853,13 +869,21 @@ def registered_world_pose(registration, support_pose):
 def stage_sensor_clouds(candidate, scene, previous, folder, registration):
     """Retain original pixel/point evidence in an explicit diagnostic gauge."""
     from .scene import transform
-    scene=copy.deepcopy(scene);clouds=[]
+    from .observations import source_record_digest
+    from .scene import camera_calibration_signature
+    from PIL import Image
+    import cv2
+    scene=copy.deepcopy(scene);clouds=scene.setdefault('reconstruction_observations',{}).setdefault('clouds',[])
+    existing={(row['image_id'],row['object_id'])for row in clouds}
+    images={image['id']:image for image in candidate.project.evidence['images']}
     for obj in previous[6]['objects']:
         file=obj.get('original_points')
         if not file:raise StageNeeds('NEEDS_MORE_DATA','Original pixel/point correspondence required: '+obj['id'],code='SENSOR_CORRESPONDENCES',classification='DEPENDENCY_BLOCK')
         with np.load(file)as a:points=a['camera_points'];pixels=a['uv_processed']
         frame=next(f for f in previous[2]['frames']if f['id']==obj['source_frame_id'])
         if frame['role']!='scene_photo':continue  # Video frames are not Project sensor-binding observations.
+        if (frame['id'],obj['id'])in existing:continue
+        image=images[frame['id']]
         index=previous[2]['frames'].index(frame);A=np.asarray(previous[2]['original_to_processed'][index],float)
         if A.shape!=(3,3)or not np.isfinite(A).all()or not np.allclose(A[2],[0,0,1])or abs(np.linalg.det(A))<1e-12:raise ValueError('Valid original-to-processed pixel affine required')
         if points.shape!=(len(pixels),3)or pixels.shape[1:]!=(2,)or not np.isfinite(points).all()or not np.isfinite(pixels).all():raise ValueError('Original point correspondence mismatch')
@@ -867,9 +891,21 @@ def stage_sensor_clouds(candidate, scene, previous, folder, registration):
         uv=np.c_[pixels,np.ones(len(pixels))]@np.linalg.inv(A).T
         support_points=points@T[:3,:3].T+T[:3,3]
         target=folder/(obj['id']+'_sensor_cloud.npz');np.savez_compressed(target,uv_original=uv[:,:2]/uv[:,2:],points_world_m=(support_points*scale)@W[:3,:3].T+W[:3,3])
+        mask=np.asarray(Image.open(obj['mask']).convert('L'))
+        width,height=image['resolution']
+        original_mask=cv2.warpPerspective(mask,np.linalg.inv(A),(width,height),flags=cv2.INTER_NEAREST)
+        if not np.any(original_mask):raise StageNeeds('NEEDS_MORE_DATA','No original photo Mask pixels for render refinement')
+        mask_path=folder/(obj['id']+'_original_mask.png');Image.fromarray(original_mask).save(mask_path)
+        camera=next(c for c in scene['cameras']if c['id']==image['camera'])
         clouds.append({'image_id':frame['id'],'object_id':obj['id'],'path':target.relative_to(candidate.project.root).as_posix(),
-            'sha256':sha(target),'provenance':'original RGB with DA3-estimated Z and anchor-constrained scale; not independently measured points'})
-    scene.setdefault('reconstruction_observations',{})['clouds']=clouds
+            'sha256':sha(target),'mask':mask_path.relative_to(candidate.project.root).as_posix(),'mask_sha256':sha(mask_path),
+            'camera':image['camera'],'split':image['split'],'group_id':image['group_id'],'units':'m','frame':'world',
+            'points':len(points),'identity_verified':False,'depth_source':'DA3 estimated; anchor-constrained scale',
+            'geometry_binding':'fixed_world',
+            'dependencies':{'image_sha256':image['sha256'],'image_record_sha256':source_record_digest(image),
+                'camera_signature':camera_calibration_signature(scene,camera)},
+            'provenance':'original RGB with DA3-estimated Z and anchor-constrained scale; not independently measured points'})
+        existing.add((frame['id'],obj['id']))
     return scene
 
 
@@ -945,7 +981,7 @@ def register_stage_sensors(candidate, config, scene, previous, folder, *, resolv
     """
     from . import observations
     from .scene import transform
-    captures=[i for i in candidate.project.evidence['images']if i.get('capture_manifest')and i.get('camera_type')in('side','wrist')]
+    captures=[i for i in candidate.project.evidence['images']if i.get('capture_manifest')and observations.camera_type(i)in('side','wrist')]
     options=config.get('sensor_registration',{})
     if not captures or options.get('enabled')is False:
         return scene,{'status':'NOT_REQUESTED'if captures else'NOT_AVAILABLE','physical_verified':False,
@@ -989,9 +1025,18 @@ def register_stage_sensors(candidate, config, scene, previous, folder, *, resolv
     if joint.get('enabled',True)and landmarks:
         from .calibration.joint import fit_joint_scene
         candidate.project.checkpoint()
+        before=scene
         scene,report['joint_refinement']=fit_joint_scene(candidate.project,scene,{k:v for k,v in joint.items()if k!='enabled'})
-        from .calibration.hybrid import reproject_observations
-        scene=reproject_observations(candidate.project,scene,{},folder/'joint_observations')
+        solver=report['joint_refinement']
+        # Match Numeric Refinement's application gate. A lower residual may
+        # still be a rank-deficient diagnostic draft for direct/Hybrid callers.
+        if solver.get('status')=='IMPROVED'and solver.get('jacobian_rank',-1)<solver.get('parameter_count',0):
+            scene=before
+            report['joint_refinement']={**solver,'status':'UNRESOLVED','solver_status':'IMPROVED','scene_adopted':False,
+                'needs':solver.get('needs',[])+['Rank-deficient shared Camera/Base/Object fit retained as diagnostic; pre-fit Scene is unchanged']}
+        else:
+            from .calibration.hybrid import reproject_observations
+            scene=reproject_observations(candidate.project,scene,{},folder/'joint_observations')
         candidate.project.checkpoint()
     if options.get('render_refinement',{}).get('enabled',False):
         from .calibration.hybrid import fit_scene,alignment_metrics

@@ -172,26 +172,32 @@ class Project:
 
     def checkpoint(self):
         self.require_writable()
-        command = self.root / 'working/control.json'
-        if not command.exists():
-            return
-        instruction = read(command)['command']
-        command.unlink()
+        instruction = self._consume_control()
         if instruction == 'stop':
             raise InterruptedError('User stopped reconstruction')
         if instruction == 'pause':
             self.update(status='PAUSED')
             while True:
                 time.sleep(0.1)
-                if not command.exists():
-                    continue
-                instruction = read(command)['command']
-                command.unlink()
+                instruction = self._consume_control()
                 if instruction == 'stop':
                     raise InterruptedError('User stopped reconstruction')
                 if instruction == 'resume':
                     break
             self.update(status='RUNNING')
+
+    def _consume_control(self):
+        """Claim one atomic command before reading; a later replacement stays pending."""
+        command = self.root / 'working/control.json'
+        claimed = command.with_name('control-'+uuid.uuid4().hex+'.claimed')
+        try:
+            command.rename(claimed)
+        except FileNotFoundError:
+            return None
+        try:
+            return read(claimed)['command']
+        finally:
+            claimed.unlink()
 
     def save_scene(self, scene):
         self.require_writable()

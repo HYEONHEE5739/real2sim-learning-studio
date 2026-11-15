@@ -89,8 +89,20 @@ def control_contract(source: Catalog|Path|str) -> dict|None:
     return contract
 
 
+def _publication_pending(root):
+    root=Path(root)
+    if root.name.endswith('.staging'):return True
+    marker=root/'workbench-publication.json'
+    if not marker.is_file():return False  # External/legacy official Datasets.
+    state=read_json(marker)
+    if state.get('schema_version')!=1 or state.get('state')not in('staging','complete'):
+        raise DataError('DATA_INVALID','publication','Unsupported Dataset publication state')
+    return state['state']!='complete'
+
+
 def lerobot_catalog(root,*,expected=None):
     _pinned();root=Path(root).resolve()
+    if _publication_pending(root):raise DataError('DATA_INCOMPLETE',str(root),'Dataset publication is incomplete; staging is diagnostic evidence only')
     if not list((root/'meta/episodes').glob('*/*.parquet')) or not (root/'meta/tasks.parquet').is_file():raise DataError('DATA_INCOMPLETE',str(root),'finalized official Metadata required; no implicit Hub fallback')
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
     meta=LeRobotDatasetMetadata('workbench/native',root=root)
@@ -126,34 +138,45 @@ def create_staging(output,*,features,fps,repo_id='workbench/native'):
     if output.exists():raise DataError('OUTPUT_EXISTS',str(output),'immutable Native Dataset exists')
     if staging.exists():raise DataError('NATIVE_STATE_UNKNOWN',str(staging),'unfinished conversion; explicit inspection/discard required')
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    return LeRobotDataset.create(repo_id,fps=fps,features=features,root=staging,video_backend='pyav')
+    dataset=LeRobotDataset.create(repo_id,fps=fps,features=features,root=staging,video_backend='pyav')
+    try:atomic_json(staging/'workbench-publication.json',{'schema_version':1,'state':'staging'})
+    except BaseException:
+        dataset.finalize()
+        raise
+    return dataset
 
 
-def publish(dataset,output):
+def publish(dataset,output,*,checkpoint=None):
     """Close official writers and check footers/counts, not full arrays/video decode."""
     import pyarrow.parquet as pq
     output=Path(output).resolve();staging=dataset.root
     if staging!=output.with_name(output.name+'.staging'):raise DataError('DATA_INVALID','staging','wrong owned output')
     dataset.finalize()
+    if checkpoint:checkpoint()
     info=read_json(staging/'meta/info.json')
     frames=sum(pq.read_metadata(p).num_rows for p in (staging/'data').rglob('*.parquet'))
     episodes=sum(pq.read_metadata(p).num_rows for p in (staging/'meta/episodes').rglob('*.parquet'))
     if frames!=info['total_frames'] or episodes!=info['total_episodes']:raise DataError('DATA_INCOMPLETE','footer','official counts/footers disagree')
     for path in staging.rglob('*'):
+        if checkpoint:checkpoint()
         if path.is_file():
             with path.open('rb') as f:os.fsync(f.fileno())
     _sync(staging)
+    if checkpoint:checkpoint()
     if output.exists():raise DataError('OUTPUT_EXISTS',str(output),'publish target already exists')
-    os.rename(staging,output);_sync(output.parent);return output
+    os.rename(staging,output)
+    atomic_json(output/'workbench-publication.json',{'schema_version':1,'state':'complete'})
+    _sync(output.parent);return output
 
 
-def _video_window(info,start,stop):
+def _video_window(info,start,stop,*,checkpoint=None):
     """Decode through the selected interval and sample official stats; never encode packets."""
     from lerobot.datasets.compute_stats import sample_indices,auto_downsample_height_width,get_feature_stats
     fps=float(info['fps']);sampled=set(sample_indices(stop-start));images=[];first=None;last=None;previous=None;index=0
     offset=float(info.get('from_timestamp',0.))
     with av.open(str(info['path'])) as container:
         for frame in container.decode(video=0):
+            if checkpoint:checkpoint()
             seconds=float(frame.pts*frame.time_base)
             if seconds<offset-1e-6:continue
             if index>=stop:break
@@ -180,7 +203,9 @@ def _origin(episode: NativeEpisode,cache: dict[Path,Catalog]) -> dict:
                 'episode_id':row.get('workbench/source_original_episode_id',episode.episode_id),
                 'uid':row.get('workbench/source_episode_uid',digest({'dataset':base.identity.dataset_id,'episode':episode.episode_id})),
                 'native_alias':row.get('workbench/source_native_alias'),'engine':row.get('workbench/source_engine'),
-                'parent':row.get('workbench/source_parent_dataset_id'),'lineage_known':'workbench/source_parent_dataset_id' in row}
+                'parent':row.get('workbench/source_parent_dataset_id'),
+                'lineage_known':all(isinstance(row.get('workbench/source_'+key),str)and row['workbench/source_'+key]
+                    for key in ('episode_uid','dataset_id','original_episode_id','engine'))and isinstance(row.get('workbench/source_parent_dataset_id'),str)}
     metadata=read_json(episode.file.parent/'segment.json.gz')
     # An old archive's export_source_identity may be a Curation view ID, not
     # the underlying Episode origin. Never relabel it as an original Dataset.
@@ -191,6 +216,36 @@ def _origin(episode: NativeEpisode,cache: dict[Path,Catalog]) -> dict:
             'uid':digest({'dataset':dataset_id,'episode':episode.episode_id}),
             'engine':base.execution.get('engine'),'parent':parent.get('dataset_id',''),'lineage_known':True,
             'native_alias':digest({'device':stat.st_dev,'inode':stat.st_ino,'key':episode.key,'metadata':metadata['episodes'][episode.key]})}
+
+
+def _origin_keys(origin):
+    return tuple(value for value in (origin['uid'],origin.get('native_alias'))if isinstance(value,str)and value)
+
+
+def _ambiguous_resume_families(origins):
+    """Existing Merge rule: copied Resume creators are not recorded per Episode."""
+    families={}
+    for origin in origins:
+        group=families.setdefault(origin['engine'],{})
+        group.setdefault(origin['dataset_id'],set()).add(origin['parent'])
+    return any(any(len(parents)!=1 for parents in group.values())or
+        len(group)>1 and any(parent for parents in group.values()for parent in parents)for group in families.values())
+
+
+def episode_overlap(training,validation):
+    """Known original Episode overlap, 0 if proven disjoint, None if unproven.
+
+    Use saved Origin/Native Alias and Merge's Resume-family boundary; neither
+    path/name equality nor equal action arrays proves a shared creator.
+    """
+    cache={};left=[_origin(ep,cache)for ep in training.episodes];right=[_origin(ep,cache)for ep in validation.episodes]
+    keys={key for origin in left for key in _origin_keys(origin)}
+    overlap=sum(bool(keys.intersection(_origin_keys(origin)))for origin in right)
+    if overlap:return overlap
+    origins=left+right
+    if not left or not right or any(not origin['lineage_known']or not origin['engine']for origin in origins):return None
+    if _ambiguous_resume_families(origins):return None
+    return 0
 
 
 def _split_name(catalog: Catalog,ep: NativeEpisode) -> str|None:
@@ -222,7 +277,7 @@ def _task_text(catalog: Catalog,ep: NativeEpisode,explicit: str|None,requires_la
     return value if isinstance(value,str) else str(value)
 
 
-def merge(sources: Sequence[Catalog|Path|str],output: Path|str,*,split: str|None=None,independent: bool=False,task: str|None=None) -> Path:
+def merge(sources: Sequence[Catalog|Path|str],output: Path|str,*,split: str|None=None,independent: bool=False,task: str|None=None,checkpoint: Callable[[],None]|None=None) -> Path:
     """Explicit compatible Native/official sources, same materialization writer.
 
     Official aggregate_datasets copies/concatenates videos and requires identical
@@ -231,13 +286,14 @@ def merge(sources: Sequence[Catalog|Path|str],output: Path|str,*,split: str|None
     """
     catalogs=[s if isinstance(s,Catalog) else load_catalog(s) for s in sources]
     if len(catalogs)<2:raise DataError('MERGE_INCOMPATIBLE','sources','At least two explicit sources required')
-    return materialize(catalogs,output,split=split,independent=independent,task=task)
+    return materialize(catalogs,output,split=split,independent=independent,task=task,checkpoint=checkpoint)
 
 
-def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path|str,*,split: str|None=None,feature_map: dict[str,str]|None=None,independent: bool=False,task: str|None=None) -> Path:
+def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path|str,*,split: str|None=None,feature_map: dict[str,str]|None=None,independent: bool=False,task: str|None=None,checkpoint: Callable[[],None]|None=None) -> Path:
     """Build exactly the chosen rows in an official Dataset; episodes= is not used."""
     catalogs=source if isinstance(source,Sequence) and not isinstance(source,str) else [source]
     catalogs=[s if isinstance(s,Catalog) else load_catalog(s) for s in catalogs]
+    if checkpoint:checkpoint()
     if not catalogs:raise DataError('MERGE_INCOMPATIBLE','sources','Empty source list')
     for cat in catalogs:load_catalog(cat.root,expected=cat.identity)
     catalog=catalogs[0];merged=len(catalogs)>1;contracts=[control_contract(cat) for cat in catalogs]
@@ -245,22 +301,22 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
     if merged and (any(c is None for c in contracts) or any(c!=contracts[0] for c in contracts[1:])):
         raise DataError('MERGE_INCOMPATIBLE','control_contract','Scene/Calibration/model/state/action/camera/control meanings differ or are unproven')
     pairs=[(cat,ep) for cat in catalogs for ep in select_split(cat,split)]
-    chosen=[ep for _,ep in pairs];origins={};memberships={};seen=set();aliases=set();families={}
+    chosen=[ep for _,ep in pairs];origins={};memberships={};seen=set();aliases=set();family_origins=[]
     for cat in catalogs:
         for ep in cat.episodes:
             origin=_origin(ep,origins);role=_split_name(cat,ep)
             if merged:
                 if not origin['lineage_known'] or not origin['engine']:raise DataError('MERGE_INCOMPATIBLE','origin','Explicit original domain and Resume lineage required')
-                families.setdefault(origin['engine'],{})[origin['dataset_id']]=origin['parent']
+                family_origins.append(origin)
             if role:
-                for identity in (origin['uid'],origin.get('native_alias')):
+                for identity in _origin_keys(origin):
                     if identity:
                         if identity in memberships and memberships[identity]!=role:raise DataError('CURATION_INVALID','splits','Same original Episode crosses saved splits')
                         memberships[identity]=role
     # Native Resume stores a parent run, not each inherited Episode creator.
     # Copies have new inodes. One canonical resumed Dataset per domain avoids
     # guessing which Episodes were inherited across separate Resume branches.
-    if any(len(group)>1 and any(group.values()) for group in families.values()):
+    if _ambiguous_resume_families(family_origins):
         raise DataError('MERGE_INCOMPATIBLE','origin','Resume-family origins are not proven disjoint; use one canonical Dataset per engine and its saved selections')
     for ep in chosen:
         origin=_origin(ep,origins);uid=origin['uid'];alias=origin.get('native_alias')
@@ -336,6 +392,7 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
         from lerobot.datasets.utils import write_info
         videos={camera:{} for camera in cameras}
         for index,(source_catalog,ep) in enumerate(pairs):
+            if checkpoint:checkpoint()
             origin=_origin(ep,origins)
             stop=ep.num_frames if ep.stop is None else ep.stop;nframes=stop-ep.start
             if any(info['fps']!=chosen[0].media[camera]['fps'] or list(info['shape'])!=list(chosen[0].media[camera]['shape']) for camera,info in ep.media.items() if camera in cameras):raise DataError('DATA_INVALID','video','mixed camera FPS/shape')
@@ -374,7 +431,7 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
                     number=len(cache);chunk,file=divmod(number,ds.meta.chunks_size)
                     target=ds.root/ds.meta.video_path.format(video_key=key,chunk_index=chunk,file_index=file)
                     share_file(source_path,target,independent=independent);cache[source_path]=(chunk,file)
-                chunk,file=cache[source_path];first,last,video_stats=_video_window(info,ep.start,stop)
+                chunk,file=cache[source_path];first,last,video_stats=_video_window(info,ep.start,stop,checkpoint=checkpoint)
                 stats[key]=video_stats
                 ep_meta.update({f'videos/{key}/chunk_index':chunk,f'videos/{key}/file_index':file,
                                 f'videos/{key}/from_timestamp':first,f'videos/{key}/to_timestamp':last})
@@ -385,6 +442,7 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
             ep_meta['workbench/initial_objects_json']=json.dumps(initial_positions(source_catalog,ep),allow_nan=False)
             ep_meta['workbench/task_objects_json']=json.dumps(ep.metadata.get('task_objects',task_object_ids(source_catalog.execution)))
             ds.meta.save_episode(index,nframes,[task_text],stats,ep_meta)
+            if checkpoint:checkpoint()
         write_info(ds.meta.info,ds.root)
         atomic_json(ds.root/'workbench.json',{'schema_version':1,'dataset_id':uuid.uuid4().hex,'source_identity':asdict(catalog.identity),'split':split,
             'execution':catalog.execution if not merged else {'stage':'learning_dataset','domains':[cat.execution.get('engine','unknown') for cat in catalogs],
@@ -392,8 +450,12 @@ def materialize(source: Catalog|Path|str|Sequence[Catalog|Path|str],output: Path
             'source_identities':[asdict(cat.identity) for cat in catalogs],'merged':merged,
             'source_locations':[{'identity':asdict(cat.identity),'path':os.path.relpath(cat.root,ds.root)} for cat in catalogs],
             'semantics':{'observation':'recorded measured model rad' if contract else 'unverified explicit projection','action':'recorded joint target, not separately measured applied telemetry' if contract else 'unverified explicit projection','timestamp':'official relative clock; original in source.timestamp'},'independent':independent})
-        return publish(ds,output)
+        return publish(ds,output,checkpoint=checkpoint)
     finally:ds.finalize()
+
+
+class _ConversionCancelled(Exception):
+    """Only an explicit owned R03 Cancel produces a cancelled Stage result."""
 
 
 def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callable[[],Iterable[dict]]) -> 'StageResult':
@@ -401,14 +463,20 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
     from ..recipe import verify_prepared_inputs,_plain
     from ..run import StageResult
     verify_prepared_inputs(plan)
-    for command in commands():
-        if command['kind']=='cancel':
-            events({'kind':'command_ack','payload':{'command_id':command['command_id'],'status':'completed'}})
-            return StageResult('cancelled',(),0,{})
+    def checkpoint():
+        for command in commands():
+            if command['kind']=='cancel':
+                raise _ConversionCancelled(command['command_id'])
     task=plan.effective_settings['execution'].get('task_instruction')
-    if plan.stage=='merge':
-        output=merge([row['path']for row in plan.resolved_inputs['datasets']],plan.output_path,task=task)
-    else:
-        mapping=_plain(plan.input_documents.get('feature_mapping'))
-        output=materialize(plan.resolved_inputs['dataset']['path'],plan.output_path,feature_map=mapping,task=task)
+    try:
+        checkpoint()
+        if plan.stage=='merge':
+            output=merge([row['path']for row in plan.resolved_inputs['datasets']],plan.output_path,task=task,checkpoint=checkpoint)
+        else:
+            mapping=_plain(plan.input_documents.get('feature_mapping'))
+            output=materialize(plan.resolved_inputs['dataset']['path'],plan.output_path,feature_map=mapping,task=task,checkpoint=checkpoint)
+    except _ConversionCancelled as cancelled:
+        # materialize's finally has closed the official writers before this ACK.
+        events({'kind':'command_ack','payload':{'command_id':cancelled.args[0],'status':'completed'}})
+        return StageResult('cancelled',(),0,{})
     return StageResult('completed',(str(output),),0,{'official_dataset':str(output)})

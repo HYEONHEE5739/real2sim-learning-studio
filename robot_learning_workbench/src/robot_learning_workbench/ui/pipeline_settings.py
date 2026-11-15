@@ -39,7 +39,7 @@ class PipelineSettings(QWidget):
             button=QPushButton(LABELS[key]);button.clicked.connect(lambda _,k=key:self.choose_input(k));inputs.addWidget(button,index//2,index%2);self.selectors[key]=button
         self.load_button=QPushButton('Recipe 불러오기');box.addWidget(self.load_button);self.load_button.clicked.connect(self.choose_script)
         self.script_path=QLineEdit();self.script_path.setReadOnly(True);self.script_path.setPlaceholderText('아직 저장하지 않은 Script');box.addWidget(self.script_path)
-        self.editor=RecipeEditor();self.editor.label.hide();self.editor.text.setMinimumHeight(240)
+        self.editor=RecipeEditor(self);self.editor.label.hide();self.editor.text.setMinimumHeight(240)
         self.editor.text.setStyleSheet('QPlainTextEdit { background: #f4f5f8; color: #172030; selection-background-color: #a9cced; font-family: monospace; padding: 8px; }')
         self.editor.text.setPlainText(default_script(stage,self.workspace,engine.currentText()));box.addWidget(self.editor,1)
         self.save_button=QPushButton('저장 및 적용');self.save_button.setObjectName('primaryAction');box.addWidget(self.save_button);self.save_button.clicked.connect(self.save_and_apply)

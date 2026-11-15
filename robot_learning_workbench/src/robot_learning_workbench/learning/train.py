@@ -6,7 +6,7 @@ import os,sys,re,time,subprocess,signal
 from pathlib import Path
 from ..data.native import DataError,atomic_json,load_catalog,DatasetIdentity,read_json
 from ..data.lerobot import _pinned,control_contract
-from .policy import checkpoint_record,seal_checkpoint
+from .policy import checkpoint_record,seal_checkpoint,_training_config,_resolved_request,_resume_config_matches
 
 
 def validate_config(config: dict,*,dataset: Path,output: Path,mode: str) -> None:
@@ -55,8 +55,7 @@ def training_command(plan) -> tuple[list[str],dict]:
         if config['policy']['type']=='smolvla':
             from .smol_compat import identity
             if record.get('smol_compatibility')!=identity():raise DataError('RESUME_INCOMPATIBLE','smol_compatibility','Pinned loss patch identity differs or missing')
-        old=record['config'];allowed={'steps','output_dir','resume'}
-        if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in config.items() if k not in allowed}:raise DataError('RESUME_INCOMPATIBLE','config','Only cumulative steps/new output/resume may change')
+        if not _resume_config_matches(record['config'],config,resolved=record.get('resolved_config'),checkpoint=root):raise DataError('RESUME_INCOMPATIBLE','config','Only cumulative steps/new output/resume and official defaults may change')
         if config['steps']<=record['step']:raise DataError('RESUME_INCOMPATIBLE','steps','New cumulative step target required')
         args[-1]='--config_path='+str(root/'pretrained_model/train_config.json')
         args+=['--resume=true','--output_dir='+str(plan.output_path),'--steps='+str(config['steps'])]
@@ -110,12 +109,13 @@ def train(plan,*,events,commands):
     dataset_identity=vars(load_catalog(plan.resolved_inputs['dataset']['path']).identity)
     args=freeze_inputs(plan,args,config)
     # Validate through official parser before starting any optimization process.
-    from lerobot.policies import factory
-    from lerobot.configs.train import TrainPipelineConfig
-    parsed=TrainPipelineConfig.from_pretrained(Path(next(a.split('=',1)[1] for a in args if a.startswith('--config_path='))),local_files_only=True)
-    parsed.policy.validate_features() if parsed.policy.input_features else None
+    config_path=Path(next(a.split('=',1)[1] for a in args if a.startswith('--config_path=')))
+    effective=read_json(config_path)
+    if config.get('resume'):effective.update(resume=True,steps=config['steps'],output_dir=config['output_dir'])
+    resolved=_training_config(effective,config_path=config_path,features=True)
+    if resolved!=_resolved_request(config,config_path=config_path,features=True):raise DataError('TRAIN_CONFIG_INVALID','config','Frozen checkpoint and requested training semantics differ')
     log=plan.output_path.with_name(plan.output_path.name+'.official.log');intent=plan.output_path.with_name(plan.output_path.name+'.training-intent.json')
-    atomic_json(intent,{'argv':args,'config':config,'recipe_sha256':plan.recipe_sha256,'dataset':dict(plan.resolved_inputs['dataset'])},exclusive=True)
+    atomic_json(intent,{'argv':args,'config':config,'resolved_config':resolved,'recipe_sha256':plan.recipe_sha256,'dataset':dict(plan.resolved_inputs['dataset'])},exclusive=True)
     env=os.environ.copy();env.update(HF_HUB_OFFLINE='1',HF_DATASETS_OFFLINE='1',TRANSFORMERS_OFFLINE='1',WANDB_MODE='disabled',TOKENIZERS_PARALLELISM='false')
     if config['policy'].get('device')=='cpu':env['ACCELERATE_USE_CPU']='true'
     cancelled=False;offset=0;metrics=[];nonfinite=False;checkpoints=[];peak_rss_kib=0;started=time.perf_counter()
@@ -125,7 +125,7 @@ def train(plan,*,events,commands):
         cutoff=last.resolve()
         for folder in sorted(folders.glob('[0-9]*')):
             if folder.name>cutoff.name or (maximum is not None and int(folder.name)>maximum) or (folder/'workbench-checkpoint.json').exists():continue
-            record=seal_checkpoint(folder,dataset=plan.resolved_inputs['dataset']['path'],config=config,recipe_sha256=plan.recipe_sha256,expected_dataset=dataset_identity)
+            record=seal_checkpoint(folder,dataset=plan.resolved_inputs['dataset']['path'],config=config,recipe_sha256=plan.recipe_sha256,expected_dataset=dataset_identity,resolved_config=resolved)
             checkpoints.append({'path':str(folder),'step':record['step']})
     with log.open('xb',buffering=0) as stream:
         process=subprocess.Popen(args,stdout=stream,stderr=subprocess.STDOUT,env=env,start_new_session=True)
@@ -167,7 +167,7 @@ def train(plan,*,events,commands):
     for folder in sorted((plan.output_path/'checkpoints').glob('[0-9]*')):
         if folder.is_dir():
             if (folder/'workbench-checkpoint.json').exists():continue
-            try:record=seal_checkpoint(folder,dataset=plan.resolved_inputs['dataset']['path'],config=config,recipe_sha256=plan.recipe_sha256,expected_dataset=dataset_identity)
+            try:record=seal_checkpoint(folder,dataset=plan.resolved_inputs['dataset']['path'],config=config,recipe_sha256=plan.recipe_sha256,expected_dataset=dataset_identity,resolved_config=resolved)
             except (OSError,ValueError):
                 if code==0 and not cancelled:raise
                 continue

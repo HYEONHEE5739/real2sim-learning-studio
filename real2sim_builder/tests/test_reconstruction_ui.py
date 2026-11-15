@@ -151,7 +151,12 @@ ui.runtime_needs=lambda config,**kwargs:[]
 commands=[];d.start_cli=lambda args:commands.append(args)
 d.launch();assert '--run-modeling'in commands[0] and '--candidate'in commands[0]
 assert read(Path(commands[0][commands[0].index('--config')+1]))['candidate']==d.candidate.text()
-d.refit=True;d.launch();assert commands[1][0]=='refit-pairs'
+identity={'scene_id':'source','revision':'rev','manifest_sha256':'a'*64}
+evidence=p.evidence;evidence['images']=[{'id':'pair_side','snapshot_id':'chosen','scene_state_id':'layout',
+ 'runtime_baseline':{'scene_identity':identity,'workspace_context':{'content_sha256':'a'*64}}}]
+write(p.root/'input/evidence.yaml',evidence)
+d.refit=True;d.capture_ids=['chosen'];d.source_identity=identity;d.launch();assert commands[1][0]=='refit-pairs'
+assert read(Path(commands[1][commands[1].index('--config')+1]))['refit_capture_ids']==['chosen']
 assert read(p.root/'working/control.json')if (p.root/'working/control.json').exists()else True
 d.close()
 ''')
@@ -207,12 +212,15 @@ def test_pair_screen_uses_latest_saved_layout_and_resumes_its_candidate(tmp_path
 from real2sim_builder.candidate import Candidate
 c=Candidate.create(p,'earlier');p.update(candidate='earlier')
 write(p.root/'input/reconstruction.yaml',{'candidate':'earlier','scene_state_id':'old'})
-evidence=p.evidence;evidence['images']=[{'scene_state_id':'new','runtime_baseline':{'revision':'rev'}}];write(p.root/'input/evidence.yaml',evidence)
-d=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
+# The latest layout is still usable when its Capture is explicitly selected.
+identity={'scene_id':'source','revision':'rev','manifest_sha256':'a'*64}
+evidence=p.evidence;evidence['images']=[{'id':'pair_side','snapshot_id':'latest','scene_state_id':'new',
+ 'runtime_baseline':{'scene_identity':identity,'workspace_context':{'content_sha256':'a'*64}}}];write(p.root/'input/evidence.yaml',evidence)
+d=ui.ReconstructionDialog(p.root,sys.executable,refit=True,capture_ids=['latest'])
 name=d.candidate.text();assert name!='earlier'and d.configuration()['scene_state_id']=='new'
-c=Candidate.create(p,name);info=c.info;info['source_revision']='rev';write(c.root/'candidate.json',info)
+c=Candidate.create(p,name);info=c.info;info['source_revision']={'identity':identity};write(c.root/'candidate.json',info)
 scene=c.scene;scene['reconstruction_state']={'id':'new'};write(c.root/'candidate_scene.yaml',scene);p.update(candidate=name)
-d.close();again=ui.ReconstructionDialog(p.root,sys.executable,refit=True)
+d.close();again=ui.ReconstructionDialog(p.root,sys.executable,refit=True,capture_ids=['latest'])
 assert again.candidate.text()==name
 again.close()
 ''')

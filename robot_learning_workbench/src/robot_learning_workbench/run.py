@@ -92,6 +92,8 @@ class RunStatus:
     progress:object
     last_event_seq:int
     error:object=None
+    exit_code:int|None=None
+    process_error:object=None
 
 
 @dataclass(frozen=True)
@@ -127,27 +129,43 @@ def _worker_identity():
 
 def read_status(run_dir):
     path=Path(run_dir);data=_read(path/'run.json');error=data.get('error');status=data['status'];phase=data['phase']
+    exit_code=None;process_error=None
+    if (path/'process_exit.json').is_file():
+        try:
+            observed=_read(path/'process_exit.json')
+            if not isinstance(observed,dict) or type(observed.get('exit_code')) is not int:raise ValueError('unobserved exit')
+            exit_code=observed['exit_code']
+            if exit_code!=0:process_error={'code':'WORKER_EXIT_NONZERO','message':f'worker process exited with {exit_code}'}
+        except (RunError,ValueError):process_error={'code':'WORKER_EXIT_UNKNOWN','message':'worker process exit record is incomplete/invalid'}
     identity=data.get('worker_identity')
     spawn=_read(path/'spawn.json') if (path/'spawn.json').is_file() else {}
     if identity is None:identity=spawn.get('process_identity')
     if status not in ('completed','cancelled','failed') and identity is None and spawn.get('identity_unobservable'):
-        return RunStatus('unknown','unknown',data.get('progress',{}),data.get('last_event_seq',0),{'code':'RUN_STATE_UNKNOWN','message':'spawned process identity was not observable','effect':'unknown','issues':[]})
+        return RunStatus('unknown','unknown',data.get('progress',{}),data.get('last_event_seq',0),{'code':'RUN_STATE_UNKNOWN','message':'spawned process identity was not observable','effect':'unknown','issues':[]},exit_code,process_error)
     if status not in ('completed','cancelled','failed') and identity:
         try:
             raw=Path(f"/proc/{identity['pid']}/stat").read_text().rsplit(')',1)[1].split()
             alive=raw[0]!='Z' and raw[19]==identity['start_ticks'] and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==identity['boot_id']
         except (OSError,KeyError,IndexError):alive=False
         if not alive:status='unknown';phase='unknown';error={'code':'RUN_STATE_UNKNOWN','message':'worker identity no longer observable','effect':'unknown','issues':[]}
-    return RunStatus(status,phase,data.get('progress',{}),data.get('last_event_seq',0),error)
+    return RunStatus(status,phase,data.get('progress',{}),data.get('last_event_seq',0),error,exit_code,process_error)
 
 
-def _monitor(process,run_dir):
+def _monitor(process,run_dir,*,execution_child=True):
     code=process.wait()
     try:
         current=_read(run_dir/'run.json')
+        # A starter also reaps its launcher. Only the actual execution PID may
+        # supply worker exit metadata (including direct legacy/test launches).
+        if not execution_child and current.get('worker_identity',{}).get('pid')!=process.pid:return code
         if current['status'] not in ('completed','cancelled','failed'):
             _status(run_dir,'failed','terminal',error={'code':'WORKER_EXITED','message':f'worker exited with {code} before terminal record','issues':[],'effect':'unknown'})
-    except (RunError,OSError):pass
+    except (RunError,OSError):
+        if not execution_child:return code
+    # Shutdown is a separate fact; never rewrite a published terminal task result.
+    if type(code) is int:
+        _atomic(run_dir/'process_exit.json',{'exit_code':code,'pid':process.pid,'observed_at_ns':time.time_ns()})
+    return code
 
 
 def start(request,*,run_root=None):
@@ -202,15 +220,16 @@ def start(request,*,run_root=None):
         wire=WorkerRequest(req,run_id,run_dir,sys.executable,uuid.uuid4().hex);_atomic(run_dir/'worker_request.json',_plain(wire))
         info['worker_request_sha256']=_sha((run_dir/'worker_request.json').read_bytes());_atomic(claim,info)
         with (run_dir/'stdout.log').open('ab',buffering=0) as log:
-            process=subprocess.Popen([sys.executable,'-B','-m','robot_learning_workbench.cli','worker',str(run_dir)],env=_worker_environment(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,close_fds=True)
-        spawn={'worker_token':wire.worker_token,'process_spawn_returned':True}
+            process=subprocess.Popen([sys.executable,'-B','-m','robot_learning_workbench.cli','worker','--monitor',str(run_dir)],env=_worker_environment(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,close_fds=True)
+        spawn={'worker_token':wire.worker_token,'process_spawn_returned':True,'exit_monitored':True}
         if type(getattr(process,'pid',None)) is int:
             try:
                 stat=Path(f'/proc/{process.pid}/stat').read_text().rsplit(')',1)[1].split()
                 spawn['process_identity']={'pid':process.pid,'start_ticks':stat[19],'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
             except OSError:spawn['identity_unobservable']=True
         _atomic(run_dir/'spawn.json',spawn)
-        if hasattr(process,'wait'):threading.Thread(target=_monitor,args=(process,run_dir),daemon=True).start()
+        # The existing CLI worker owns the exit monitor; this starter may exit first.
+        if hasattr(process,'wait'):threading.Thread(target=_monitor,args=(process,run_dir),kwargs={'execution_child':False},daemon=True).start()
         return RunHandle(run_id,req.request_id,run_dir)
     except Exception as exc:
         _status(run_dir,'failed','terminal',error=_error(exc,'not_started'));raise
@@ -354,7 +373,7 @@ def touch_session(handle,timestamp_ns):
     _atomic(root/'session-heartbeat.json',{'run_id':handle.run_id,'timestamp_ns':timestamp_ns})
 
 
-def _poll_commands(root,state,stage):
+def _poll_commands(root,state,stage,*,plan=None):
     with (root/'control.lock').open('a+b') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         rows=[]
@@ -368,6 +387,14 @@ def _poll_commands(root,state,stage):
     if stage in('scene_capture','capture_session','paired_session'):allowed|=set(_SESSION_COMMANDS)
     if stage=='precision_session':allowed|=set(_PRECISION_COMMANDS)|{'session_disconnect','session_finish'}
     if stage=='sdk_calibration':allowed.add('calibration_response')
+    if plan is not None and plan.stage==stage and stage in('teleoperation','real_evaluation'):
+        opts=plan.effective_settings['execution'];device=plan.input_documents.get('device_profile',{})
+        if (opts.get('mode')=='gripper_once'and not opts.get('enable_motion')and plan.scene is not None
+                and isinstance(device.get('command_calibration_id'),str)and device['command_calibration_id']
+                and type(opts.get('max_gripper_delta_raw'))is int and opts['max_gripper_delta_raw']>0):
+            # Dispatch only. The runner still validates the current proposal,
+            # exact command mapping, device TTL and one-shot hardware capability.
+            allowed.add('gripper_approve')
     for row in rows:
         if type(row.get('protocol_version')) is not int or row['protocol_version']!=1 or row.get('run_id')!=root.name or type(row.get('seq')) is not int or row['seq']<1:_fail('PROTOCOL_INVALID','command','stream identity/sequence mismatch')
         command=_command(row['payload']);cid=command['command_id']
@@ -459,7 +486,7 @@ def execute(request,*,_runner=None):
     def events(event):
         with lock:return _stage_event(root,state,event)
     def commands():
-        with lock:return _poll_commands(root,state,request.request.expected_stage)
+        with lock:return _poll_commands(root,state,request.request.expected_stage,plan=plan)
     try:
         from .recipe import _parse_recipe,prepare_recipe
         raw=request.request.recipe_path.read_bytes()

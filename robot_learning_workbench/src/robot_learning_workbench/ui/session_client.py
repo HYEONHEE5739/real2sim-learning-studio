@@ -1,5 +1,5 @@
 """Qt presentation of the existing R03 lifecycle and explicit session commands."""
-import time,uuid
+import json,time,uuid
 from pathlib import Path
 from PyQt6.QtCore import QObject,QTimer,pyqtSignal
 from .jobs import BackendJob
@@ -13,6 +13,7 @@ class SessionClient(QObject):
     error=pyqtSignal(str)
     def __init__(self,python,modules,parent=None):
         super().__init__(parent);self.modules=str(modules);self.handle=None;self.busy=False;self.running=False;self.phase=None;self.cursor=0;self.generations={};self.heartbeat=0;self.cancel_requested=False
+        self.exit_pending=None
         self.job=BackendJob(python,self);self.job.finished.connect(self.done);self.job.log.connect(self.error)
         self.timer=QTimer(self);self.timer.setInterval(80);self.timer.timeout.connect(self.poll);self.timer.start()
     def active(self):return self.busy or self.running
@@ -30,7 +31,7 @@ class SessionClient(QObject):
             if not result.get('runnable'):self.error.emit(result['reason']);self.terminal.emit('failed');return
             self.start_prepared(self.path,result)
         elif self.phase=='start':
-            self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0
+            self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0;self.exit_pending=None
             if self.cancel_requested:self.send('cancel')
     def start_prepared(self,path,prepared):
         if self.active():raise ValueError('기존 실행 종료를 기다리세요')
@@ -50,17 +51,28 @@ class SessionClient(QObject):
         send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
         return key
     def poll(self):
-        if not self.running:return
+        if not self.running and self.exit_pending is None:return
         from ..run import read_status,read_events,read_preview_frame
         try:
-            status=read_status(self.handle['run_dir']).status
+            observed=read_status(self.handle['run_dir']if self.running else self.exit_pending)
+            if not self.running:
+                if observed.exit_code is not None or observed.process_error:
+                    self.exit_pending=None
+                    if observed.process_error:self.error.emit('작업 '+observed.status+' · '+observed.process_error['message'])
+                return
+            status=observed.status
             if status in('completed','failed','cancelled','unknown'):
                 # Drain final saved-snapshot/ACK events before publishing terminal.
                 while self.read_events():pass
                 if status=='unknown':
                     import shutil
                     shutil.rmtree(Path(self.handle['run_dir'])/'preview',ignore_errors=True)
-                self.running=False;self.terminal.emit(status);return
+                self.running=False;self.terminal.emit(status)
+                if observed.process_error:self.error.emit('작업 '+status+' · '+observed.process_error['message'])
+                elif observed.exit_code is None and status!='unknown':
+                    spawn=Path(self.handle['run_dir'])/'spawn.json'
+                    if spawn.is_file() and json.loads(spawn.read_text()).get('exit_monitored'):self.exit_pending=self.handle['run_dir']
+                return
             now=time.monotonic_ns()
             if self.stage in('scene_capture','capture_session','paired_session','precision_session')and now-self.heartbeat>400_000_000:
                 from ..run import RunHandle,touch_session
@@ -72,7 +84,9 @@ class SessionClient(QObject):
                     meta,raw=frame
                     if self.generations.get(camera)!=meta['generation']:
                         self.generations[camera]=meta['generation'];self.preview.emit(camera,raw)
-        except Exception as error:self.error.emit(str(error))
+        except Exception as error:
+            if not self.running:self.exit_pending=None
+            self.error.emit(str(error))
     def read_events(self):
         from ..run import read_events
         page=read_events(self.handle['run_dir'],self.cursor,200);self.cursor=page.next_seq

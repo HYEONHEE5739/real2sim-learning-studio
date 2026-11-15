@@ -9,6 +9,70 @@ from ..data.lerobot import control_contract,_pinned
 from ..robot.calibration import JOINTS
 
 
+def _training_config(config,*,config_path=None,validate=True,features=False):
+    """Official0.4.1 config semantics, without constructing a Policy/Trainer.
+
+    validate() consults argv for Resume. Scope that context to our owned input,
+    restoring it even on errors. Historical sealing must not try to create or
+    reject the already-existing run output: only validate against a temporary
+    nonexistent output, then retain the declared output in the returned config.
+    """
+    _pinned()
+    import sys,tempfile,json
+    from lerobot.policies import factory
+    from lerobot.configs.train import TrainPipelineConfig
+    with tempfile.TemporaryDirectory(prefix='workbench-train-config-')as directory:
+        path=Path(directory)/'train_config.json';path.write_text(json.dumps(config,allow_nan=False))
+        parsed=TrainPipelineConfig.from_pretrained(path,local_files_only=True)
+        if validate:
+            context=Path(config_path)if config_path else Path(str(config['output_dir'])+'.resume-input')/'pretrained_model/train_config.json'
+            previous=sys.argv;output=parsed.output_dir
+            try:
+                sys.argv=['lerobot_train','--config_path='+str(context)]
+                parsed.output_dir=Path(directory)/'output'
+                parsed.validate()
+            finally:sys.argv=previous;parsed.output_dir=output
+        supplied_features=bool(parsed.policy.input_features)
+        if features:
+            from lerobot.datasets.utils import dataset_to_policy_features
+            from lerobot.configs.types import FeatureType
+            available=dataset_to_policy_features(read_json(Path(parsed.dataset.root)/'meta/info.json')['features'])
+            if not parsed.policy.output_features:parsed.policy.output_features={k:v for k,v in available.items()if v.type is FeatureType.ACTION}
+            if not parsed.policy.input_features:parsed.policy.input_features={k:v for k,v in available.items()if k not in parsed.policy.output_features}
+            if supplied_features:parsed.policy.validate_features()
+        return parsed.to_dict()
+
+
+def _resolved_request(config,*,config_path=None,features=False):
+    """Normalize requested presets, then apply only official Resume relocation."""
+    if not config.get('resume'):return _training_config(config,features=features)
+    import copy
+    scratch=copy.deepcopy(config);scratch.update(resume=False,checkpoint_path=None)
+    normalized=_training_config(scratch)
+    normalized['resume']=True
+    return _training_config(normalized,config_path=config_path,features=features)
+
+
+def _resume_config_matches(old,new,*,resolved=None,checkpoint=None):
+    """Allow only official defaults plus cumulative steps/output/resume changes."""
+    import copy
+    left=copy.deepcopy(old);right=copy.deepcopy(new)
+    # A UI may load either the original request or the previous resolved JSON.
+    # Only the previously bound path is equivalent; arbitrary new weights fail.
+    previous=(resolved or{}).get('policy',{}).get('pretrained_path')
+    relocations={str(path)for path in (previous,Path(checkpoint)/'pretrained_model'if checkpoint else None)if path is not None}
+    if right.get('policy',{}).get('pretrained_path')in relocations:
+        right['policy']['pretrained_path']=left.get('policy',{}).get('pretrained_path')
+    # Compare parser defaults, not literal key presence. Validate the scratch
+    # projection of each request so null presets become official defaults.
+    for doc in (left,right):doc.update(output_dir='unused',resume=False,checkpoint_path=None,steps=1)
+    canonical=_training_config(left,features=True)
+    requested=_training_config(right,validate=False)
+    for key in ('optimizer','scheduler'):
+        if right.get(key)is not None and requested[key]!=canonical[key]:return False
+    return canonical==_training_config(right,features=True)
+
+
 def action_queue_depth(policy: object) -> int | None:
     """Known official ACT/SmolVLA/Diffusion queues; unknown is not empty."""
     queue=getattr(policy,'_action_queue',None)
@@ -80,10 +144,12 @@ def checkpoint_record(path: Path|str,*,expected: str|None=None) -> dict:
     for name,sha in record['files'].items():
         p=root/name
         if not p.resolve().is_relative_to(root) or not p.is_file() or file_sha256(p)!=sha:raise DataError('CHECKPOINT_INTEGRITY_MISMATCH',name,'Saved checkpoint bytes changed/missing')
+    step=read_json(root/'training_state/training_step.json')['step']
+    if type(step)is not int or step<=0 or type(record.get('step'))is not int or step!=record['step']:raise DataError('CHECKPOINT_INTEGRITY_MISMATCH','step','Sealed record and official training step differ')
     return record
 
 
-def seal_checkpoint(path: Path|str,*,dataset,config: dict,recipe_sha256: str,expected_dataset: dict|None=None) -> dict:
+def seal_checkpoint(path: Path|str,*,dataset,config: dict,recipe_sha256: str,expected_dataset: dict|None=None,resolved_config: dict|None=None) -> dict:
     """Called only after official child closes; never append to source checkpoints."""
     root=Path(path);policy=root/'pretrained_model';state=root/'training_state'
     required=[policy/'model.safetensors',policy/'config.json',policy/'train_config.json',policy/'policy_preprocessor.json',policy/'policy_postprocessor.json',state/'training_step.json',state/'optimizer_state.safetensors',state/'optimizer_param_groups.json',state/'rng_state.safetensors']
@@ -97,14 +163,30 @@ def seal_checkpoint(path: Path|str,*,dataset,config: dict,recipe_sha256: str,exp
                 if any(not torch.isfinite(tensors.get_tensor(key)).all() for key in tensors.keys()):raise ValueError('Nonfinite checkpoint tensors')
         except Exception as error:raise DataError('CHECKPOINT_INCOMPLETE',str(p),'Invalid/nonfinite official tensor file') from error
     step=read_json(state/'training_step.json')['step']
+    if type(step)is not int or not 0<step<=config['steps']:raise DataError('CHECKPOINT_INCOMPLETE','step','Positive saved step within the requested cumulative target required')
     saved=read_json(policy/'train_config.json')
-    def compare(wanted,actual):
-        if isinstance(wanted,dict):return isinstance(actual,dict) and all(key in actual and compare(value,actual[key]) for key,value in wanted.items())
-        return wanted==actual
-    if not compare(config,saved):raise DataError('CHECKPOINT_INCOMPLETE','config','Official saved configuration differs from declared training request')
+    resolved=_resolved_request(config)if resolved_config is None else resolved_config
+    if resolved_config is not None and _resolved_request(config,features=True)!=resolved_config:
+        raise DataError('CHECKPOINT_INCOMPLETE','config','Resolved configuration changes the declared training semantics')
+    if resolved.get('scheduler')is not None and not(state/'scheduler_state.json').is_file():raise DataError('CHECKPOINT_INCOMPLETE','scheduler','Official scheduler state missing')
+    actual=_training_config(saved,validate=False)
+    # Do not validate the saved optimizer again: the preset would overwrite
+    # tampered values and hide a real training-semantics mismatch.
+    expected_features=_training_config(resolved,validate=False,features=True)
+    legacy=_training_config(config,validate=False)
+    accepted=(resolved,)
+    if resolved_config is None:
+        accepted+=(expected_features,)
+        # Historical partial configs may omit display/default feature fields,
+        # but an unresolved/null optimizer cannot stand in for the preset.
+        if all(legacy[key]==resolved[key]for key in ('optimizer','scheduler')):accepted+=(legacy,)
+    if actual not in accepted:raise DataError('CHECKPOINT_INCOMPLETE','config','Official saved configuration differs from resolved training request')
+    for key in ('optimizer','scheduler'):
+        if config.get(key)is not None and legacy[key]!=actual[key]:raise DataError('CHECKPOINT_INCOMPLETE',key,'Explicit optimizer/scheduler differs from saved configuration')
     files={p.relative_to(root).as_posix():file_sha256(p) for p in root.rglob('*') if p.is_file() and not p.is_symlink() and p.name!='workbench-checkpoint.json'}
     catalog=load_catalog(dataset,expected=DatasetIdentity(**expected_dataset) if expected_dataset else None)
-    record={'schema_version':1,'complete':True,'step':step,'files':files,'dataset_identity':vars(catalog.identity),'dataset_path':str(catalog.root),'control_contract':control_contract(catalog),'config':config,'recipe_sha256':recipe_sha256}
+    if Path(resolved['dataset']['root']).resolve()!=catalog.root:raise DataError('CHECKPOINT_INCOMPLETE','dataset','Resolved training Dataset and checkpoint identity differ')
+    record={'schema_version':1,'complete':True,'step':step,'files':files,'dataset_identity':vars(catalog.identity),'dataset_path':str(catalog.root),'control_contract':control_contract(catalog),'config':config,'resolved_config':resolved,'recipe_sha256':recipe_sha256}
     if config.get('policy',{}).get('type')=='smolvla':
         from .smol_compat import identity
         record['smol_compatibility']=identity()
@@ -146,6 +228,13 @@ def load_policy(path: Path|str,*,expected: str|None=None,device: str='cpu'):
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import make_pre_post_processors,get_policy_class
     cfg=PreTrainedConfig.from_pretrained(folder,local_files_only=True)
+    import torch
+    requested=torch.device(device)
+    if requested.type=='cuda'and(not torch.cuda.is_available()or requested.index is not None and requested.index>=torch.cuda.device_count()):
+        raise ValueError('Requested CUDA device is unavailable: '+str(requested))
+    if requested.type=='mps'and not torch.backends.mps.is_available():raise ValueError('Requested MPS device is unavailable')
+    device=str(requested)
+    cfg.device=device
     # Official config argument avoids redundant backbone downloads; all trained
     # parameters are then restored from the local model.safetensors.
     if config['type']=='smolvla':
@@ -204,4 +293,3 @@ def policy_inputs(plan,urdf_sha256):
     features={'observation.state':(6,),**{'observation.images.'+n:(3,480,640) for n in ('side','wrist')}}
     if {k:tuple(v.shape) for k,v in policy.config.input_features.items()}!=features or tuple(policy.config.output_features['action'].shape)!=(6,):raise DataError('POLICY_INCOMPATIBLE','features','Policy features differ from actual live inputs')
     return policy,pre,post,record,contract
-

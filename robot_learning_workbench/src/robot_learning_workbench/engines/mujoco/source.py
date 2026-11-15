@@ -108,7 +108,7 @@ def execution_contract(plan,b,cfg):
     model_config=asdict(cfg)
     if not plan.scene.scene['robot'].get('bindings',{}).get('mujoco',{}).get('asset_path'):
         for key in('eef_site','robot_base_body','finger_bodies'):model_config.pop(key)
-    return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='mujoco',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),
+    return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),**({'source_functions':{k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}}if any(b.kind!='placement'for b in plan.function_bindings.values())else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='mujoco',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),
         model_sha256=b.model_sha256,urdf_sha256=b.urdf_sha256,active_objects=list(b.dynamic_objects),partition='unpartitioned',
         task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={Path(k).name:v for k,v in plan.effective_settings['code_files'].items()},
         recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(JOINTS),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',
@@ -203,9 +203,6 @@ def run(plan,*,events,commands,leader=None):
     frames=max(1,int(np.ceil(opts['episode_time_s']*30)))
     model,b=build_model(plan.scene,cfg);data=mujoco.MjData(model);restore_episode(model,data,b,None)
     execution=execution_contract(plan,b,cfg)
-    if any(b.kind!='placement'for b in plan.function_bindings.values()):
-        from ...recipe import _plain
-        execution['source_functions']={k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}
     execution.update(episodes=opts['episodes'],episode_time_s=opts['episode_time_s'],reset_time_s=opts['reset_time_s'],device_identity=dict(plan.resolved_inputs['device_profile']))
     previous=plan.resolved_inputs.get('resume_dataset');owner=None;device=leader;cancelled=False
     try:

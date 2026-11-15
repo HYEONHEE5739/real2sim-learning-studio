@@ -364,7 +364,10 @@ def fit_scene(project,scene,folder,options=None):
             error.best_scene=best  # Caller can retain the accepted Candidate on Stop.
             report.update(status='STOPPED'if isinstance(error,InterruptedError)else'FAILED',error=str(error),stop_reason='user_stop'if isinstance(error,InterruptedError)else'invalid_scene_or_render_failure')
             write(folder/'report.json',{**report,'before':baseline,'after':best_metrics,'history':history,'best_loss':best_loss});raise
-        held=measure(best,best_scales,[key for key in all_ids if key not in train_ids])
+        held_ids=[key for key in all_ids if key not in train_ids]
+        from ..observations import _record_holdout_usage
+        _record_holdout_usage(project,[i for i in images if i['id']in held_ids],scene,'render_fit_diagnostics')
+        held=measure(best,best_scales,held_ids)
     # Refresh derived World points and camera dependency hashes once, after the
     # final accepted state. The raw observations and source frames are immutable.
     best=reproject_observations(project,best,best_scales,folder/'observations')
@@ -404,7 +407,8 @@ def reproject_observations(project,scene,scales,folder):
         if sha(source)!=row['sha256']:raise ValueError('Source optical observation changed')
         with np.load(source,allow_pickle=False)as data:raw={k:v.copy()for k,v in data.items()}
         if 'points_camera_relative'not in raw:
-            if row.get('render_only')and row.get('dependencies'):
+            if (row.get('render_only')or row.get('geometry_binding')=='fixed_world')and row.get('dependencies'):
+                # Anchor-registered World samples stay fixed after Camera fitting.
                 row['dependencies']['camera_signature']=camera_calibration_signature(result,next(c for c in result['cameras']if c['id']==image['camera']))
             continue
         posed=observation_scene(result,image,project.root,complete=False);cam=next(c for c in posed['cameras']if c['id']==image['camera'])
@@ -434,6 +438,8 @@ def alignment_metrics(project,scene,folder,options=None):
     from ..scene import local_path,world_pose,validate
     from ..files import write
     options=options or{};rows=cloud_inputs(project,scene);images,state,needs=registered_images(project,scene=scene)
+    from ..observations import _record_holdout_usage
+    _record_holdout_usage(project,images,scene,'alignment_metrics')
     result=[];models={}
     with render_views(options.get('renderer_factory',Renderer),project.root,folder/'native',project.evidence['images'],options.get('renderer','software-egl'))as render_view:
         for image in images:
@@ -469,7 +475,9 @@ def alignment_metrics(project,scene,folder,options=None):
                 result.append({'image_id':image['id'],'image':image['path'],'camera':image['camera'],'camera_type':camera_type(image),'q_measured':image.get('q_measured'),'split':image['split'],**metrics,'objects':objects,
                     'comparison_scope':scope,'use_for_best_selection':scope=='full_scene','render_context':context})
     report={'images':result,'scene_state_id':state,'needs':list(dict.fromkeys(needs)),
-            'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison','camera_quality':camera_quality(result,options.get('camera_quality'))}
+            'input_signature':project.signature(scene),'passed':False,'physics_steps':0,'scope':'common draft comparison',
+            'independent_verification':False,'final_independent_test':'NOT_RECORDED',
+            'camera_quality':camera_quality(result,options.get('camera_quality'))}
     write(folder/'metrics.json',report);return report
 
 

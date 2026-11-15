@@ -19,7 +19,7 @@ class WorkflowPage(QWidget):
         from .view import CameraView
         self.setStyleSheet(STYLE)
         self.stage=stage;self.workspace=Path(getattr(parent,'workspace',Path.cwd())).resolve();self.backend_python=python;self.modules=str(modules)
-        self.handle=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.stop_requested=False;self.cancel_command_id=None;self.cancel_queued=False;self.start_after_prepare=False;self.execution={};self.dataset_state='미확인';self.owned_runs=set()
+        self.handle=None;self.pending_step_id=None;self.after_seq=0;self.request_id=None;self.ready=None;self.busy=False;self.stop_requested=False;self.cancel_command_id=None;self.cancel_queued=False;self.start_after_prepare=False;self.execution={};self.dataset_state='미확인';self.owned_runs=set()
         titles={'annotation':'Annotation','datagen':'Mimic / Datagen','train':'모델 학습','hub_download':'Hub 다운로드','hub_upload':'Hub 업로드','simulation_evaluation':'Sim 평가','offline_validation':'Offline Validation','real_evaluation':'Real Evaluation'}
         self.heading=QLabel(titles[stage]);self.heading.setObjectName('dashboardTitle');self.heading.hide()
         outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0);outer.setSpacing(12)
@@ -138,6 +138,7 @@ class WorkflowPage(QWidget):
 
     def command(self,kind):
         if not self.handle or not self.active()or self.stop_requested:return
+        if kind=='step'and self.pending_step_id:return
         if kind=='mark' and not 0<self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1):
             self.log.appendPlainText('아직 재생하지 않은 frame은 표시할 수 없습니다');return
         from ..run import RunHandle,send_command
@@ -146,6 +147,8 @@ class WorkflowPage(QWidget):
             h=self.handle;context=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{}));command={'command_id':uuid.uuid4().hex,'kind':kind,'payload':payload}
             if 'episode_id' in context:command.update(episode_id=context['episode_id'],env_index=self.preview_env.value())
             receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
+            if kind=='step'and receipt.status not in ('completed','rejected'):
+                self.pending_step_id=command['command_id'];self.commands['step'].setEnabled(False)
             self.log.appendPlainText(kind+' 요청: '+receipt.status+' · 실제 적용 ACK는 로그로 확인')
         except Exception as error:self.log.appendPlainText(str(error))
 
@@ -164,7 +167,7 @@ class WorkflowPage(QWidget):
             if doc.sha256!=req.expected_recipe_sha256:raise ValueError('저장된 Run Script가 변경되었습니다.')
             if(doc.base_dir/doc.spec.output['directory']).resolve()!=req.output_path.resolve():raise ValueError('저장된 Run 출력 identity가 다릅니다.')
             status=read_status(path)
-            self.ready=None;self.stop_requested=status.phase=='stopping';self.cancel_command_id=None;self.cancel_queued=self.stop_requested
+            self.ready=None;self.pending_step_id=None;self.stop_requested=status.phase=='stopping';self.cancel_command_id=None;self.cancel_queued=self.stop_requested
             self.settings.restore_run_script(raw,doc.base_dir,snapshot);self.sync_execution(self.editor.data())
             self.context={};self.env_contexts={};self.handle={'run_id':wire.run_id,'request_id':req.request_id,'run_dir':str(path),'output_path':str(req.output_path)};self.after_seq=0;self.generations.clear()
             self.state.setText('기존 Run · '+status.status);self.buttons();self.poll()
@@ -219,7 +222,7 @@ class WorkflowPage(QWidget):
         elif self.operation=='terminal_catalog':
             self.log.appendPlainText('저장 결과 재개방 확인 · 완료 Episode '+str(len(data['inspection']['episodes']))+' / 미완료 intent '+str(len(data['inspection']['unresolved_source_intents'])))
         elif self.operation=='start':
-            self.handle=data;self.context={};self.env_contexts={};self.owned_runs.add(data['run_dir']);self.dataset_state='미확인';self.after_seq=0;self.generations.clear();self.operation=None
+            self.handle=data;self.pending_step_id=None;self.context={};self.env_contexts={};self.owned_runs.add(data['run_dir']);self.dataset_state='미확인';self.after_seq=0;self.generations.clear();self.operation=None
             if self.stop_requested:self.send_cancel()
             else:self.state.setText('worker 실행 중')
         self.operation=None;self.buttons()
@@ -255,12 +258,14 @@ class WorkflowPage(QWidget):
                     if 'env_index' in payload:
                         if not hasattr(self,'env_contexts'):self.env_contexts={}
                         self.env_contexts[payload['env_index']]=payload
-                if event['kind']=='command_ack':self.log.appendPlainText('실제 명령 ACK · '+json.dumps(payload,ensure_ascii=False))
+                if event['kind']=='command_ack':
+                    self.log.appendPlainText('실제 명령 ACK · '+json.dumps(payload,ensure_ascii=False))
+                    if payload.get('command_id')==self.pending_step_id and payload.get('status')in ('completed','rejected'):self.pending_step_id=None
                 if event['kind']=='error':self.log.appendPlainText(json.dumps(payload,ensure_ascii=False))
-            outcome=run_outcome({**record,'status':status.status});self.outcome=outcome
+            outcome=run_outcome({**record,'status':status.status,'exit_code':status.exit_code,'process_error':status.process_error});self.outcome=outcome
             terminal=outcome['worker_finished']or status.status=='unknown';self.progress_bar.setRange(0,1 if terminal else 0);self.progress_bar.setValue(1 if status.status=='completed'else 0);self.progress_bar.setFormat('Worker '+status.status)
             self.progress_text.setText('Episode '+str(outcome['completed_episodes'])+' · Attempt '+str(outcome['attempts']if outcome['attempts']is not None else'미집계')+' · Env '+str(self.context.get('env_index','—'))+' / tick '+str(self.context.get('tick','—'))+(' · 목표 미달'if outcome['goal_reached']is False else''))
-            for kind,button in self.commands.items():button.setEnabled(not self.stop_requested and not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.engine.currentText()!='isaaclab' or int(self.execution.get('env_num',self.execution.get('num_envs',1)))==1) and (kind!='mark' or (self.execution.get('mode')=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
+            for kind,button in self.commands.items():button.setEnabled(not self.stop_requested and not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.pending_step_id is None and (self.engine.currentText()!='isaaclab' or int(self.execution.get('env_num',self.execution.get('num_envs',1)))==1)) and (kind!='mark' or (self.execution.get('mode')=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
             if outcome['worker_finished'] or status.status=='unknown':
                 self.cancel_button.setEnabled(False)
                 if status.status=='unknown' and self.handle['run_dir'] in self.owned_runs:
@@ -273,7 +278,8 @@ class WorkflowPage(QWidget):
                 if getattr(self,'_preview_terminal_cleared',None)!=self.handle['run_id']:
                     for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')
                     self._preview_terminal_cleared=self.handle['run_id']
-                text='Worker '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
+                text='작업 '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
+                text+=' · 프로세스 종료 미확인'if status.exit_code is None else ' · Process exit '+str(status.exit_code)+(' (비정상 종료)'if status.exit_code!=0 else' (정상 종료)')
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])
                 if outcome['goal_reached'] is False:text+=' · 목표 미달'
                 if outcome['needs_resume']:text+=' · 새 worker에서 기존 Dataset 추가 저장 필요'
@@ -281,6 +287,7 @@ class WorkflowPage(QWidget):
                 if outcome['successes'] is not None:text+=' · Task 성공 '+str(outcome['successes'])+' / 실패 '+str(outcome['failures'])
                 if outcome['success_rate'] is not None:text+=' · 성공률 '+str(outcome['success_rate'])
                 if outcome['error']:text+=' · '+outcome['error'].get('message','오류')
+                if outcome['process_error']:text+=' · '+outcome['process_error']['message']
                 self.state.setText(text);self.buttons()
                 if self.stage=='train':self.show_training_result()
                 return
