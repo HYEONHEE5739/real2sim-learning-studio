@@ -44,11 +44,18 @@ class SessionClient(QObject):
         if not self.running:raise ValueError('연결된 Session이 없습니다')
         from ..run import RunHandle,send_command
         h=self.handle;key=uuid.uuid4().hex
-        command={'command_id':key,'kind':kind,'payload':payload or {}}
+        payload=dict(payload or{})
+        if kind=='session_snapshot'and self.stage in('capture_session','paired_session'):
+            payload.setdefault('requested_ns',time.monotonic_ns());payload.setdefault('policy','observation')
+        command={'command_id':key,'kind':kind,'payload':payload}
         if context:
             for field in('episode_id','env_index'):
                 if field in context:command[field]=context[field]
-        send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
+        receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
+        if receipt.status=='rejected':raise ValueError(receipt.reason)
+        if kind=='session_snapshot':
+            self.progress.emit({'capture_update':dict(id=('pair_'if self.stage=='paired_session'else'snapshot_')+key,
+                command_id=key,phase='REQUESTED',requested_ns=payload.get('requested_ns'),path=None,q_measured=[])})
         return key
     def poll(self):
         if not self.running and self.exit_pending is None:return

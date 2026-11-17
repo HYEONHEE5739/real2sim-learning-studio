@@ -6,19 +6,30 @@ import yaml
 def read(path):
     with Path(path).open() as stream:
         if Path(path).suffix=='.json':return json.load(stream)
-        return yaml.safe_load(stream)
+        text=stream.read()
+    # Capture's atomic JSON writer intentionally uses its existing .yaml name.
+    # JSON is YAML-compatible; avoid parsing large Mapping records a second way.
+    if text.lstrip().startswith(('{','[')):
+        try:return json.loads(text)
+        except json.JSONDecodeError:pass  # Ordinary flow-style YAML remains valid.
+    return yaml.load(text,Loader=getattr(yaml,'CSafeLoader',yaml.SafeLoader))
 
 
-def write(path, data):
+def write(path, data, *, json_format=False):
     path = Path(path)
+    compact=None
+    if json_format:
+        try:compact=json.dumps(data,ensure_ascii=False,separators=(',',':'),allow_nan=False)
+        except (TypeError,ValueError):pass  # Preserve legacy YAML-only scalar types without coercion.
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
         with temp.open('w') as stream:
-            if path.suffix == '.json':
+            if compact is not None:stream.write(compact+'\n')
+            elif path.suffix == '.json':
                 json.dump(data, stream, indent=2, allow_nan=False)
             else:
-                yaml.safe_dump(data, stream, sort_keys=False, allow_unicode=True)
+                yaml.dump(data, stream, Dumper=getattr(yaml,'CSafeDumper',yaml.SafeDumper), sort_keys=False, allow_unicode=True)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)

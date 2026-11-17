@@ -98,7 +98,8 @@ def align_measured(samples, timestamp, max_skew_ns=100_000_000, mapper=None, obs
         if mapper:
             return observed_positions(mapper,sample['native'],raw=sample.get('raw'),motor_specs=motor_specs)
         return to_sim(sample['native'])
-    positions = np.asarray([[measured(s)[n] for n in JOINTS] for s in samples])
+    decoded = [measured(sample) for sample in samples]
+    positions = np.asarray([[row[n] for n in JOINTS] for row in decoded])
     right = int(np.searchsorted(times, timestamp))
     if right < len(times) and times[right] == timestamp:
         return positions[right].tolist()
@@ -238,9 +239,13 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     if now_ns - feedback_time > 200_000_000 or feedback_time > now_ns:
         raise ValueError('Measured joint feedback is stale')
     stability = state.get('real_stability', {})
-    if not stability.get('stable'):
+    policy=state.get('capture_policy','calibration')
+    if policy not in('observation','calibration'):raise ValueError('Unknown capture policy')
+    if not stability.get('stable')and policy=='calibration':
         raise ValueError('Robot pose is moving or feedback is warming up; hold still and retry')
-    warnings = []
+    warnings = []if stability.get('stable')else['Moving or warming-up observation; excluded from calibration']
+    sampling_ok=all(b['timestamp_ns']-a['timestamp_ns']<=100_000_000 for a,b in zip(samples,samples[1:]))
+    if not sampling_ok and policy=='calibration':raise ValueError('Calibration measured feedback gap exceeds 100 ms')
     joint_limit_warnings = copy.deepcopy(state.get('joint_limit_warnings', {})) or {n: {'measured_rad':q[n], 'limits_rad':entry['limits']}
                            for n,entry in getattr(mapper, 'profile', {}).get('joints', {}).items()
                            if not entry['limits'][0]-1e-6 <= q[n] <= entry['limits'][1]+1e-6}
@@ -260,8 +265,10 @@ def prepare_snapshot(state, images, profile, now_ns=None):
             raise ValueError(name + ' camera frame is stale; retry Capture')
         if abs(t - feedback_time) > 100_000_000:
             raise ValueError(name + ' image/joint timestamp skew exceeds 100 ms')
-        if start < stability['window_start_ns'] or t > stability['window_end_ns']:
+        covered=bool(stability.get('stable')and sampling_ok and start>=stability.get('window_start_ns',now_ns+1)and t<=stability.get('window_end_ns',0))
+        if not covered and policy=='calibration':
             raise ValueError(name + ' frame is not covered by stable measured feedback')
+        if not covered:warnings.append(name+': stable measured coverage unavailable; excluded from calibration')
         blur = blur_variance(rgb)
         if blur < 10:
             warnings.append(name + ': blurred or textureless image; excluded from calibration')
@@ -269,7 +276,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
                          'read_start_ns': start, 'sequence': packet['sequence'],
                          'resolution': list(rgb.shape[1::-1]), 'blur_variance': blur,
                          'q_measured': align_measured(samples, t, mapper=mapper, observation_only=observation_only, motor_specs=motor_specs),
-                         'joint_skew_ns': t - feedback_time, 'eligible': blur >= 10,
+                         'joint_skew_ns': t - feedback_time, 'eligible': covered and blur >= 10,
                          'timestamp_kind': 'host_read_interval_not_exposure'})
     # Read the recorded applied q of historical snapshots, without generating
     # that retired controller's metadata in new snapshots.
@@ -287,6 +294,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     measured.update(mapping_sha256=state['sim_joint_mapping']['sha256'],
                     model_sha256=mapper.profile['urdf_sha256'],joint_order=list(JOINTS),
                     model_units=['rad']*6,hardware_synchronized=False)
+    measured.update(capture_policy=policy,capture_request=copy.deepcopy(state.get('capture_request')))
     return measured, observed, warnings
 
 
@@ -298,6 +306,39 @@ def snapshot_state(device, history, packets, stability):
         physical_follower_measured_joint_state=last['native'],physical_q_measured=[q[n]for n in JOINTS],precision_raw_feedback={'follower':last['raw']},
         hardware={'follower':{'motor_specs':device.motor_specs,'identity':device.identity}},measured_samples=[{k:r[k]for k in('timestamp_ns','native','raw')}for r in history],
         real_stability=stability,timestamps={'follower':last['feedback_interval'],'real_cameras':{'real_'+n:{k:p[k]for k in('read_start','read_end','sequence')}for n,p in packets.items()}})
+
+
+def freeze_capture(session,command,sequences):
+    """Copy receipt-time observations from existing bounded camera/q buffers."""
+    received=time.monotonic_ns();payload=command.get('payload',{})
+    requested=payload.get('requested_ns',received);policy=payload.get('policy','observation')
+    if type(requested)is not int or not 0<requested<=received or received-requested>1_000_000_000:
+        raise ValueError('Capture request timestamp is invalid or older than the retained request window')
+    if policy not in('observation','calibration'):raise ValueError('Unknown capture policy')
+    session.read_observation()
+    history=[r for r in session.history if r['timestamp_ns']<=requested]
+    if not history or requested-history[-1]['timestamp_ns']>200_000_000:
+        raise ValueError('No fresh measured feedback at the requested instant')
+    packets={n:c.nearest(requested,not_after=True)for n,c in session.cameras.items()}
+    if set(packets)!={'side','wrist'}:raise ValueError('Both Side/Wrist observations are required')
+    for name,packet in packets.items():
+        if packet is None:raise ValueError(name+': no camera receipt before Capture request')
+        stamp=packet['read_end']['monotonic_ns']
+        if requested-stamp>200_000_000 or abs(stamp-history[-1]['timestamp_ns'])>100_000_000:
+            raise ValueError(name+': requested camera/q observation is stale or misaligned')
+        if packet['sequence']<=sequences.get(name,-1):raise ValueError(name+': a new frame is not available yet')
+    stability=Stability(session.stability.window_s,session.stability.arm_span_deg,session.stability.gripper_span,session.stability.max_gap_s)
+    for row in history:stability.add(row['timestamp_ns'],row['native'])
+    assessed=stability.assess()
+    if policy=='calibration'and not assessed.get('stable'):raise ValueError('Calibration capture needs an already stable 0.6s observation; no later pose substituted')
+    state=snapshot_state(session.devices['follower'],history,packets,assessed)
+    state.update(captured_host_ns=requested,capture_policy=policy,camera_metadata={n:c.metadata for n,c in session.cameras.items()},
+        device_source=session.plan.effective_settings['execution']['device_source'],
+        capture_request=dict(command_id=command['command_id'],requested_ns=requested,received_ns=received,observed_ns=time.monotonic_ns(),
+            request_time_source='ui_monotonic'if 'requested_ns'in payload else'session_receipt_legacy',
+            clock_domain='host_monotonic_ns',timestamp_kind='host_receipt_not_exposure',
+            frame_age_at_request_ms={n:(requested-p['read_end']['monotonic_ns'])/1e6 for n,p in packets.items()}))
+    return state,{'real_'+n:p['rgb']for n,p in packets.items()},{n:p['sequence']for n,p in packets.items()}
 
 
 def share_model(root, model):

@@ -143,7 +143,7 @@ def register_image(project,path,*,camera,camera_type,scene_state,split='train',t
     if joint_record:
         for key in('q_measured','joint_names','joint_units','mapping_sha256','robot_model_sha256','image_timestamp_ns','joint_timestamp_ns'):
             record[key]=copy.deepcopy(joint_record[key])
-    write(project.root/'input/evidence.yaml',evidence)
+    project.write_evidence(evidence)
     return copy.deepcopy(record)
 
 

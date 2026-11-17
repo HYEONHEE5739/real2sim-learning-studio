@@ -11,6 +11,54 @@ import shutil
 CAPTURE_SCHEMA = 'real2sim.capture/1'
 
 
+def baseline_reference(baseline,camera):
+    return dict(schema='real2sim.runtime-baseline-ref/1',camera=camera,
+                **{key:baseline[key]for key in('path','sha256','pair_path','pair_sha256')})
+
+
+def baseline_from_pair(pair,*,path,sha256,pair_path,pair_sha256):
+    if pair.get('schema')!='real2sim.paired-observation/1'or pair.get('meaning')!='historical_runtime_baseline_not_ground_truth':
+        raise ValueError('Invalid paired observation')
+    result=dict(path=path,sha256=sha256,pair_path=pair_path,pair_sha256=pair_sha256,
+        **{k:pair[k]for k in('engine','workspace_context','quality','sim_q_measured_rad','sim_timestamp','sim_cameras')},
+        joint_mapping=pair.get('joint_mapping'),runtime_profile=pair.get('runtime_profile'))
+    result.update({k:pair[k]for k in('scene_identity','source_scene','physics_steps','total_physics_steps','simulation_time_s','state_application','sim_target_joint_rad','sim_joint_delta_rad','sim_object_poses_world')if k in pair})
+    return result
+
+
+def resolve_baseline_references(project,data):
+    """Expose the existing full observation contract from hashed Pair context."""
+    pairs={};images=[]
+    for original in data.get('images',[]):
+        ref=original.get('runtime_baseline_ref')
+        if ref is None:images.append(original);continue
+        fields={'schema','camera','path','sha256','pair_path','pair_sha256'}
+        if set(ref)!=fields or ref['schema']!='real2sim.runtime-baseline-ref/1'or ref['camera']!=original.get('camera'):
+            raise ValueError('Invalid runtime baseline reference')
+        for key in('path','pair_path'):
+            if not local_path(project.root,ref[key]).is_relative_to(project.root):raise ValueError('Runtime baseline reference escaped Project')
+        key=(ref['pair_path'],ref['pair_sha256'])
+        if key not in pairs:
+            path=local_path(project.root,ref['pair_path'])
+            if sha(path)!=ref['pair_sha256']:raise ValueError('Runtime Pair context hash mismatch')
+            pairs[key]=read(path)
+        pair=pairs[key];expected=(Path(ref['pair_path']).parent/pair['sim_images'][ref['camera']]).as_posix()
+        if expected!=ref['path']:raise ValueError('Runtime baseline image differs from Pair')
+        if sha(local_path(project.root,ref['path']))!=ref['sha256']:raise ValueError('Runtime baseline image hash mismatch')
+        baseline=baseline_from_pair(pair,**{k:ref[k]for k in('path','sha256','pair_path','pair_sha256')})
+        if 'runtime_baseline'in original and original['runtime_baseline']!=baseline:raise ValueError('Immutable runtime baseline context changed')
+        images.append({**original,'runtime_baseline':baseline})
+    return {**data,'images':images}
+
+
+def compact_baseline_references(project,data):
+    # Validate expanded contexts before dropping them. Old inline records have
+    # no reference marker and are never migrated as a side effect of this save.
+    expanded=[row for row in data.get('images',[])if row.get('runtime_baseline_ref')and 'runtime_baseline'in row]
+    if expanded:resolve_baseline_references(project,{'images':expanded})
+    return {**data,'images':[{k:v for k,v in row.items()if k!='runtime_baseline'or not row.get('runtime_baseline_ref')}for row in data.get('images',[])]}
+
+
 def _sensor_fields(manifest, camera):
     """Carry the validated archive's observation identity, without inventing it."""
     from .observations import camera_type
@@ -35,12 +83,12 @@ def image_quality_reasons(sample,image):
     return reasons
 
 
-def register_unbound(project, destination, manifest, samples):
+def register_unbound(project, destination, manifest, samples, *, evidence=None):
     """Archive measured input before a base/camera calibration exists.
 
     Registration is intentionally not robot import or calibration approval.
     """
-    evidence=project.evidence;observed=[]
+    evidence=project.read_evidence(resolve=False)if evidence is None else evidence;observed=[]
     sensors={c['id']:_sensor_fields(manifest,c)for c in manifest['cameras']}
     for sample in samples:
         for image in sample['images']:
@@ -50,13 +98,14 @@ def register_unbound(project, destination, manifest, samples):
                      split=sample.get('split',manifest['split']),group_id=sample.get('group_id',manifest['group_id']),session_id=manifest['session_id'],
                      sha256=sha(project.root/relative),timestamp_ns=image['timestamp_ns'],resolution=image['resolution'],
                      scene_state_id=manifest.get('scene_state_id'),snapshot_id=sample['id'],
-                     joint_names=manifest['joint_names'],q_measured=sample['q_measured'],eligible=False,
+                     joint_names=manifest['joint_names'],q_measured=image.get('q_measured',sample['q_measured']),eligible=False,
                      exclusion_reasons=['unbound_capture_calibration',*quality],capture_quality_reasons=quality,quality_override=manifest.get('quality_override'),
                      capture_manifest=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix())
             row.update(sensors[image['camera']])
             if image.get('runtime_baseline'):
                 row['runtime_baseline']=copy.deepcopy(image['runtime_baseline'])
                 for key in ('path','pair_path'):row['runtime_baseline'][key]=(destination/image['runtime_baseline'][key]).relative_to(project.root).as_posix()
+                row['runtime_baseline_ref']=baseline_reference(row['runtime_baseline'],image['camera'])
             evidence['images'].append(row);observed.append(row)
     source=dict(id=manifest['session_id'],path=(destination/'capture_manifest.yaml').relative_to(project.root).as_posix(),sha256=sha(destination/'capture_manifest.yaml'),
         status='NEEDS_MORE_DATA',needs=['robot_base','camera_intrinsics','camera_extrinsics'],source_robot_sha256=manifest['source_robot_sha256'],schema=manifest['schema'],dataset_id=manifest.get('source_dataset_id'))
@@ -67,7 +116,7 @@ def register_unbound(project, destination, manifest, samples):
             paths.update((Path(metadata).parent/p).as_posix()for p in read(destination/metadata)['files'])
     source['input_files']=[dict(path=(destination/p).relative_to(project.root).as_posix(),sha256=sha(destination/p))for p in sorted(paths)]
     evidence.setdefault('capture_sessions',[]).append(source)
-    write(project.root/'input/evidence.yaml',evidence);project.invalidate()
+    project.write_evidence(evidence);project.invalidate()
     report=dict(imported=len(observed),eligible=0,status='NEEDS_MORE_DATA',scope='ARCHIVED_OBSERVATIONS_ONLY',physical_verified=False)
     write(project.root/'working/capture_import.json',report);return report
 
@@ -201,23 +250,24 @@ def _capture_destination(project,root,session_id):
     return numbered_path(base,'capture')
 
 
-def _import_session(project, root, max_skew_ns=100000000, loaded=None):
+def _import_session(project, root, max_skew_ns=100000000, loaded=None, *, evidence=None):
     project.require_writable()
     m, samples, events = loaded or load_session(root)
     if not samples:
         raise ValueError('Capture has no measured samples')
     sensors={c['id']:_sensor_fields(m,c)for c in m['cameras']}
-    known_groups = {i.get('group_id'): i['split'] for i in project.evidence['images'] if i.get('group_id')}
+    evidence=project.read_evidence(resolve=False)if evidence is None else evidence
+    known_groups = {i.get('group_id'): i['split'] for i in evidence['images'] if i.get('group_id')}
     if m['group_id'] in known_groups and known_groups[m['group_id']] != m['split']:
         raise ValueError('Train/holdout group leakage')
     destination = _capture_destination(project,root,m['session_id'])
     in_place=root.resolve()==destination.resolve()
-    if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
+    if any(s['id']==m['session_id']for s in evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not in_place:shutil.copytree(root, destination)
     bound=all(m['robot'].get(k)is not None for k in('format','T_world_base'))and all(all(c.get(k)is not None for k in('parent','K','T_parent_camera'))for c in m['cameras'])
-    if not bound:return register_unbound(project,destination,m,samples)
+    if not bound:return register_unbound(project,destination,m,samples,evidence=evidence)
     if not (project.root / 'working/current_scene.yaml').exists():
         project.save_scene(empty(project.info['name']))
     scene = project.scene
@@ -253,7 +303,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
             base_source = base_source.get('T_world', 'estimated')
         scene['frames']['robot_base']['transform'] = value(m['robot']['T_world_base'], PROVENANCE.get(base_source, 'estimated'), ['capture robot base'])
     validate_joint_units(destination / m['robot']['path'], m['joint_names'], m['joint_units'])
-    sessions = project.evidence.get('capture_sessions', [])
+    sessions = evidence.get('capture_sessions', [])
     if sessions:
         original = read(local_path(project.root, sessions[0]['path']))
         if {c['id']:_sensor_fields(original,c)['camera_type']for c in original['cameras']} != {n:s['camera_type']for n,s in sensors.items()}:
@@ -289,7 +339,6 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
         elif existing['frame'] != frame or existing['resolution'] != row['resolution']:
             raise ValueError('Camera mount/resolution changed between sessions')
     project.save_scene(scene)
-    evidence = project.evidence
     observed = []
     seen = {}
     for sample in samples:
@@ -315,6 +364,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
                 observation['runtime_baseline'] = copy.deepcopy(image['runtime_baseline'])
                 observation['runtime_baseline']['path'] = (destination / image['runtime_baseline']['path']).relative_to(project.root).as_posix()
                 observation['runtime_baseline']['pair_path'] = (destination / image['runtime_baseline']['pair_path']).relative_to(project.root).as_posix()
+                observation['runtime_baseline_ref']=baseline_reference(observation['runtime_baseline'],image['camera'])
             if sample.get('metadata_path'):
                 observation['snapshot_metadata'] = (destination / sample['metadata_path']).relative_to(project.root).as_posix()
             evidence['images'].append(observation)
@@ -335,7 +385,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None):
     if m.get('calibration_reconciliation'):
         source['calibration_reconciliation'] = m['calibration_reconciliation']
     evidence.setdefault('capture_sessions', []).append(source)
-    write(project.root / 'input/evidence.yaml', evidence)
+    project.write_evidence(evidence)
     project.invalidate()
     report = {'imported': len(observed), 'eligible': sum((o['eligible'] for o in observed)), 'excluded': [{'id': o['id'], 'reasons': o['exclusion_reasons']} for o in observed if not o['eligible']], 'physics_status': 'PHYSICS_NOT_VALIDATED', 'scope': 'KINEMATIC_REPLAY_ONLY'}
     write(project.root / 'working/capture_import.json', report)
@@ -385,20 +435,27 @@ def observation_scene(scene, image, root, complete=True):
     return result
 
 
-def import_session(project, root, max_skew_ns=100000000, loaded=None):
+def import_session(project, root, max_skew_ns=100000000, loaded=None, *, evidence=None):
+    from .candidate import exclusive
+    with exclusive(project):
+        return _import_session_transaction(project,root,max_skew_ns,loaded,evidence=evidence)
+
+
+def _import_session_transaction(project, root, max_skew_ns=100000000, loaded=None, *, evidence=None):
     project.require_writable()
     'Restore project metadata on failed import; never alter immutable source input.'
     m, _, _ = loaded or load_session(root)
+    evidence=project.read_evidence(resolve=False)if evidence is None else evidence
     destination = _capture_destination(project,root,m['session_id'])
     in_place=root.resolve()==destination.resolve()
-    if any(s['id']==m['session_id']for s in project.evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
+    if any(s['id']==m['session_id']for s in evidence.get('capture_sessions',[]))or(destination.exists()and not in_place):
         raise ValueError('Capture session already imported')
     paths = [project.root / p for p in ('working/current_scene.yaml', 'input/evidence.yaml', 'working/state.json')]
     paths.append(project.root / 'history.jsonl')
     paths.append(project.root / 'working/capture_import.json')
     previous = {p: p.read_bytes() if p.exists() else None for p in paths}
     try:
-        return _import_session(project, root, max_skew_ns, loaded)
+        return _import_session(project, root, max_skew_ns, loaded, evidence=evidence)
     except Exception:
         for p, data in previous.items():
             if data is None:
@@ -478,6 +535,8 @@ def load_snapshots(root, validation=(), scene_state=None):
     manifest = read(root / 'capture_manifest.yaml')
     if manifest.get('schema') != 'real2sim.snapshot/1' or not (root / 'COMPLETE').is_file():
         raise ValueError('Incomplete snapshot dataset')
+    policy=manifest.get('capture_policy','calibration')
+    if policy not in('calibration','observation'):raise ValueError('Unknown snapshot capture policy')
     identifier(manifest['dataset_id'])
     if manifest['clock']['domain'] != 'host_monotonic_ns':
         raise ValueError('Explicit host monotonic timestamps required')
@@ -524,6 +583,7 @@ def load_snapshots(root, validation=(), scene_state=None):
         if 'state.json' not in metadata['files']:
             raise ValueError('Unhashed measured state')
         state = read(folder / 'state.json')
+        if state.get('capture_policy','calibration')!=policy:raise ValueError('Snapshot observation policy changed')
         history = state['measured_samples']
         previous = -1
         for measured in history:
@@ -551,8 +611,10 @@ def load_snapshots(root, validation=(), scene_state=None):
             if image['read_start_ns'] > stamp or abs(stamp - state['timestamp_ns']) > 100000000:
                 raise ValueError('Snapshot camera timestamp skew exceeds limit')
             stability = state.get('real_stability', {})
-            if not stability.get('stable') or image['read_start_ns'] < stability['window_start_ns'] or stamp > stability['window_end_ns']:
+            covered=bool(stability.get('stable')and image['read_start_ns']>=stability.get('window_start_ns',stamp+1)and stamp<=stability.get('window_end_ns',0))
+            if not covered and policy=='calibration':
                 raise ValueError('Snapshot not covered by stable measured feedback')
+            if not covered:image['eligible']=False
             q = align(history, image['timestamp_ns'], names, manifest.get('discrete_joints', []))
             if not np.allclose(q, image['q_measured'], atol=1e-08):
                 raise ValueError('Camera-aligned measured q changed')
@@ -568,15 +630,21 @@ def load_snapshots(root, validation=(), scene_state=None):
                 with Image.open(local_path(folder, baseline)) as rgb:
                     if list(rgb.size) != image['resolution']:
                         raise ValueError('Runtime baseline resolution mismatch')
-                image['runtime_baseline'] = {'path': (folder / baseline).relative_to(root).as_posix(), 'sha256': metadata['files'][baseline], 'engine': pair['engine'], 'workspace_context': pair['workspace_context'], 'quality': pair['quality'], 'sim_q_measured_rad': pair['sim_q_measured_rad'], 'sim_timestamp': pair['sim_timestamp'], 'sim_cameras': pair['sim_cameras'], 'joint_mapping': pair.get('joint_mapping'), 'runtime_profile': pair.get('runtime_profile'), 'pair_path': (folder / 'pair.json').relative_to(root).as_posix(), 'pair_sha256': metadata['files']['pair.json']}
-                image['runtime_baseline'].update({key:pair[key] for key in ('scene_identity','source_scene','physics_steps','total_physics_steps','simulation_time_s','state_application','sim_target_joint_rad','sim_joint_delta_rad','sim_object_poses_world')if key in pair})
+                image['runtime_baseline']=baseline_from_pair(pair,path=(folder/baseline).relative_to(root).as_posix(),sha256=metadata['files'][baseline],
+                    pair_path=(folder/'pair.json').relative_to(root).as_posix(),pair_sha256=metadata['files']['pair.json'])
             images.append(image)
-        samples.append({'id': row['id'], 'timestamp_ns': state['timestamp_ns'], 'q_measured': state['q_measured'], 'measured_history': history, 'quality': {'eligible_for_calibration': all((i.get('runtime_baseline', {}).get('quality', {}).get('eligible', True) for i in images))}, 'images': images, 'metadata_path': (folder / 'metadata.json').relative_to(root).as_posix(), 'split': 'validation' if row['id'] in validation else 'train', 'group_id': manifest['dataset_id'] + '_' + row['id']})
+        samples.append({'id': row['id'], 'timestamp_ns': state['timestamp_ns'], 'q_measured': state['q_measured'], 'measured_history': history, 'quality': {'eligible_for_calibration': all(i.get('eligible',False)and i.get('runtime_baseline', {}).get('quality', {}).get('eligible', True) for i in images)}, 'images': images, 'metadata_path': (folder / 'metadata.json').relative_to(root).as_posix(), 'split': 'validation' if row['id'] in validation else 'train', 'group_id': manifest['dataset_id'] + '_' + row['id']})
     normalized = {**manifest, 'source_dataset_id': manifest['dataset_id'], 'session_id': manifest.get('session_id',manifest['dataset_id'] + '_' + sha(root / 'capture_manifest.yaml')[:12]), 'group_id': manifest['dataset_id'], 'scene_state_id': scene_state, 'purpose': 'snapshot', 'split': 'train'}
     return (normalized, samples, [])
 
 
 def import_snapshots(project, root, validation=(), scene_state=None, paired=False, reconciliation=None, include_flagged_reason=None):
+    from .candidate import exclusive
+    with exclusive(project):
+        return _import_snapshots_transaction(project,root,validation,scene_state,paired,reconciliation,include_flagged_reason)
+
+
+def _import_snapshots_transaction(project, root, validation=(), scene_state=None, paired=False, reconciliation=None, include_flagged_reason=None):
     project.require_writable()
     import fcntl
     root = Path(root).resolve()
@@ -594,7 +662,7 @@ def import_snapshots(project, root, validation=(), scene_state=None, paired=Fals
             m['quality_override'] = str(include_flagged_reason)
         if reconciliation:
             m['calibration_reconciliation'] = str(reconciliation)
-        existing = project.evidence['images']
+        evidence=project.read_evidence(resolve=False);existing = evidence['images']
         new = []
         for sample in samples:
             prefix = m['source_dataset_id'] + '_' + sample['id'] + '_'
@@ -615,7 +683,7 @@ def import_snapshots(project, root, validation=(), scene_state=None, paired=Fals
                         raise ValueError('Train/validation contains the same or near-identical measured pose')
                     sample['group_id'] = group
             representatives.append((q, sample['group_id'], sample['split']))
-        return import_session(project, root, loaded=(m, new, events))
+        return import_session(project, root, loaded=(m, new, events),evidence=evidence)
 
 
 def import_paired(project, root, validation=(), scene_state=None, reconciliation=None, include_flagged_reason=None):

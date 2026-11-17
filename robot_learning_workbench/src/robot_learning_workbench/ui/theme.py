@@ -52,3 +52,23 @@ QWidget#settingsContent { background: #222833; border-radius: 18px; }
 QWidget#settingsContent QLabel, QWidget#settingsContent QCheckBox { background: transparent; }
 QWidget#logCard QLabel, QWidget#logCard QCheckBox, QWidget#previewCard QLabel { background: transparent; }
 """
+
+
+def action_icon(kind):
+    """Small vector glyphs in the native Qt renderer; no raster downloads."""
+    from PyQt6.QtCore import Qt,QRectF,QPointF
+    from PyQt6.QtGui import QIcon,QPixmap,QPainter,QPainterPath,QPen,QColor
+    icon=QIcon()
+    for mode,color in[(QIcon.Mode.Normal,'#e3f3f7'),(QIcon.Mode.Disabled,'#71899e')]:
+        pix=QPixmap(48,48);pix.fill(Qt.GlobalColor.transparent);pix.setDevicePixelRatio(2)
+        painter=QPainter(pix);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color),1.6,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
+        if kind=='capture':
+            path=QPainterPath();path.moveTo(4,7);path.lineTo(8,7);path.lineTo(10,4);path.lineTo(15,4);path.lineTo(17,7);path.lineTo(20,7);path.quadTo(22,7,22,9);path.lineTo(22,19);path.quadTo(22,21,20,21);path.lineTo(4,21);path.quadTo(2,21,2,19);path.lineTo(2,9);path.quadTo(2,7,4,7)
+            painter.drawPath(path);painter.drawEllipse(QRectF(8,10,8,8))
+        elif kind=='stop':painter.drawRoundedRect(QRectF(5,5,14,14),2,2)
+        else:
+            painter.translate(12,12);painter.rotate(40)
+            painter.drawRoundedRect(QRectF(-3.5,-10,7,12),3.5,3.5);painter.drawRoundedRect(QRectF(-3.5,-2,7,12),3.5,3.5);painter.drawLine(QPointF(0,-3),QPointF(0,3))
+        painter.end();icon.addPixmap(pix,mode)
+    return icon

@@ -69,7 +69,7 @@ from robot_learning_workbench.ui.app import Window
 app=QApplication([]);root=Path(sys.argv[1]);w=Window('/no/worker',root/'modules',root/'workspace');p=w.sessions['capture']
 p.settings.recipe=lambda:{'execution':{'device_source':'hardware'}};p.client.running=True;p.client.stage='capture_session'
 p.update_progress({'session_state':'OBSERVING','teleoperation_available':False,'teleoperation_reason':'Teleoperation: 명령 변화·추종 오차 제한 검토 필요','capture_ready':True,'capture_request_allowed':True,'device_source':'hardware'})
-assert not p.start_teleop_button.isEnabled()and p.capture_button.isEnabled()
-assert '제한'in p.start_teleop_button.toolTip()
+assert not p.connect_button.isEnabled()and p.capture_button.isEnabled()
+assert '제한'in p.connect_button.toolTip()
 p.client.running=False;w.close()
 ''',tmp_path)

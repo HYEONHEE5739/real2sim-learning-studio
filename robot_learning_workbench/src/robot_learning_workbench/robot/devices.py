@@ -100,8 +100,8 @@ class Follower:
 
     def _check_identity(self, *, hardware=False):
         if getattr(self,'usb_identity',None):
-            from .registration import resolve_serial
-            if Path(resolve_serial(self.usb_identity)).resolve()!=Path(self.bus.port).resolve():raise ValueError('Connected USB identity changed')
+            from .registration import verify_serial
+            verify_serial(self.usb_identity,self.bus.port)
         if self.identity != self.profile['identity'] or self.identity.get('role') != self.role or self.profile.get('role') != self.role:
             raise ValueError('Precision device/role identity mismatch')
         identifier=self.calibration_path.name if self.role=='leader' else self.device.id

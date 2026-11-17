@@ -9,9 +9,9 @@ from robot_learning_workbench.run import _command
 def session_recipe(tmp_path):
     root=Path(__file__).resolve().parents[2];e=root/'docs/evidence/hardware-read-gripper'
     project=Project.create(tmp_path/'projects','Session project')
-    from test_precision_calibration import INV,CURRENT
-    data=dict(schema_version=1,stage='capture_session',inputs={'project':str(project.root),'device_profile':str(e/'follower-device.json'),'calibration_profile':INV['roles']['follower']['profile_path'],
-        'leader_device_profile':str(e/'leader-device.json'),'leader_calibration_profile':INV['roles']['leader']['profile_path'],'camera_config':str(e/'cameras.json'),'robot_model':str(CURRENT)},
+    from test_precision_calibration import INV,CURRENT,device_profile_fixture
+    data=dict(schema_version=1,stage='capture_session',inputs={'project':str(project.root),'device_profile':device_profile_fixture(tmp_path,'follower'),'calibration_profile':INV['roles']['follower']['profile_path'],
+        'leader_device_profile':device_profile_fixture(tmp_path,'leader'),'leader_calibration_profile':INV['roles']['leader']['profile_path'],'camera_config':str(e/'cameras.json'),'robot_model':str(CURRENT)},
         execution={'device_source':'memory'},output={'directory':str(tmp_path/'session-output')})
     path=tmp_path/'session.yaml';path.write_text(yaml.safe_dump(data));return path,project,data
 

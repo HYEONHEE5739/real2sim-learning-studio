@@ -7,6 +7,7 @@ from .jobs import BackendJob
 from .workflow import WorkflowPage
 from .source_page import SourcePage
 from .curation import CurationPage
+from .view import LiveSessionTabs
 
 
 class Window(QMainWindow):
@@ -21,7 +22,7 @@ class Window(QMainWindow):
         self.closing=False
         central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
         self.safety=QLabel('연결은 관측으로 시작 · Teleoperation 시작 버튼으로 실제 Leader → Follower 구동');self.safety.setWordWrap(True);layout.addWidget(self.safety)
-        self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
+        self.tabs=LiveSessionTabs();layout.addWidget(self.tabs,1)
         self.curation=CurationPage(backend_python,self.workspace,self)
         self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','real_evaluation')}
         self.source=SourcePage(backend_python,modules,self.workspace,self);self.workflows['source']=self.source

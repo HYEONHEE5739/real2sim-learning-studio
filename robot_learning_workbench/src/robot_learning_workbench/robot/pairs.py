@@ -15,16 +15,20 @@ def write_pair(root,manifest,pending,rendered):
     context={'workspace_id':manifest['project_id'],'content_sha256':rendered['scene_identity']['manifest_sha256'],'builder':{'manifest_sha256':digest(rendered['scene_identity'])}}
     metrics={};sim_files={}
     for image in metadata['images']:
-        name=image['camera'];rgb=rendered['images'][name];real=np.asarray(Image.open(shot/image['path']).convert('RGB'));sim='sim_'+name+'.png'
-        transport=rendered.get('files',{}).get(name)
+        name=image['camera'];transport=rendered.get('files',{}).get(name)
+        rgb=rendered.get('images',{}).get(name)
+        if rgb is None:
+            if transport is None:raise ValueError('Frozen Sim image is missing')
+            rgb=np.asarray(Image.open(transport['path']).convert('RGB'))
+        real=np.asarray(Image.open(shot/image['path']).convert('RGB'));sim='sim_'+name+'.png'
         if transport is not None:
             if file_sha256(transport['path'])!=transport['sha256']:raise ValueError('Rendered transport bytes changed')
             if not(shot/sim).exists():os.link(transport['path'],shot/sim)
             if file_sha256(shot/sim)!=transport['sha256']:raise ValueError('Paired render bytes changed while sharing')
-        else:Image.fromarray(rgb).save(shot/sim)
+        else:Image.fromarray(rgb).save(shot/sim,compress_level=1)
         metadata['files'][sim]=file_sha256(shot/sim);sim_files[name]=sim
         # Existing Builder diagnostics emit normalized RGB metrics and visual comparisons.
-        metrics[name]={**compare(real,rgb,shot/'comparison'/name,save_inputs=False),'objects':rendered.get('geometry',{}).get(name,[]),'landmark_rmse_px':None,'mask_iou':None,'geometry_status':'UNMEASURED'}
+        metrics[name]={**compare(real,rgb,shot/'comparison'/name,save_inputs=False,png_compress_level=1),'objects':rendered.get('geometry',{}).get(name,[]),'landmark_rmse_px':None,'mask_iou':None,'geometry_status':'UNMEASURED'}
     for path in (shot/'comparison').rglob('*.png'):metadata['files'][path.relative_to(shot).as_posix()]=file_sha256(path)
     pair={k:v for k,v in rendered.items()if k not in('images','files','id','requested_ns','generation','result_latency_ms')};pair.update(schema='real2sim.paired-observation/1',meaning='historical_runtime_baseline_not_ground_truth',
         measurement_basis='follower_feedback',workspace_context=context,sim_q_measured_rad=rendered['applied_sim_joint_rad'],quality={'eligible':not pending['quality'],'warnings':pending['quality'],'physical_verified':False},

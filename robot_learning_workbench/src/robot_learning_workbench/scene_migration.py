@@ -32,7 +32,7 @@ def migrate_authoring(source,workspace,name):
     # Input snapshots already have internal hashes; their bytes and relative closure stay intact.
     for file in sorted((source.root/'input').rglob('*')):
         if file.is_file()and file!=source.root/'input/evidence.yaml':own_file(file,project.root/file.relative_to(source.root),workspace,records)
-    write(project.root/'input/evidence.yaml',source.evidence)
+    project.write_evidence(source.evidence)
     scene=copy.deepcopy(source.scene);scene['name']=name;scene.get('robot_model',{}).pop('simulation_joint_offsets_rad',None);validate(scene,project.root);project.save_scene(scene)
     candidates=[]
     for info in sorted((source.root/'scratch/agent').glob('*/candidate.json')):

@@ -44,7 +44,8 @@ def camera_quality(images,criteria=None):
             'criteria':criteria,'physical_verified':False,'scope':'Declared image criteria only; geometry, contact and calibration need separate verification'}
 
 
-def compare(real,sim,folder,*,save_inputs=True):
+def compare(real,sim,folder,*,save_inputs=True,png_compress_level=6):
+    if type(png_compress_level)is not int or not 0<=png_compress_level<=9:raise ValueError('PNG compression level must be an integer in 0..9')
     real=np.asarray(real,dtype=np.uint8);sim=np.asarray(sim,dtype=np.uint8)
     if real.shape!=sim.shape or real.ndim!=3 or real.shape[2]!=3:raise ValueError('Real/sim RGB resolution mismatch')
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
@@ -55,7 +56,7 @@ def compare(real,sim,folder,*,save_inputs=True):
         'edge_iou':float(np.count_nonzero(edge_a&edge_b)/union) if union else 1.}
     for name,array in {'real':real,'sim':sim,'side_by_side':np.concatenate([real,sim],axis=1),
         'overlay':np.rint((real.astype(float)+sim)/2).astype(np.uint8),'difference':np.uint8(np.clip(error*255,0,255))}.items():
-        if save_inputs or name not in ('real','sim'):Image.fromarray(array).save(folder/(name+'.png'))
+        if save_inputs or name not in ('real','sim'):Image.fromarray(array).save(folder/(name+'.png'),compress_level=png_compress_level)
     return metrics
 
 

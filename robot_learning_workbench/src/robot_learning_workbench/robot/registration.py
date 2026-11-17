@@ -21,6 +21,23 @@ def resolve_serial(identity,inventory=None):
     return matches[0]['path']
 
 
+def verify_serial(identity,port):
+    """Fresh identity of the connected Linux port; selection still checks uniqueness.
+
+    PySerial 3.5 SysFS reads only this tty's OS metadata, without opening the bus.
+    Keep full discovery outside the time-bounded control loop.
+    """
+    if not identity.get('serial'):raise ValueError('Stable USB identity required')
+    try:
+        from serial.tools.list_ports_linux import SysFS
+        observed=SysFS(str(Path(port).resolve()))
+        valid=observed.serial_number==identity['serial']and all(
+            identity.get(key)is None or getattr(observed,key,None)==identity[key]for key in('vid','pid'))
+    except (ImportError,OSError,AttributeError)as error:
+        raise ValueError('Connected USB identity cannot be verified')from error
+    if not valid:raise ValueError('Connected USB identity changed')
+
+
 def mapping_coordinates_equal(a,b):
     """Connection port is local metadata; all measured coordinate/motor parameters stay exact."""
     from .calibration import mapper_from_metadata

@@ -12,7 +12,29 @@ ROOT=Path(__file__).resolve().parents[2]
 B03=ROOT/'docs/evidence/b03'
 INV=json.loads((B03/'inventory.json').read_text())
 OLD=ROOT/'docs/evidence/b01/runspace/soarm101_lab/outputs/b01_historical_models/3b676464eb11410752707021f9d07b988439b46e37d5605cdbfe9508de14e5dd.urdf'
-CURRENT=Path('/home/hyeonhee/soarm_isaaclab/soarm101_lab/outputs/real2sim/environments/scene2_builder/v8/assets/SO101/urdf/so101_isaaclab.urdf')
+REFERENCE=ROOT/'docs/evidence/b01/runspace/soarm101_lab'
+CURRENT=REFERENCE/'outputs/real2sim/environments/scene2_builder/v8/assets/SO101/urdf/so101_isaaclab.urdf'
+# Shared test consumers get this checkout's frozen profiles. The historical
+# inventory itself remains byte-identical and its old paths are never opened.
+for _role,_record in INV['roles'].items():
+    _record['profile_path']=str(REFERENCE/'outputs/real2sim/joint_calibration'/_role/'profiles'/Path(_record['profile_path']).name)
+
+
+def device_profile_fixture(directory,role):
+    """Frozen device metadata with checkout-owned calibration; never hardware IO."""
+    record=json.loads((ROOT/'docs/evidence/hardware-read-gripper'/(role+'-device.json')).read_text())
+    profile=json.loads(Path(INV['roles'][role]['profile_path']).read_text())
+    fields=('id','drive_mode','homing_offset','range_min','range_max')
+    values={name:{key:profile['joints'][name]['motor']['calibration'][key]for key in fields}for name in c.JOINTS}
+    formatted=json.dumps(values,indent=4)
+    candidates=[formatted.encode(),(formatted+'\n').encode()]
+    data=next((value for value in candidates if hashlib.sha256(value).hexdigest()==profile['identity']['calibration_sha256']),None)
+    if data is None:raise ValueError('Frozen test calibration metadata does not reconstruct its expected hash')
+    folder=directory/(role+'-sdk-calibration');folder.mkdir(exist_ok=True)
+    calibration=folder/Path(record['calibration_path']).name;calibration.write_bytes(data)
+    record['calibration_path']=str(calibration)
+    record['sdk']['calibration_dir']=str(calibration.parent)
+    path=directory/(role+'-device.json');path.write_text(json.dumps(record));return str(path)
 
 def bound(role):
     saved=json.loads(Path(INV['roles'][role]['profile_path']).read_text())

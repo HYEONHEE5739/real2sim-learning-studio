@@ -163,6 +163,7 @@ def test_pair_sha_guard_and_legacy_archived_identity_are_kept(tmp_path, monkeypa
     for image in evidence['images']:
         if image['snapshot_id'] == 'capture_a':
             # Historical imports can resolve identity from the verified Pair file.
+            image.pop('runtime_baseline_ref',None)  # This fixture explicitly represents the legacy inline format.
             image['runtime_baseline'].pop('scene_identity')
     write(project.root/'input/evidence.yaml', evidence)
     monkeypatch.setattr(automation, 'refine_numeric_pairs', _numeric)
@@ -176,6 +177,16 @@ def test_pair_sha_guard_and_legacy_archived_identity_are_kept(tmp_path, monkeypa
     second = automation.refit_pairs(project, candidate='tampered', scene_state='layout_a', config=config)
     assert second['status'] == 'NEEDS_MORE_DATA' and second['code'] == 'PAIR_SOURCE_MISMATCH'
     assert not (project.root/'scratch/agent/tampered').exists()
+
+
+def test_referenced_pair_corruption_keeps_the_existing_backend_needs_contract(tmp_path):
+    project,_,identity,_=_fixture(tmp_path)
+    image=project.evidence['images'][0];pair=project.root/image['runtime_baseline']['pair_path']
+    pair.write_bytes(pair.read_bytes()+b'\n')
+    result=automation.refit_pairs(project,candidate='tampered_ref',scene_state='layout_a',config={
+        'refit_capture_ids':['capture_a'],'refit_source_identity':identity,'numeric_refinement':{'enabled':True}})
+    assert result['status']=='NEEDS_MORE_DATA'and result['code']=='PAIR_SOURCE_MISMATCH'
+    assert not(project.root/'scratch/agent/tampered_ref').exists()
 
 
 @pytest.mark.parametrize('bad', ['none', 'package_sha', 'model_sha', 'mapping_sha', 'joint_order'])

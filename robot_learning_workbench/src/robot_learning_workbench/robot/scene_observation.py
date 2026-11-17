@@ -97,8 +97,8 @@ def save_materials(project,session_id,key,packets,feedback,*,now_ns=None):
                 source=root/(name+'.png');owned=project.root/add_image(project,source,camera=name,context_only=True)['path'];images[name]=str(owned)
                 if owned!=source:source.unlink();os.link(owned,source)
             evidence=project.evidence;evidence.setdefault('documents',[]).append({'path':str((root/'observation.json').relative_to(project.root)),'sha256':sha(root/'observation.json'),'role':'unbound_sdk_camera_observation','status':'UNVERIFIED'})
-            write(project.root/'input/evidence.yaml',evidence);project.invalidate();(root/'COMPLETE').write_text('complete\n')
-        except BaseException:write(project.root/'input/evidence.yaml',before);raise
+            project.write_evidence(evidence);project.invalidate();(root/'COMPLETE').write_text('complete\n')
+        except BaseException:project.write_evidence(before);raise
     return {'id':key,'session_id':session_id,'path':str(root),'unix_ns':packets['side']['read_end']['unix_ns'],'q_measured':[],'images':images,'quality':[record['reason']],'paired':False,'kind':'scene_materials'}
 
 

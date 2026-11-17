@@ -690,5 +690,5 @@ def undistort_evidence(project):
         camera['distortion'] = value([0.] * len(distortion), 'derived', ['calibrated pinhole evidence rectification'])
         changed = True
     if changed:
-        write(project.root / 'input/evidence.yaml', evidence)
+        project.write_evidence(evidence)
         project.save_scene(scene)

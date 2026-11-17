@@ -62,7 +62,7 @@ def save_inputs(path,files,notes,*,scene_state=None):
                     row=register_image(project,file,camera='external_view_'+str(len(project.evidence['images'])+1).zfill(3),camera_type='external',scene_state=state,role=role)
                     evidence=project.evidence
                     next(i for i in evidence['images']if i['id']==row['id'])['physical_camera_id']=None
-                    write(project.root/'input/evidence.yaml',evidence)
+                    project.write_evidence(evidence)
             elif suffix in('.mp4','.mov','.avi'):
                 if role!='scene_photo':raise ValueError('Scene Video belongs in Scene inputs, not Model Reference images')
                 add_video(project,file,camera='reference',max_frames=15,role='scene_video',scene_state=state)
@@ -74,7 +74,7 @@ def save_inputs(path,files,notes,*,scene_state=None):
                 evidence=project.evidence;key='robot_inputs'if suffix=='.urdf'else'documents'
                 rows=evidence.setdefault(key,[])
                 if not any(row['path']==relative for row in rows):rows.append({'path':relative,'sha256':sha(project.root/relative),'source':str(file),'status':'UNVERIFIED_INPUT'})
-                write(project.root/'input/evidence.yaml',evidence);project.invalidate()
+                project.write_evidence(evidence);project.invalidate()
     save_scene_memo(project,notes)
     return scene_details(project.root)
 

@@ -110,15 +110,20 @@ class Teleoperation:
         send_attempted=False;attempt=None
         try:
             now=time.monotonic_ns()
+            attempt=dict(sequence=self.sequence+1,tick_begin_ns=now,command_sent=False,effect='not_applied',
+                         timing_ms={'heartbeat_age':(now-self.last_heartbeat_ns)/1e6,'control_gap':(now-self.last_tick_ns)/1e6})
+            self.last_attempt=attempt
             if now-self.last_heartbeat_ns>1_500_000_000 or now-self.last_tick_ns>200_000_000:raise ValueError('Stale session heartbeat/control cycle')
             self.leader._check_identity();self.follower._check_identity()
+            checked=time.monotonic_ns()
             _,feedback,q=self.feedback();target,command,details,leader_interval=self._target()
             begin=time.monotonic_ns()
-            if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:raise ValueError('Stale feedback/Leader command')
             raw=dict(self.follower.last_encoded_goal_raw);duplicate=raw==self.last_raw_goal
-            attempt=dict(sequence=self.sequence+1,requested_model_rad=details['requested_model_rad'],target_payload_rad=target.tolist(),sdk_goal_raw=raw,
-                         measured_model_rad=q.tolist(),feedback_interval=feedback,leader_interval=leader_interval,send_begin_ns=begin,command_sent=False,effect='not_applied')
-            self.last_attempt=attempt
+            attempt.update(requested_model_rad=details['requested_model_rad'],target_payload_rad=target.tolist(),sdk_goal_raw=raw,
+                         measured_model_rad=q.tolist(),feedback_interval=feedback,leader_interval=leader_interval,send_begin_ns=begin)
+            attempt['timing_ms'].update(identity=(checked-now)/1e6,feedback_age=(begin-feedback['end']['monotonic_ns'])/1e6,
+                                        leader_age=(begin-leader_interval['end']['monotonic_ns'])/1e6,preflight=(begin-now)/1e6)
+            if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:raise ValueError('Stale feedback/Leader command')
             if self.cancelled():raise ValueError('Teleoperation stopped before Goal transmission')
             if begin-now>200_000_000:raise ValueError('Control deadline exceeded before Goal transmission')
             if not duplicate:

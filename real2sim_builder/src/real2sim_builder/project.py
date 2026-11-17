@@ -107,7 +107,23 @@ class Project:
 
     @property
     def evidence(self):
-        return read(self.root / 'input/evidence.yaml')
+        return self.read_evidence()
+
+    def read_evidence(self, *, resolve=True):
+        data=read(self.root/'input/evidence.yaml')
+        if resolve:
+            from .capture import resolve_baseline_references
+            return resolve_baseline_references(self,data)
+        return data
+
+    def write_evidence(self, data):
+        """Keep new immutable Pair references compact; legacy rows stay inline."""
+        self.require_writable()
+        from .capture import compact_baseline_references
+        # JSON is valid YAML and the established Reader already supports it.
+        # Repeated additions avoid YAML parse/format overhead; old YAML-only
+        # scalar types use the safe fallback instead of changing their meaning.
+        write(self.root/'input/evidence.yaml',compact_baseline_references(self,data),json_format=True)
 
     @property
     def workspace(self):

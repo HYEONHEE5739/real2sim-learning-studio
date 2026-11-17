@@ -731,12 +731,14 @@ def select_refit_pairs(project, *, capture_ids=None, scene_state=None, source_id
     package/model/mapping closure before creating or changing a Candidate.
     """
     def unavailable(code,reason):return {'status':'NEEDS_MORE_DATA','code':code,'needs':[reason]}
+    try:evidence_images=project.evidence['images']
+    except (ValueError,OSError)as error:return unavailable('PAIR_SOURCE_MISMATCH','Recorded Pair reference is invalid: '+str(error))
     explicit=capture_ids is not None
     if explicit:
         if not isinstance(capture_ids,(list,tuple))or not capture_ids or any(not isinstance(n,str)or not n for n in capture_ids):
             return unavailable('PAIR_SOURCE_UNRESOLVED','Select a nonempty set of recorded Capture IDs')
         requested=set(capture_ids)
-        images=[i for i in project.evidence['images']if i.get('snapshot_id')in requested]
+        images=[i for i in evidence_images if i.get('snapshot_id')in requested]
         if requested!={i.get('snapshot_id')for i in images}:
             return unavailable('PAIR_SOURCE_UNRESOLVED','Selected Capture IDs are missing from registered observations')
         if any(not i.get('id')or not i.get('scene_state_id')or not i.get('runtime_baseline')for i in images):

@@ -34,7 +34,7 @@ class RenderProcess:
         if self.capture_id is not None:raise ValueError('One Pair render at a time')
         self.capture_id=pending['id'];atomic_json(self.root/'capture.json',{'id':self.capture_id,'q':pending['sample']['q_measured'],'requested_ns':time.monotonic_ns()})
 
-    def _read(self,name,*,previous_id=None):
+    def _read(self,name,*,previous_id=None,decode=True):
         path=self.root/name
         if not path.is_file():return None
         before=path.read_bytes();result=json.loads(before);images={}
@@ -44,7 +44,7 @@ class RenderProcess:
             if not image.resolve().is_relative_to(self.root.resolve()):raise ValueError('Render result escaped owned storage')
             try:
                 if file_sha256(image)!=row['sha256']:return None
-                images[camera]=np.asarray(Image.open(image).convert('RGB'))
+                if decode:images[camera]=np.asarray(Image.open(image).convert('RGB'))
             except(FileNotFoundError,OSError):return None
         if path.read_bytes()!=before:return None
         return {**result,'images':images,'result_latency_ms':(time.monotonic_ns()-result['requested_ns'])/1e6}
@@ -58,7 +58,9 @@ class RenderProcess:
             from ..data import video
             if video._preview_sink is not None:
                 for n,image in live['images'].items():video._preview_sink('sim_'+n,image,live['generation'],live['sim_timestamp']['monotonic_ns']/1e9,0)
-        result=self._read('capture-result.json')if self.capture_id is not None else None
+        # Frozen PNGs are decoded by the save process, not the interpreter that
+        # also schedules serial control. Live preview decoding stays unchanged.
+        result=self._read('capture-result.json',decode=False)if self.capture_id is not None else None
         if result is not None and result['id']==self.capture_id:self.capture_id=None;return result
 
     def release_capture(self,identifier):

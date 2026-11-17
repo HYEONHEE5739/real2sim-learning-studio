@@ -1,12 +1,11 @@
 """Supervised Leader→Follower control and measured Follower→native Scene rendering."""
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
 from .capture import Stability,observed_positions,snapshot_state,capture_reason
 from .calibration import JOINTS
 from .devices import close_devices,DeviceError
-from .snapshots import SnapshotStore
+from .snapshots import SnapshotStore,snapshot_writer,writer_ready,CaptureQueue
 from .render_transport import RenderProcess
 from .supervised import Teleoperation
 from .teleop_loop import TeleoperationLoop
@@ -21,7 +20,7 @@ class RealSimSession:
         self.project=Project(plan.resolved_inputs['project']['root']);self.history=deque(maxlen=180);self.stability=Stability();self.packets={}
         self.store=SnapshotStore(self.project,session_id=plan.output_path.name.replace('-','_'),model=plan.resolved_inputs['robot_model']['path'],mapping=self.follower.precision_mapper.metadata())
         self.state='DISCONNECTED';self.terminal=False;self.closing=False;self.cancelled=False;self.renderer=None;self.snapshots=[];self.seen=set();self.last_heartbeat=time.monotonic_ns()
-        self.writer=ThreadPoolExecutor(max_workers=1,thread_name_prefix='paired-capture');self.future=None;self.phase=None;self.acquiring=None;self.pending=None;self.command_pending=None;self.rendered=None
+        self.writer=snapshot_writer(self.store);self.capture_queue=CaptureQueue(self,paired=True)
         self.teleoperation=None;self.control=None;self.control_history=deque(maxlen=300);self.last_error=None
         if 'leader'in devices:
             from .calibration import joint_specs
@@ -29,16 +28,16 @@ class RealSimSession:
             self.teleoperation=Teleoperation(devices['leader'],self.follower,model_bounds=bounds,session_id=plan.output_path.name)
             self.control=TeleoperationLoop(self.teleoperation)
     def emit(self,**progress):
-        busy=self.acquiring is not None or self.pending is not None or self.future is not None or self.rendered is not None
         self.events({'kind':'status','payload':{'progress':{'session_state':self.state,'device_source':self.plan.effective_settings['execution']['device_source'],
             'teleop_active':bool(self.teleoperation and self.teleoperation.active),'teleoperation_available':self.teleoperation is not None,
             'teleoperation_reason':''if self.teleoperation else'Leader/Precision 구성이 없어 관측만 가능합니다. Capture의 장치 설정에서 Leader를 선택하세요.',
-            'capture_request_allowed':self.state in('OBSERVING','TELEOP_ACTIVE')and not busy and not self.closing,'capture_pending':busy,'snapshots':len(self.snapshots),**progress}}})
+            **self.capture_queue.progress(),'snapshots':len(self.snapshots),**progress}}})
     def ack(self,c,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':c['command_id'],'status':status,**({'reason':reason}if reason else{})}})
     def connect(self):
         self.state='CONNECTING';self.emit(capture_reason='Follower/Camera 연결과 선택 Scene 초기화 중')
         try:
+            self.writer.submit(writer_ready).result(timeout=30)
             for device in self.devices.values():device.connect()
             for camera in self.cameras.values():camera.start()
             from ..recipe import verify_prepared_inputs
@@ -70,11 +69,15 @@ class RealSimSession:
                     self.control.start(c['command_id']);self.state='TELEOP_ACTIVE';self.emit();self.ack(c)
                 except Exception as error:self.last_error=str(error);self.ack(c,'rejected',str(error));self.emit(error=str(error))
                 continue
-            if c['kind']!='session_snapshot':self.ack(c,'rejected','Unsupported Real/Sim session command');continue
-            if self.state not in('OBSERVING','TELEOP_ACTIVE')or self.acquiring is not None or self.pending is not None or self.future is not None or self.rendered is not None:
-                self.ack(c,'rejected','Wait for Real/Sim connection or current Capture to finish');continue
-            self.acquiring=c;self.acquire_deadline=time.monotonic()+5;self.state='CAPTURING';self.emit(capture_reason='최신 영상·관절 정합 확인 중')
-    def observe(self):
+            try:
+                if c['kind']=='session_import':self.capture_queue.retry(c);continue
+                if c['kind']!='session_snapshot':raise ValueError('Unsupported Real/Sim session command')
+                if self.closing or self.state not in('OBSERVING','TELEOP_ACTIVE'):raise ValueError('Wait for Real/Sim connection')
+                self.capture_queue.request(c)
+            except Exception as error:
+                if isinstance(error,DeviceError)and self.control:self.control.stop()
+                self.ack(c,'rejected',str(error));self.emit(error=str(error))
+    def read_observation(self):
         if self.control:samples=self.control.samples(self.history[-1]['timestamp_ns']if self.history else 0)
         else:
             native,interval=self.follower.read();q=observed_positions(self.follower.precision_mapper,native,raw=self.follower.last_raw,motor_specs=self.follower.motor_specs)
@@ -84,50 +87,30 @@ class RealSimSession:
             if not self.history or t>self.history[-1]['timestamp_ns']:
                 self.history.append({'timestamp_ns':t,'native':native,'raw':sample['raw'],'q_measured':sample['q_measured'],'feedback_interval':interval});self.stability.add(t,native)
         t=self.history[-1]['timestamp_ns']
-        self.packets={n:c.nearest(t,not_after=True)for n,c in self.cameras.items()};self.observed_at=time.monotonic_ns();self.collect_control()
-        self.renderer.observe(self.history[-1]['q_measured']);result=self.renderer.poll()
-        if self.renderer.last_live is not None and self.state=='CONNECTING':self.state='OBSERVING'
+        self.packets={n:c.nearest(t,not_after=True)for n,c in self.cameras.items()};self.observed_at=time.monotonic_ns()
+    def observe(self):
+        self.read_observation();t=self.history[-1]['timestamp_ns'];self.collect_control()
+        if not self.capture_queue.render_error:
+            try:
+                self.renderer.observe(self.history[-1]['q_measured']);result=self.renderer.poll()
+                if self.renderer.last_live is not None and self.state=='CONNECTING':self.state='OBSERVING'
+                if result is not None:self.capture_queue.rendered(result)
+            except Exception as error:
+                if self.state=='CONNECTING':raise
+                self.capture_queue.renderer_failed(error);self.emit(error='Sim renderer: '+str(error))
         if self.state=='CONNECTING'and time.monotonic()>self.render_deadline:raise TimeoutError('Selected Scene did not initialize within180s')
-        if result is not None:self.rendered=result
         from ..data import video
         if video._preview_sink:
             for name,packet in self.packets.items():
                 if packet is not None:video._preview_sink(name,packet['rgb'],packet['sequence'],t/1e9,0)
-        reason=capture_reason(self.history,self.stability,self.packets,self.store.last_sequences,busy=self.pending is not None or self.future is not None or self.rendered is not None)
+        reason=capture_reason(self.history,self.stability,self.packets,self.store.last_sequences,busy=False)
         self.emit(q_measured=self.history[-1]['q_measured'],capture_ready=not reason,capture_reason=reason or'최신 측정 관절값으로 Real/Sim Capture할 수 있습니다',
             simulation=None if self.renderer.last_live is None else {key:self.renderer.last_live[key] for key in ('applied_sim_joint_rad','sim_target_joint_rad','sim_joint_delta_rad','physics_steps','simulation_time_s','state_application')if key in self.renderer.last_live},
             camera_timing={n:None if p is None else {**self.cameras[n].statistics(),'age_ms':(time.monotonic_ns()-p['read_end']['monotonic_ns'])/1e6,'joint_skew_ms':(p['read_end']['monotonic_ns']-t)/1e6}for n,p in self.packets.items()},
             render_timing=None if self.renderer.last_live is None else {'render_ms':self.renderer.last_live['render_ms'],'age_ms':(time.monotonic_ns()-self.renderer.last_live['sim_timestamp']['monotonic_ns'])/1e6})
-        if self.acquiring:
-            if not reason:
-                state=snapshot_state(self.follower,list(self.history),self.packets,self.stability.assess());state.update(captured_host_ns=self.observed_at,camera_metadata={n:c.metadata for n,c in self.cameras.items()},device_source=self.plan.effective_settings['execution']['device_source'])
-                self.command_pending=self.acquiring;self.acquiring=None;images={'real_'+n:p['rgb']for n,p in self.packets.items()}
-                identifier='pair_'+self.command_pending['command_id']
-                self.renderer.capture({'id':identifier,'sample':{'q_measured':state['physical_q_measured']}});self.render_deadline=time.monotonic()+180
-                self.future=self.writer.submit(self.store.prepare,identifier,state,images);self.phase='prepare'
-            elif time.monotonic()>self.acquire_deadline:
-                self.ack(self.acquiring,'rejected','5초 안에 정합된 관측을 얻지 못했습니다: '+reason);self.acquiring=None;self.state=self.observation_state()
         self.poll_save()
-        if self.pending is not None and self.rendered is not None and self.future is None and not self.closing:
-            self.future=self.writer.submit(self.store.finish,self.pending,rendered=self.rendered);self.phase='finish';self.rendered=None
     def poll_save(self):
-        if self.future is None or not self.future.done():return
-        future=self.future;self.future=None
-        try:
-            result=future.result()
-            if self.phase=='prepare':
-                self.pending=result
-                if self.closing:
-                    self.ack(self.command_pending,'rejected','Stopped before Pair completion; sealed observation retained');self.command_pending=None
-            else:
-                self.snapshots.append(result);warnings=self.renderer.release_capture(self.pending['id'])
-                if warnings:self.events({'kind':'log','payload':{'level':'warning','message':'Render cleanup: '+str(warnings)}})
-                self.pending=None;self.ack(self.command_pending);self.command_pending=None;self.state='DISCONNECTING'if self.closing else self.observation_state();self.emit(snapshot=result)
-        except Exception as error:
-            self.last_error=str(error)
-            if self.command_pending:self.ack(self.command_pending,'rejected',str(error));self.command_pending=None
-            if self.control:self.control.stop()
-            self.state='OBSERVING';self.emit(error=str(error),pending_snapshot=self.pending)
+        self.capture_queue.poll()
     def collect_control(self):
         if not self.control:return
         rows,error=self.control.drain();self.control_history.extend(rows)
@@ -148,19 +131,14 @@ class RealSimSession:
                 try:self.collect_control()
                 except Exception as error:errors.append(str(error))
             if self.control.recording_error and self.control.recording_error not in errors:errors.append(self.control.recording_error)
-        if self.acquiring:self.ack(self.acquiring,'rejected','Stopped before Capture');self.acquiring=None
         try:close_devices({**(self.devices if stopped else{}),**self.cameras})
         except Exception as error:errors.append(str(error))
         if self.renderer:
             try:self.renderer.close()
             except Exception as error:errors.append(str(error))
         try:
-            if self.future is not None:
-                try:self.future.result()
-                except Exception:pass
-                self.poll_save()
-            if self.command_pending:self.ack(self.command_pending,'rejected','Stopped before Pair completion; pending observation retained');self.command_pending=None
-            self.writer.shutdown(wait=True)
+            try:self.capture_queue.close()
+            finally:self.writer.shutdown(wait=True)
         except Exception as error:errors.append(str(error))
         self.terminal=True;self.state='FAILED'if errors else'DISCONNECTED';self.emit(cleanup_errors=errors)
         if errors:raise DeviceError('real_sim_close','; '.join(errors),effect='not_applied')
@@ -177,7 +155,6 @@ def run(plan,*,events,commands):
             begin=time.monotonic();session.dispatch(commands())
             if session.terminal:break
             if time.monotonic_ns()-session.last_heartbeat>3000000000:raise DeviceError('real_sim','UI heartbeat lost; closing observation',effect='not_applied')
-            if session.renderer.capture_id is not None and time.monotonic()>session.render_deadline:raise TimeoutError('Frozen Pair render timed out; observation retained')
             session.observe();time.sleep(max(0,1/30-(time.monotonic()-begin)))
     except Exception as exc:error=str(exc);raise
     finally:
@@ -186,7 +163,7 @@ def run(plan,*,events,commands):
             else:close_devices({**devices,**cameras})
         finally:
             report={'state':session.state if session else'FAILED','error':error or(session.last_error if session else None),'scene_identity':dict(plan.scene_identity),'snapshots':session.snapshots if session else[],
-            'pending_snapshot':session.pending if session else None,'hardware_connected':plan.effective_settings['execution']['device_source']=='hardware',
+            'pending_snapshot':next((r['pending']for r in session.capture_queue.pending_records()if r.get('pending')),None)if session else None,'pending_captures':session.capture_queue.pending_records()if session else[],'hardware_connected':plan.effective_settings['execution']['device_source']=='hardware',
             'pending_control_rows':len(session.control.rows)if session and session.control else 0,'control_record_error':session.control.recording_error if session and session.control else None,
             'unwritten_control_records':list(session.control.rows)if session and session.control else[],
             'recent_control_records':list(session.control_history)if session else[],

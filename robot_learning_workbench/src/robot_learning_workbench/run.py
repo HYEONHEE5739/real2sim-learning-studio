@@ -311,7 +311,7 @@ def _ack(run_dir,state,command_id,status,*,applied_tick=None,reason=None):
 
 
 _COMMANDS={'gripper_approve':{'proposal_sha256','target_raw','supervised','clear','stop_ready'},'cancel':{'reason'},'pause':set(),'resume':set(),'step':{'count'},'mark':{'event','frame'},'skip':{'reason'},'save':set(),'discard':{'reason'}}
-_SESSION_COMMANDS={'session_snapshot':set(),'session_disconnect':set(),'session_finish':set(),'teleop_stop':set(),
+_SESSION_COMMANDS={'session_snapshot':{'requested_ns','policy'},'session_disconnect':set(),'session_finish':set(),'teleop_stop':set(),
                    'teleop_start':set(),'session_import':{'snapshot_id'}}
 _COMMANDS.update(_SESSION_COMMANDS)
 _PRECISION_COMMANDS={'precision_select':{'joint'},'precision_record':{'joint','angle_rad'},'precision_save':{'path','overwrite'},'precision_remove':{'reference_id'}}
@@ -324,7 +324,10 @@ def _command(command):
     _identifier(command.get('command_id'));kind=command.get('kind');payload=command.get('payload',{})
     if kind not in _COMMANDS or not isinstance(payload,dict) or set(payload)-_COMMANDS[kind]:_fail('PROTOCOL_INVALID','command','unsupported kind/payload fields')
     if kind=='calibration_response'and(set(payload)!={'prompt_id','response'}or not all(isinstance(payload[k],str)for k in payload)):_fail('PROTOCOL_INVALID',kind,'current prompt ID and text response required')
-    if kind in _SESSION_COMMANDS and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
+    if kind in _SESSION_COMMANDS and kind!='session_snapshot'and set(payload)!=_SESSION_COMMANDS[kind]:_fail('PROTOCOL_INVALID',kind,'exact session command fields required')
+    if kind=='session_snapshot':
+        if 'requested_ns'in payload and(type(payload['requested_ns'])is not int or payload['requested_ns']<=0):_fail('PROTOCOL_INVALID',kind,'positive integer request timestamp required')
+        if 'policy'in payload and payload['policy']not in('observation','calibration'):_fail('PROTOCOL_INVALID',kind,'unknown capture policy')
     if kind=='session_import':_identifier(payload['snapshot_id'])
     if kind in _PRECISION_COMMANDS:
         import math
@@ -426,6 +429,8 @@ def _stage_event(root,state,event):
             if set(payload)!={'command_id','status','reason'} or not isinstance(payload['reason'],str) or not payload['reason']:_fail('PROTOCOL_INVALID','command_ack','rejection reason required')
             return _ack(root,state,cid,'rejected',reason=payload['reason'])
         command=_read(root/'commands'/(cid+'.json'))['payload'];tick=payload.get('applied_tick')
+        if payload.get('status')=='accepted'and command['kind']in('session_snapshot','session_import')and set(payload)=={'command_id','status'}:
+            return _ack(root,state,cid,'accepted')
         if payload.get('status')!='completed' or (command['kind'] in ('mark','skip','step','save','discard') and (type(tick) is not int or tick<0)):_fail('PROTOCOL_INVALID','command_ack','completion/applied tick required')
         return _ack(root,state,cid,'completed',applied_tick=tick)
     if kind=='preview':

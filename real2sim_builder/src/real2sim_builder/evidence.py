@@ -56,7 +56,7 @@ def add_image(project, path, camera='side', split='train', timestamp=None, conte
         row.update(eligible=False, exclusion_reasons=['reference_camera_not_calibrated_for_pixel_fitting'])
     if not any((relative in (e['path'], e.get('original_path')) and e['camera'] == camera for e in evidence['images'])):
         evidence['images'].append(row)
-    write(project.root / 'input/evidence.yaml', evidence)
+    project.write_evidence(evidence)
     project.invalidate()
     return row
 
@@ -75,7 +75,7 @@ def add_video(project, path, camera='side', split='train', max_frames=12, *, rol
     if split not in ('train', 'validation') or not 1 <= max_frames <= 1000:
         raise ValueError('Invalid video sampling')
     evidence['videos'].append(video)
-    write(project.root / 'input/evidence.yaml', evidence)
+    project.write_evidence(evidence)
     project.invalidate()
 
 
@@ -111,13 +111,13 @@ def extract_videos(project,paths=None):
                 current=project.evidence
                 row=next(r for r in current['images']if r['path']==added['path']and r['camera']==video['camera'])
                 row.update(source_video=video['path'],source_video_sha256=sha(local_path(project.root,video['path'])),video_frame_index=int(i))
-                write(project.root/'input/evidence.yaml',current)
+                project.write_evidence(current)
             video['extracted'] = True
         finally:
             capture.release()
     current = project.evidence
     current['videos'] = evidence['videos']
-    write(project.root / 'input/evidence.yaml', current)
+    project.write_evidence(current)
 
 
 def asset_importer(project, scene):
@@ -296,7 +296,7 @@ def import_metadata(project, path, kind='measurements'):
             raise ValueError('Mask image must identify one imported frame')
         mask['image'] = matches[0]['path']
         evidence['masks'].append(mask)
-    write(project.root / 'input/evidence.yaml', evidence)
+    project.write_evidence(evidence)
 
 
 def import_robot(project, urdf, joints=None, base=None, recorded_links=None):
