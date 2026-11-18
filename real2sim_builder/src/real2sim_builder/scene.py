@@ -87,6 +87,52 @@ def local_path(root, relative):
     return p
 
 
+def _validate_mesh(geometry, assets, root, *, collision):
+    scale = np.asarray(geometry.get('scale', [1, 1, 1]))
+    if scale.shape != (3,) or not np.isfinite(scale).all() or min(scale) <= 0:
+        raise ValueError('Invalid mesh scale')
+    if geometry['asset'] not in assets:
+        raise ValueError('Unknown mesh asset')
+    if collision and root:
+        from .calibration.geometry import mesh_data
+        vertices, faces = mesh_data(local_path(root, assets[geometry['asset']]['path']))
+        unique = np.unique(vertices, axis=0)
+        for face in faces:
+            triangle = vertices[face]
+            normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+            length = np.linalg.norm(normal)
+            if length < 1e-12:
+                continue
+            distance = (unique - triangle[0]) @ (normal / length)
+            if distance.min() < -1e-06 and distance.max() > 1e-06:
+                raise ValueError('Concave collision mesh: use primitive/convex compound decomposition')
+
+
+def validate_pose_state(scene):
+    """Check posed state only after the caller verified the immutable Scene.
+
+    This does not replace validate() at input/export boundaries. Runtime owners
+    must invalidate their static validation when package/model/settings change.
+    """
+    frames = scene['frames']
+    if 'world' not in frames or frames['world']['parent'] is not None:
+        raise ValueError('Missing world root')
+    for name, frame in frames.items():
+        transform(checked_value(frame['transform']))
+        visited = set()
+        current = name
+        while current is not None:
+            if current in visited or current not in frames:
+                raise ValueError('Cyclic or missing frame parent')
+            visited.add(current)
+            current = frames[current]['parent']
+    for row in [*scene['objects'], *scene['cameras']]:
+        if row['frame'] not in frames:
+            raise ValueError('Missing posed observation frame')
+        transform(checked_value(row['pose']))
+        transform(world_pose(scene, row))
+
+
 def validate(scene, root=None, complete=False):
     if scene.get('schema') != SCHEMA or scene.get('units') != 'm':
         raise ValueError('Unsupported scene schema/units')
@@ -138,31 +184,12 @@ def validate(scene, root=None, complete=False):
                 for part in parts(obj, field):
                     if part.get('asset')and part['asset']not in scene['assets']:raise ValueError('Unknown compound asset')
                     if part.get('texture')and part['texture']not in scene['assets']:raise ValueError('Unknown compound texture')
-                    if field=='collision'and part['type']=='mesh'and root:
-                        temporary=__import__('copy').deepcopy(obj);temporary[field]={k:v for k,v in part.items()if k not in('pose','dimensions')}
-                        minimal=empty('collision validation');minimal['objects']=[temporary];minimal['frames']=scene['frames'];minimal['assets']=scene['assets']
-                        validate(minimal,root)
+                    if part['type']=='mesh':
+                        _validate_mesh(part,scene['assets'],root,collision=field=='collision')
             if geometry.get('texture') and geometry['texture'] not in scene['assets']:
                 raise ValueError('Unknown texture asset')
             if geometry['type'] == 'mesh':
-                scale = geometry.get('scale', [1, 1, 1])
-                if np.asarray(scale).shape != (3,) or not np.isfinite(scale).all() or min(scale) <= 0:
-                    raise ValueError('Invalid mesh scale')
-                if geometry['asset'] not in scene['assets']:
-                    raise ValueError('Unknown mesh asset')
-                if field == 'collision' and root:
-                    from real2sim_builder.calibration.geometry import mesh_data
-                    vertices, faces = mesh_data(local_path(root, scene['assets'][geometry['asset']]['path']))
-                    unique = np.unique(vertices, axis=0)
-                    for face in faces:
-                        triangle = vertices[face]
-                        normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
-                        length = np.linalg.norm(normal)
-                        if length < 1e-12:
-                            continue
-                        distance = (unique - triangle[0]) @ (normal / length)
-                        if distance.min() < -1e-06 and distance.max() > 1e-06:
-                            raise ValueError('Concave collision mesh: use primitive/convex compound decomposition')
+                _validate_mesh(geometry,scene['assets'],root,collision=field=='collision')
             if geometry['type'] == 'container':
                 wall = checked_value(geometry['wall'])
                 if complete and (wall is None or dims is None):

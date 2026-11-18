@@ -14,6 +14,7 @@ class SessionClient(QObject):
     def __init__(self,python,modules,parent=None):
         super().__init__(parent);self.modules=str(modules);self.handle=None;self.busy=False;self.running=False;self.phase=None;self.cursor=0;self.generations={};self.heartbeat=0;self.cancel_requested=False
         self.exit_pending=None
+        self.startup_times_ns={}
         self.job=BackendJob(python,self);self.job.finished.connect(self.done);self.job.log.connect(self.error)
         self.timer=QTimer(self);self.timer.setInterval(80);self.timer.timeout.connect(self.poll);self.timer.start()
     def active(self):return self.busy or self.running
@@ -21,22 +22,28 @@ class SessionClient(QObject):
         if self.active():raise ValueError('기존 연결 종료를 기다리세요')
         import yaml
         self.stage=yaml.safe_load(Path(path).read_text())['stage']
+        self.startup_times_ns={'prepare_started':time.monotonic_ns()};self.progress.emit({'connection_phase':'scene_check','session_state':'CONNECTING'})
         self.path=str(path);self.busy=True;self.phase='prepare';self.cancel_requested=False;self.job.start('prepare',path=self.path,modules=self.modules)
     def done(self,response):
         self.busy=False
         if not response.get('ok'):self.error.emit(response.get('error',{}).get('message','Backend error'));self.terminal.emit('failed');return
         result=response['result']
         if self.phase=='prepare':
+            self.startup_times_ns['prepared']=time.monotonic_ns()
             if self.cancel_requested:self.terminal.emit('cancelled');return
             if not result.get('runnable'):self.error.emit(result['reason']);self.terminal.emit('failed');return
             self.start_prepared(self.path,result)
         elif self.phase=='start':
+            self.startup_times_ns['worker_spawn_received']=time.monotonic_ns()
+            self.progress.emit({'client_startup_times_ns':dict(self.startup_times_ns)})
             self.handle=result;self.running=True;self.cursor=0;self.generations.clear();self.heartbeat=0;self.exit_pending=None
             if self.cancel_requested:self.send('cancel')
     def start_prepared(self,path,prepared):
         if self.active():raise ValueError('기존 실행 종료를 기다리세요')
         import yaml
         self.path=str(path);self.stage=yaml.safe_load(Path(path).read_text())['stage']
+        if not hasattr(self,'startup_times_ns'):self.startup_times_ns={}
+        self.startup_times_ns['worker_spawn_requested']=time.monotonic_ns()
         self.busy=True;self.phase='start';self.cancel_requested=False
         self.job.start('start',path=self.path,modules=self.modules,request_id=uuid.uuid4().hex,expected_recipe_sha256=prepared['recipe_sha256'],expected_prepared_sha256=prepared['prepared_sha256'])
 
@@ -45,7 +52,7 @@ class SessionClient(QObject):
         from ..run import RunHandle,send_command
         h=self.handle;key=uuid.uuid4().hex
         payload=dict(payload or{})
-        if kind=='session_snapshot'and self.stage in('capture_session','paired_session'):
+        if kind=='session_snapshot'and self.stage in('scene_capture','capture_session','paired_session'):
             payload.setdefault('requested_ns',time.monotonic_ns());payload.setdefault('policy','observation')
         command={'command_id':key,'kind':kind,'payload':payload}
         if context:
@@ -54,7 +61,7 @@ class SessionClient(QObject):
         receipt=send_command(RunHandle(h['run_id'],h['request_id'],Path(h['run_dir'])),command)
         if receipt.status=='rejected':raise ValueError(receipt.reason)
         if kind=='session_snapshot':
-            self.progress.emit({'capture_update':dict(id=('pair_'if self.stage=='paired_session'else'snapshot_')+key,
+            self.progress.emit({'capture_update':dict(id=('pair_'if self.stage=='paired_session'else'observation_'if self.stage=='scene_capture'else'snapshot_')+key,
                 command_id=key,phase='REQUESTED',requested_ns=payload.get('requested_ns'),path=None,q_measured=[])})
         return key
     def poll(self):

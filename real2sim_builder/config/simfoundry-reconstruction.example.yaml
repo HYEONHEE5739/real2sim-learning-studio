@@ -38,6 +38,13 @@ physics:
   apply_stabilized_poses: false  # Requires matching explicit pose_review; never automatic promotion.
 simulator:
   engine: mujoco
+  mode: native  # Loader-checked Native Pose/Physics profiles; never authored fallback.
+  # Native readiness needs a manifest-bound Follower mapping, Robot Base,
+  # shared Wrist mount and explicit Side/Wrist sensor calibration. Initial q
+  # comes from a matching measured Capture or explicit six model-radian values.
+  # native_options:
+  #   initial_joint_rad: [USER_MEASURED_OR_EXPLICIT_VALUES]
+  # Use mode: authored only for an explicit visual Review Package.
 runtimes:
   blender:
     executable: /EXISTING/Blender/blender  # Scoped existing REAL2SIM_BLENDER selector.

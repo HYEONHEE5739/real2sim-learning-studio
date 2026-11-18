@@ -85,17 +85,22 @@ def source_inputs(path,engine):
     from .robot.registration import bound_configuration
     project=Project(path,read_only=True);engine_key='isaac'if engine=='isaaclab'else engine
     if engine_key not in('mujoco','isaac'):raise ValueError('MuJoCo 또는 Isaac을 선택하세요.')
-    records=[row for row in project.info.get('execution_packages',[])if engine_key in row.get('engine_config',{})]
+    records=[row for row in project.info.get('execution_packages',[])if engine_key in row.get('engine_config',{})or engine_key in row.get('execution_readiness',{})]
     if not records:raise ValueError('선택한 Scene에 이 엔진의 실행 Package가 등록되지 않았습니다.')
     # Registration order is the Project's revision order; never fall back from a
     # broken newest revision to an older Package without the user's knowledge.
     record=records[-1];scene=(project.root/record['path']/'scene.json').resolve()
-    settings=(project.root/record['engine_config'][engine_key]).resolve()
+    settings_path=record.get('engine_profiles',{}).get(engine_key,{}).get('physics')if 'engine_profiles'in record else record['engine_config'][engine_key]
+    if not settings_path:
+        needs=record.get('execution_readiness',{}).get(engine_key,{}).get('needs',[])
+        raise ValueError('Native Physics 실행 준비가 부족합니다: '+'; '.join(needs))
+    settings=(project.root/settings_path).resolve()
     if not scene.is_relative_to(project.root)or not settings.is_relative_to(project.root):raise ValueError('Scene 실행 자산은 선택 Project 내부에 있어야 합니다.')
     package=load_scene(scene,expected=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']))
     if engine_key not in package.scene['engines']:raise ValueError('Scene Package가 선택 엔진을 지원하지 않습니다.')
     config=read(settings)
     if config.get('render_type')=='authored':raise ValueError('이 Scene에는 비교용 렌더 설정만 있습니다. Builder에서 Source용 물리 실행 자산과 설정을 등록하세요.')
+    if config.get('simulation_mode','physics')!='physics':raise ValueError('Source에는 Native Physics 설정이 필요합니다. Native Pose는 영상 비교용입니다.')
     workspace=project.root.parent.parent;configuration=bound_configuration(project.root,workspace)
     if configuration is None:raise ValueError('이 Scene에 장치 설정이 없습니다. Scene Prepare에서 Leader 장치 구성을 저장하세요.')
     device=read(configuration).get('inputs',{}).get('leader_device_profile')

@@ -1231,9 +1231,17 @@ def package_scene(candidate, config, previous, folder, provider):
         if metrics.exists()and not(folder/'prior_metrics.json').exists():write(folder/'prior_metrics.json',read(metrics))
         write(metrics,report)
         identity=export_revision(candidate.project,destination=package,candidate=candidate.name,
-                                 allow_unvalidated=True,revision='simfoundry-review-'+folder.name)
+                                 allow_unvalidated=True,revision='simfoundry-review-'+folder.name,
+                                 execution_mode=config.get('simulator',{}).get('mode','native'),
+                                 native_options=config.get('simulator',{}).get('native_options'))
+    spec=read(package/'scene.json')
+    records=candidate.project.info.get('execution_packages',[])
+    registered=next((r for r in records if r['manifest_sha256']==identity.manifest_sha256),{})
     return {'package':str(package),'identity':asdict(identity),'approved':False,'candidate_promoted':False,
-            'physical_verified':False,'coordinate_frame':previous[10]['coordinate_frame']}
+            'physical_verified':False,'coordinate_frame':previous[10]['coordinate_frame'],
+            'execution_mode':config.get('simulator',{}).get('mode','native'),
+            'native_readiness':spec['validation'].get('native_readiness',{}),
+            'engine_config':registered.get('engine_config',{})}
 
 
 def simulator_integration(candidate, config, previous, folder, provider):
@@ -1244,9 +1252,15 @@ def simulator_integration(candidate, config, previous, folder, provider):
     sensors=[name for name,role in roles.items()if role in('side','wrist')]
     engine=config.get('simulator',{}).get('engine','mujoco')
     if engine not in('mujoco','isaac'):raise ValueError('Unsupported simulator')
+    execution_mode=config.get('simulator',{}).get('mode','native')
+    settings=previous[13].get('engine_config',{}).get(engine)
+    if execution_mode=='native'and not settings:
+        readiness=previous[13].get('native_readiness',{}).get(engine,{})
+        raise StageNeeds('NEEDS_MORE_DATA','Native '+engine+' is not ready: '+'; '.join(readiness.get('needs',['No loader-checked execution settings'])))
     render_scene=folder/'simulator_scene.yaml';write(render_scene,scene)
     result=provider('simulator',{'project':str(candidate.project.root),'scene':str(render_scene),
-        'package':previous[13]['package'],'engine':engine,'camera_ids':sensors,'image_records':candidate.project.evidence['images']},folder/'native')
+        'package':previous[13]['package'],'engine':engine,'camera_ids':sensors,'image_records':candidate.project.evidence['images'],
+        'execution_mode':execution_mode,'engine_config':str(candidate.project.root/settings)if settings else None},folder/'native')
     if result.get('camera_ids')!=sensors:raise ValueError('Runtime sensor selection changed')
     missing=[role for role in('side','wrist')if role not in roles.values()]
     return {'runtime':result,'render_scene':str(render_scene),'render_scene_sha256':sha(render_scene),'sensor_ids':sensors,'missing_sensors':missing,

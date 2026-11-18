@@ -21,7 +21,10 @@ def scenes(workspace):
         project=Project(item['project'],read_only=True)
         for record in project.info.get('execution_packages',[]):
             scene=(project.root/record['path']/'scene.json').resolve()
-            configs={key:str((project.root/value).resolve())for key,value in record.get('engine_config',{}).items()}
+            # Source/DataGen/evaluation consume Physics, while Real/Sim uses
+            # the independently registered Pose profile for measured-q views.
+            selected={key:modes['physics']for key,modes in record['engine_profiles'].items()if 'physics'in modes}if 'engine_profiles'in record else record.get('engine_config',{})
+            configs={key:str((project.root/value).resolve())for key,value in selected.items()}
             if not scene.is_relative_to(project.root)or not scene.is_file()or any(not Path(p).is_relative_to(project.root)for p in configs.values()):continue
             rows.append({'name':project.info['name'],'project':str(project.root),'scene':str(scene),'scene_id':record['scene_id'],
                          'revision':record['revision'],'manifest_sha256':record['manifest_sha256'],'engines':sorted(configs),'engine_config':configs})

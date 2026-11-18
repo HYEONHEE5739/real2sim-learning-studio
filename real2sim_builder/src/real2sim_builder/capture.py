@@ -392,11 +392,17 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None, *, eviden
     return report
 
 
-def observation_scene(scene, image, root, complete=True):
+def observation_scene(scene, image, root, complete=True, *, validate_static=True):
+    from .scene import validate_pose_state
     registration=scene.get('view_registrations',{}).get(image.get('id'))
     if not image.get('session_id')and not registration:
         return scene
-    result = copy.deepcopy(scene)
+    # Runtime owners already checked static package identity. Copy only the
+    # fields a measured observation can change; preserve the source description.
+    result = copy.deepcopy(scene) if validate_static else {
+        **scene, 'frames':copy.deepcopy(scene['frames']),
+        'objects':[dict(obj) for obj in scene['objects']],
+        'cameras':copy.deepcopy(scene['cameras'])}
     if registration:
         if registration['source_image_sha256']!=image['sha256']or registration['scene_state_id']!=image['scene_state_id']:
             raise ValueError('View registration identity differs')
@@ -412,7 +418,8 @@ def observation_scene(scene, image, root, complete=True):
             camera=next(c for c in result['cameras']if c['id']==image['camera'])
             camera['frame']='world';camera['pose']=value(registration['T_world_camera'],'optimized',registration['calibration_evidence'])
     if not image.get('session_id')and image.get('camera_type')!='wrist':
-        validate(result,root,complete=complete)
+        if validate_static:validate(result,root,complete=complete)
+        else:validate_pose_state(result)
         return result
     if (not image.get('eligible')and not registration) or image.get('q_measured') is None:
         raise ValueError('Observation excluded: ' + str(image.get('exclusion_reasons')))
@@ -431,7 +438,8 @@ def observation_scene(scene, image, root, complete=True):
                 raise ValueError('Missing reference geometry link-local transform')
             obj['frame'] = 'robot_base'
             obj['pose'] = value((fk[obj['link']] @ np.asarray(obj['link_local_pose'])).tolist(), 'derived', ['measured joint FK'])
-    validate(result, root, complete=complete)
+    if validate_static:validate(result, root, complete=complete)
+    else:validate_pose_state(result)
     return result
 
 

@@ -18,8 +18,12 @@ class SceneView:
         self.source_scene={'package_path':str(self.package.root),'identity':self.scene_identity,
             'authored_scene_sha256':file_sha256(authored)if authored.is_file()else None}
         self.settings_sha256=file_sha256(self.settings_path);self.settings=json.loads(self.settings_path.read_text());self.settings.pop('package_root',None)
+        expected_identity=self.settings.pop('scene_identity',None)
+        if expected_identity is not None and expected_identity!=self.scene_identity:raise ValueError('Engine settings belong to another Scene revision')
         self.render_type=self.settings.pop('render_type','native')
         if self.render_type not in('native','authored'):raise ValueError('Unsupported Scene render settings')
+        self.simulation_mode=self.settings.pop('simulation_mode','physics'if self.render_type=='native'else'authored')
+        if self.simulation_mode not in(('pose','physics')if self.render_type=='native'else('authored',)):raise ValueError('Explicit native Pose/Physics or authored review mode required')
         matches=[]
         for name,record in self.package.calibration['records'].items():
             if record['kind']!='encoder_mapping'or record['application'].get('phase')!='device_observation':continue
@@ -35,7 +39,11 @@ class SceneView:
             validate_binding(self)
         self.watched=[self.path,self.package.root/'manifest.json',self.settings_path,*[self.package.root/f.path for f in self.package.files]]
         self.stats=self._stats();self.identity={'scene':self.scene_identity,'settings_sha256':self.settings_sha256,'mapping_sha256':mapping['sha256'],'engine':engine}
-    def _stats(self):return [(str(p),p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns)for p in self.watched]
+    def _stats(self):
+        result=[]
+        for path in self.watched:
+            stat=path.stat();result.append((str(path),stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns))
+        return result
     def verify(self):
         if self._stats()!=self.stats:
             load_scene(self.path,expected=self.package.identity)
@@ -46,31 +54,45 @@ class SceneView:
 class NativeRenderer:
     state_application='native_physics_joint_target'
     def __init__(self,view,directory):
+        self.initialization_times_ns={'started':time.monotonic_ns()}
         self.view=view;self.env=None;self.renderer=None;self.model=None;self.binding=None;self.total_physics_steps=0;self.last_frame_steps=0
         directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
         if view.engine=='mujoco':
             import mujoco
             from ..engines.mujoco.model import ModelConfig,build_model
-            self.model,self.binding=build_model(view.package,ModelConfig(**view.settings));self.data=mujoco.MjData(self.model)
+            self.initialization_times_ns['model_compile_started']=time.monotonic_ns()
+            self.model,self.binding=build_model(view.package,ModelConfig(**view.settings),projection_adapter=True);self.data=mujoco.MjData(self.model)
+            self.initialization_times_ns['model_compiled']=time.monotonic_ns()
             from ..engines.mujoco.state import restore_episode
             restore_episode(self.model,self.data,self.binding,None)
             self.renderer=mujoco.Renderer(self.model,height=480,width=640)
+            self.joint_limits=np.asarray(self.binding.limits)
         elif view.engine=='isaac':
             from isaaclab.envs import ManagerBasedEnv
             from ..engines.isaac.env_cfg import build_env_cfg
-            try:self.env=ManagerBasedEnv(cfg=build_env_cfg(view.package,view.settings,runtime_directory=directory/'native'));self.env.reset()
+            try:self.env=ManagerBasedEnv(cfg=build_env_cfg(view.package,view.settings,runtime_directory=directory/'native',projection_adapter=True));self.env.reset()
             except BaseException:self.close();raise
+            from .calibration import execution_urdf,joint_specs
+            bounds=joint_specs(execution_urdf(view.package));self.joint_limits=np.asarray([bounds[n]['limits']for n in JOINTS])
         else:raise ValueError('Actual MuJoCo or Isaac Scene engine required')
+        self.projection={name:dict(resolution=list(row['resolution']),K={'value':np.asarray(row['K']).tolist()},
+            distortion={'value':list(row['distortion'])})for name,row in view.package.scene['cameras'].items()if name in('side','wrist')}
+        self.initialization_times_ns['ready']=time.monotonic_ns()
     @property
     def control_dt_s(self):
         return float(self.model.opt.timestep)*self.binding.decimation if self.view.engine=='mujoco'else self.env.physics_dt*self.env.cfg.decimation
 
     def advance(self,q):
         """Progress a control interval even when no new preview is requested."""
-        self.view.verify();raw=np.asarray(q)
-        if raw.shape!=(6,)or raw.dtype.kind not in'fiu'or not np.isfinite(raw).all():raise ValueError('Six finite measured model-radian joints required')
-        target,steps=self._advance(raw.astype(np.float64));self.total_physics_steps+=steps
+        self.view.verify();measured=self._measured(q)
+        target,steps=self._advance(measured);self.total_physics_steps+=steps
         return target
+    def _measured(self,q):
+        raw=np.asarray(q)
+        if raw.shape!=(6,)or raw.dtype.kind not in'fiu'or not np.isfinite(raw).all():raise ValueError('Six finite measured model-radian joints required')
+        measured=raw.astype(np.float64)
+        if np.any(measured<self.joint_limits[:,0])or np.any(measured>self.joint_limits[:,1]):raise ValueError('Measured joint outside Native model limits')
+        return measured
     def _advance(self,measured):
         # Same checked targets and physics intervals as Source/DataGen.
         # https://mujoco.readthedocs.io/en/3.3.7/APIreference/APIfunctions.html#mj-step
@@ -84,10 +106,8 @@ class NativeRenderer:
         robot=self.env.scene['robot'];ids=[robot.joint_names.index(n)for n in JOINTS]
         return robot.data.joint_pos_target[0,ids].detach().cpu().numpy().copy(),self.env.cfg.decimation
     def render(self,q):
-        self.view.verify();begin=time.monotonic_ns();raw=np.asarray(q)
-        if raw.shape!=(6,)or raw.dtype.kind not in'fiu'or not np.isfinite(raw).all():raise ValueError('Six finite measured model-radian joints required')
-        measured=raw.astype(np.float64);images={};cameras={};objects={}
-        target=self.advance(measured)
+        self.view.verify();begin=time.monotonic_ns();measured=self._measured(q);images={};cameras={};objects={}
+        target,steps=self._advance(measured);self.total_physics_steps+=steps
         if self.view.engine=='mujoco':
             from ..engines.mujoco.state import camera_pose
             from ..engines.mujoco.rendering import camera_rgb
@@ -116,6 +136,11 @@ class NativeRenderer:
                 matrix[:3,:3]=Rotation.from_quat(quaternion[[1,2,3,0]]).as_matrix();matrix[:3,3]=asset.data.root_pos_w[0].detach().cpu().numpy()
                 objects[name]=matrix.tolist()
             simulation_time=self.total_physics_steps*env.physics_dt
+        from real2sim_builder.cameras import distort_render
+        for name,rgb in images.items():
+            camera=self.projection[name]
+            if any(camera['distortion']['value']):images[name]=distort_render(camera,rgb)
+            cameras[name]['distortion']=camera['distortion']['value']
         steps=self.total_physics_steps-self.last_frame_steps;self.last_frame_steps=self.total_physics_steps
         return {'images':images,'measured_q_rad':measured.tolist(),'applied_sim_joint_rad':applied.tolist(),'sim_joint_delta_rad':(applied.astype(np.float64)-measured).tolist(),
             'sim_target_joint_rad':target.tolist(),'sim_object_poses_world':objects,'simulation_time_s':simulation_time,

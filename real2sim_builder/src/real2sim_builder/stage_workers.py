@@ -508,6 +508,35 @@ def physics(request):
 
 
 def simulator(request):
+    from PIL import Image
+    if request.get('execution_mode')=='native':
+        from real2sim_builder.export import verify_package
+        from robot_learning_workbench.robot.calibration import mapper_from_scene
+        from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
+        from robot_learning_workbench.robot.pose_render import create_pose_renderer
+        package=verify_package(request['package'])
+        records=[name for name,row in package.calibration['records'].items()
+            if row['kind']=='encoder_mapping'and row['application'].get('phase')=='device_observation']
+        if len(records)!=1:raise ValueError('Native simulator requires one Follower Mapping')
+        mapping=mapper_from_scene(package,records[0],role='follower',phase='device_observation').metadata()
+        view=SceneView(package.root/'scene.json',request['engine'],request['engine_config'],mapping)
+        if view.render_type!='native':raise ValueError('Native integration cannot substitute authored rendering')
+        launcher=None
+        try:
+            if request['engine']=='isaac':
+                from isaaclab.app import AppLauncher
+                launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
+            factory=create_pose_renderer if view.simulation_mode=='pose'else create_renderer
+            with factory(view,Path(request['output'])/'runtime')as renderer:
+                result=renderer.render(view.settings['initial_joint_rad'])
+                if set(request['camera_ids'])!=set(result['images']):raise ValueError('Native sensors differ from Stage14 selection')
+                paths=[]
+                for name,rgb in result.pop('images').items():
+                    path=Path(request['output'])/(name+'.png');Image.fromarray(rgb).save(path);paths.append(str(path))
+            return {**result,'status':'NOT_VERIFIED','runtime_loaded':True,'physical_verified':False,
+                'camera_ids':request['camera_ids'],'renders':paths,'q_scope':'declared initial model-radian state; no hardware or independent sensor validation'}
+        finally:
+            if launcher is not None:launcher.app.close()
     _builder_runtime()
     from real2sim_builder.files import read
     from real2sim_builder.export import verify_package

@@ -17,13 +17,18 @@ class RenderProcess:
     """Owned simulation child; real serial control remains in Session."""
     def __init__(self,plan,mapping):
         import subprocess,sys
-        self.root=plan.output_path/'renderer';self.root.mkdir();self.engine=plan.engine;self.capture_id=None;self.last_live=None;self.last_request=0;self.number=0
-        from .scene_render import SceneView
-        view=SceneView(plan.resolved_inputs['scene']['path'],plan.engine,plan.resolved_inputs['engine_config']['path'],mapping)
-        expected_settings=plan.resolved_inputs['engine_config']['files'][view.settings_path.name]
-        if view.scene_identity!=dict(plan.scene_identity)or view.settings_sha256!=expected_settings:raise ValueError('Prepared Scene or engine settings changed before render startup')
-        atomic_json(self.root/'config.json',dict(scene=str(view.path),settings=str(view.settings_path),mapping=mapping,identity=view.identity,engine=plan.engine))
+        self.startup_times_ns={'parent_started':time.monotonic_ns()}
+        self.root=plan.output_path/'renderer';self.root.mkdir();self.engine=plan.engine;self.capture_id=None;self.last_live=None;self.last_request=0;self.number=0;self.ready=None
+        # Prepare/connect already verified the plan. The child loads SceneView
+        # before declaring ready; the control owner need not build a second view.
+        scene=Path(plan.resolved_inputs['scene']['path']);settings=Path(plan.resolved_inputs['engine_config']['path'])
+        expected_settings=plan.resolved_inputs['engine_config']['files'][settings.name]
+        if file_sha256(settings)!=expected_settings:raise ValueError('Prepared engine settings changed before render startup')
+        identity=dict(scene=dict(plan.scene_identity),settings_sha256=expected_settings,mapping_sha256=mapping['sha256'],engine=plan.engine)
+        atomic_json(self.root/'config.json',dict(scene=str(scene),settings=str(settings),mapping=mapping,identity=identity,engine=plan.engine))
+        self.startup_times_ns['parent_inputs_checked']=time.monotonic_ns()
         self.log=(self.root/'stdout.log').open('wb');self.process=subprocess.Popen([sys.executable,'-B','-m','robot_learning_workbench.robot.render_worker',str(self.root)],stdout=self.log,stderr=subprocess.STDOUT,start_new_session=True)
+        self.startup_times_ns['spawned']=time.monotonic_ns()
 
     def observe(self,q):
         now=time.monotonic_ns()
@@ -34,8 +39,14 @@ class RenderProcess:
         if self.capture_id is not None:raise ValueError('One Pair render at a time')
         self.capture_id=pending['id'];atomic_json(self.root/'capture.json',{'id':self.capture_id,'q':pending['sample']['q_measured'],'requested_ns':time.monotonic_ns()})
 
+    def prioritize_capture(self,pending):
+        path=self.root/'capture-priority'
+        if pending:
+            if not path.exists():path.touch()
+        else:path.unlink(missing_ok=True)
+
     def _read(self,name,*,previous_id=None,decode=True):
-        path=self.root/name
+        read_started=time.monotonic_ns();sha_duration=0;path=self.root/name
         if not path.is_file():return None
         before=path.read_bytes();result=json.loads(before);images={}
         if result['id']==previous_id:return None
@@ -43,13 +54,19 @@ class RenderProcess:
             image=Path(row['path'])
             if not image.resolve().is_relative_to(self.root.resolve()):raise ValueError('Render result escaped owned storage')
             try:
-                if file_sha256(image)!=row['sha256']:return None
+                begin=time.monotonic_ns();actual_sha=file_sha256(image);sha_duration+=time.monotonic_ns()-begin
+                if actual_sha!=row['sha256']:return None
                 if decode:images[camera]=np.asarray(Image.open(image).convert('RGB'))
             except(FileNotFoundError,OSError):return None
         if path.read_bytes()!=before:return None
-        return {**result,'images':images,'result_latency_ms':(time.monotonic_ns()-result['requested_ns'])/1e6}
+        # Missing historical worker timestamps stay missing; never invent them.
+        verified=time.monotonic_ns();timing=dict(result.get('render_transport_times_ns',{}))
+        timing.update(parent_read_started=read_started,parent_verified=verified,parent_sha_duration=sha_duration)
+        return {**result,'images':images,'result_latency_ms':(verified-result['requested_ns'])/1e6,
+            'render_transport_times_ns':timing}
 
     def poll(self):
+        if self.ready is None and(self.root/'ready.json').is_file():self.ready=json.loads((self.root/'ready.json').read_text())
         if(self.root/'error.json').is_file():raise ValueError('Scene render failed: '+json.loads((self.root/'error.json').read_text())['error'])
         if self.process.poll()is not None:raise ValueError('Scene render child exited: '+str(self.process.returncode))
         live=self._read('live-result.json',previous_id=self.last_live['id']if self.last_live is not None else None)

@@ -7,7 +7,7 @@ from .calibration import JOINTS
 from ..data.native import atomic_json,file_sha256
 
 
-def snapshot_writer(store):
+def snapshot_writer(store=None,*,project=None,session_id=None):
     """One session-owned save process; never inherit an open serial device.
 
     Threads still share the control interpreter's GIL. Keep PNG/NumPy/native
@@ -18,18 +18,20 @@ def snapshot_writer(store):
     """
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
+    owner=store.project if store is not None else project
     return ProcessPoolExecutor(max_workers=1,mp_context=get_context('spawn'),
-        initializer=_initialize_writer,initargs=(str(store.project.root),store.session_id,str(store.model),store.mapping))
+        initializer=_initialize_writer,initargs=(str(owner.root),store.session_id if store else session_id,str(store.model)if store else None,store.mapping if store else None))
 
 
 def _initialize_writer(project_root,session_id,model,mapping):
     import cv2
     from real2sim_builder.project import Project
-    global _writer_store,_writer_pending
+    global _writer_store,_writer_pending,_writer_project,_writer_session_id
     # Canny/Laplacian on two camera frames must not reserve all host cores while
     # the motor owner and live renderer run. This setting is child-local.
     cv2.setNumThreads(1)
-    _writer_store=SnapshotStore(Project(project_root),session_id=session_id,model=model,mapping=mapping)
+    _writer_project=Project(project_root);_writer_session_id=session_id
+    _writer_store=SnapshotStore(_writer_project,session_id=session_id,model=model,mapping=mapping)if model else None
     _writer_pending={}
 
 
@@ -41,6 +43,12 @@ def writer_ready():
 
 def save_snapshot(operation,*args,**kwargs):
     """Run the existing transaction in its persistent, single save owner."""
+    if operation=='materials':
+        from .scene_observation import save_materials
+        return save_materials(_writer_project,_writer_session_id,*args,**kwargs)
+    if operation=='materials_retry':
+        from .scene_observation import recover_materials
+        return recover_materials(_writer_project,*args,**kwargs)
     if operation=='prepare':
         try:result=_writer_store.prepare(*args,**kwargs)
         except Exception as error:
@@ -67,8 +75,9 @@ def save_snapshot(operation,*args,**kwargs):
 
 
 class CaptureQueue:
-    """At most four frozen observations; reuse the existing save/render owners."""
-    capacity=4
+    """Two raw saves and two durable postprocess references; four total."""
+    capacity=2
+    postprocessing_capacity=2
 
     def __init__(self,session,*,paired=False):
         self.session=session;self.paired=paired;self.jobs={};self.failed={};self.last_sequences={}
@@ -76,10 +85,17 @@ class CaptureQueue:
 
     def progress(self):
         first=next(iter(self.jobs.values()),None)
-        return dict(capture_pending=bool(self.jobs),capture_queue_size=len(self.jobs),capture_queue_capacity=self.capacity,
-            capture_request_allowed=not self.session.closing and not self.session.terminal and self.session.state in('OBSERVING','TELEOP_ACTIVE')and len(self.jobs)<self.capacity and not self.render_error,
+        post=sum(self._postprocessing(j)for j in self.jobs.values());raw=len(self.jobs)-post
+        return dict(capture_pending=bool(self.jobs),capture_queue_size=raw,capture_queue_capacity=self.capacity,
+            capture_request_allowed=not self.session.closing and not self.session.terminal and self.session.state in('OBSERVING','TELEOP_ACTIVE')and raw<self.capacity and len(self.jobs)<self.capacity+self.postprocessing_capacity and not self.render_error,
+            postprocessing_queue_size=post,postprocessing_queue_capacity=self.postprocessing_capacity,
+            raw_capture_queue_size=raw,
             capture_phase=first['phase'].lower()if first else None,
             capture_elapsed_s=(time.monotonic_ns()-first['request']['requested_ns'])/1e9 if first else None)
+
+    @staticmethod
+    def _postprocessing(job):
+        return bool(job.get('postprocessing')or job['phase']in('SIM_PAIR','REGISTERING'))
 
     def _publish(self,job,phase,**extra):
         job['phase']=phase;job.setdefault('times',{})[phase]=time.monotonic_ns()
@@ -93,7 +109,8 @@ class CaptureQueue:
         self.session.emit(capture_update=row,**({'error':row['error']}if phase=='FAILED'else{}))
 
     def request(self,command):
-        if len(self.jobs)>=self.capacity:raise ValueError('Capture queue full (4); wait for a saved observation')
+        if len(self.jobs)-sum(self._postprocessing(j)for j in self.jobs.values())>=self.capacity or len(self.jobs)>=self.capacity+self.postprocessing_capacity:
+            raise ValueError('Capture queue full: original saves (2) / postprocessing (2); wait for a saved observation')
         if self.render_error:raise ValueError('Sim renderer unavailable; raw observations already saved are retained')
         from .capture import freeze_capture
         state,images,sequences=freeze_capture(self.session,command,self.last_sequences)
@@ -111,6 +128,7 @@ class CaptureQueue:
         self.session.ack(command,'accepted');self._publish(job,'QUEUED')
 
     def _finish(self,job,rendered=None):
+        job['postprocessing']=True
         job['future']=self.session.writer.submit(save_snapshot,'finish',job['pending'],rendered=rendered)
         self._publish(job,'REGISTERING')
 
@@ -149,7 +167,6 @@ class CaptureQueue:
                 if job['phase']=='QUEUED':
                     job['pending']=result;self._publish(job,'RAW_SAVED')
                     if closing:continue
-                    if not self.paired:self._finish(job)
                 else:
                     result.update(capture_elapsed_s=(time.monotonic_ns()-job['request']['requested_ns'])/1e9,
                         request=job['request'],phase_times_ns=dict(job['times']))
@@ -166,11 +183,22 @@ class CaptureQueue:
                 if job['id']not in self.jobs:raise  # Publication/event I/O failure must not rewrite a successful capture ACK.
                 self._fail(job,error)
         if closing:return
+        for job in list(self.jobs.values()):
+            if job['phase']=='RAW_SAVED'and not self._postprocessing(job):
+                if sum(self._postprocessing(j)for j in self.jobs.values())>=self.postprocessing_capacity:break
+                # Raw bytes are sealed. Only the path/q metadata remains in the
+                # bounded downstream stage; the original-save slot is returned.
+                job['postprocessing']=True
+                if not self.paired:
+                    try:self._finish(job)
+                    except Exception as error:self._fail(job,error)
+        priority=getattr(self.session.renderer,'prioritize_capture',None)if self.paired else None
+        if priority:priority(bool(self.rendering or any(j['phase']=='RAW_SAVED'and self._postprocessing(j)for j in self.jobs.values())))
         if self.render_error:
             for job in list(self.jobs.values()):
                 if job['phase']=='RAW_SAVED':self._fail(job,RuntimeError('Raw observation retained; Sim failed: '+self.render_error))
         elif self.paired and self.rendering is None:
-            job=next((j for j in self.jobs.values()if j['phase']=='RAW_SAVED'),None)
+            job=next((j for j in self.jobs.values()if j['phase']=='RAW_SAVED'and self._postprocessing(j)),None)
             if job:
                 try:
                     self.session.renderer.capture(job['pending']);self.rendering=job['id'];job['render_deadline']=time.monotonic()+180
@@ -183,13 +211,13 @@ class CaptureQueue:
 
     def retry(self,command):
         identifier=command['payload']['snapshot_id'];job=self.failed.get(identifier)
-        if len(self.jobs)>=self.capacity:raise ValueError('Capture queue full')
+        if len(self.jobs)>=self.capacity+self.postprocessing_capacity or sum(self._postprocessing(j)for j in self.jobs.values())>=self.postprocessing_capacity:raise ValueError('Capture queue full')
         if job is None or not job.get('pending'):raise ValueError('No sealed original observation is available to retry')
         if self.paired and self.render_error:raise ValueError('Reconnect the failed renderer before retrying this sealed observation')
         folder=Path(job['pending'].get('path')or job['pending']['staging'])
         if not(folder/'COMPLETE').is_file():
             raise ValueError('Original observation was not sealed; partial files retained, no registration retry possible')
-        self.failed.pop(identifier);job.update(command=command,error=None);self.jobs[identifier]=job
+        self.failed.pop(identifier);job.update(command=command,error=None,postprocessing=True);self.jobs[identifier]=job
         self.session.ack(command,'accepted')
         try:
             if self.paired and not(folder/'pair.json').is_file():self._publish(job,'RAW_SAVED')
@@ -294,7 +322,7 @@ class SnapshotStore:
                 if rendered is not None:
                     from .pairs import write_pair
                     pair_begin=time.monotonic()
-                    write_pair(staging,manifest,pending,rendered)
+                    write_pair(staging,manifest,pending,rendered,diagnostics=False)
                     pair_ms=(time.monotonic()-pair_begin)*1000
                     processing['pair_completed_ns']=time.monotonic_ns()
                     atomic_json(staging/'capture_manifest.yaml',manifest)

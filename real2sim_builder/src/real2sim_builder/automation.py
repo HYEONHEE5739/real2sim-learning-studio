@@ -60,7 +60,7 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         data={};active=1;folder=None;identity={'kind':'mock'if worker is not None else'real'};subset={}
         keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far'),4:('metric_anchors','world_registration'),
               5:('objects','decomposition','scene_memo'),6:('image_preparation','pose'),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
-              8:('pose',),9:('articulation',),10:('world_registration','support_asset','sensor_registration','metric_anchors','capture_layouts'),11:('physics',),12:('physics',),13:('export',),14:('simulator',)}
+              8:('pose',),9:('articulation',),10:('world_registration','support_asset','sensor_registration','metric_anchors','capture_layouts'),11:('physics',),12:('physics',),13:('export','simulator'),14:('simulator',)}
         operations={1:('video',),2:('da3',),3:('support','vlm'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
                     6:('image_edit_objects','background_remove','vlm'),7:('blender',),8:('cpd','canonicalize','foundationpose'),9:('articulation',),10:(),11:('vlm',),12:('physics',),13:(),14:('simulator',)}
         handlers={1:processing.prepare,2:processing.depth,3:processing.support,4:processing.world,
@@ -145,6 +145,11 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 identity=copy.deepcopy(getattr(worker,'runtime_identity',None))if worker is not None else{'kind':'real','operations':{op:stage_runtime.identity(config,op)for op in operations[stage]}}
                 if not identity:raise ValueError('Synthetic worker must declare explicit mock runtime identity')
                 identity['stage_implementation_sha256']={str(p.relative_to(Path(__file__).parent)):sha(p)for p in Path(__file__).parent.rglob('*.py')}
+                if stage in(13,14)and config.get('simulator',{}).get('mode','native')=='native':
+                    import importlib.util
+                    native_spec=importlib.util.find_spec('robot_learning_workbench')
+                    native_root=Path(native_spec.origin).parent if native_spec and native_spec.origin else None
+                    identity['native_implementation_sha256']={str(p.relative_to(native_root)):sha(p)for p in native_root.rglob('*.py')}if native_root else{}
                 subset['schema']='simfoundry-stage/1'
                 signature=cache_key(stage,upstream,subset,identity)
                 cached=index.get(str(stage),{})

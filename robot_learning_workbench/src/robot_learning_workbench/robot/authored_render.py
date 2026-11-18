@@ -47,18 +47,26 @@ class AuthoredRenderer:
     def render(self,q):
         import time
         from real2sim_builder.capture import observation_scene
-        self.view.verify();begin=time.monotonic_ns();raw=np.asarray(q)
+        timing=dict(verify_started=time.monotonic_ns())
+        self.view.verify();begin=time.monotonic_ns();timing['verified']=begin;raw=np.asarray(q)
         if raw.shape!=(6,)or raw.dtype.kind not in'fiu'or not np.isfinite(raw).all():raise ValueError('Six finite measured model-radian joints required')
         for n,x in zip(JOINTS,raw):
             if not self.bounds[n]['limits'][0]<=x<=self.bounds[n]['limits'][1]:raise ValueError('Measured joint outside authored model limits: '+n)
-        scene=observation_scene(self.view.authored_scene,{'session_id':'measured','eligible':True,'q_measured':raw.tolist(),'joint_names':list(JOINTS)},self.view.package.root)
-        self.static.update_scene(select_render_cameras(scene))
-        images={role:self.static.rgb(name)for role,name in self.sensor_ids.items()}
+        timing['observation_started']=time.monotonic_ns()
+        scene=observation_scene(self.view.authored_scene,{'session_id':'measured','eligible':True,'q_measured':raw.tolist(),'joint_names':list(JOINTS)},self.view.package.root,validate_static=False)
+        timing['observation_completed']=time.monotonic_ns()
+        self.static.update_scene(select_render_cameras(scene));timing['scene_updated']=time.monotonic_ns()
+        images={};timing['rgb']={}
+        for role,name in self.sensor_ids.items():
+            started=time.monotonic_ns();images[role]=self.static.rgb(name)
+            timing['rgb'][role]=dict(started=started,completed=time.monotonic_ns())
+        timing['rgb_completed']=time.monotonic_ns()
         selected={c['id']:c for c in scene['cameras']}
         cameras={role:{'camera_id':name,'resolution':selected[name]['resolution'],'K':selected[name]['K']['value'],
             'distortion':selected[name]['distortion']['value'],'T_world_optical':world_pose(scene,selected[name]).tolist()}for role,name in self.sensor_ids.items()}
+        timing['camera_metadata_completed']=time.monotonic_ns()
         return {'images':images,'measured_q_rad':raw.tolist(),'applied_sim_joint_rad':raw.tolist(),'sim_target_joint_rad':raw.tolist(),'sim_joint_delta_rad':[0.]*6,'scene_identity':self.view.scene_identity,'source_scene':self.view.source_scene,'engine':self.view.engine,'physics_steps':0,'total_physics_steps':0,'simulation_time_s':0.,'state_application':'authored_measured_fk',
-                'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED','physical_verified':False}
+                'sim_timestamp':{'monotonic_ns':time.monotonic_ns(),'timestamp_kind':'render_completion_not_camera_exposure'},'render_ms':(time.monotonic_ns()-begin)/1e6,'render_phase_times_ns':timing,'sim_cameras':cameras,'joint_mapping':self.view.mapping,'geometry_status':'UNMEASURED','physical_verified':False}
     def close(self):
         if self.static:self.static.close();self.static=None
     def __enter__(self):return self

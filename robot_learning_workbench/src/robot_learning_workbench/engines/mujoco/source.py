@@ -124,6 +124,12 @@ def resolved_model_config(plan,recorded=None):
     raw=recorded if recorded is not None else plan.input_documents.get('engine_config')
     if raw is None:raise ValueError('Explicit engine_config ModelConfig required')
     values=_plain(raw);values.pop('package_root',None)
+    if values.pop('render_type','native')!='native':raise ValueError('Source physics requires a Native execution profile')
+    if values.pop('simulation_mode','physics')!='physics':raise ValueError('Native Pose cannot be used as Source Physics; choose the physics profile')
+    identity=values.pop('scene_identity',None)
+    if identity is not None:
+        from dataclasses import asdict
+        if identity!=asdict(plan.scene.identity):raise ValueError('Engine configuration belongs to another Scene revision')
     values.setdefault('active_object_ids',list(plan.object_order));values.setdefault('object_physics',{})
     if plan.stage in('source','datagen','simulation_evaluation')and not(plan.stage=='source'and recorded is not None):
         from scene_contract.objects import active_objects

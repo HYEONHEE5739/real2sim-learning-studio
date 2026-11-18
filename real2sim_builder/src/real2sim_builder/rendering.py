@@ -423,14 +423,14 @@ def configure(mode):
         os.environ.pop('LIBGL_ALWAYS_SOFTWARE',None);os.environ.pop('__EGL_VENDOR_LIBRARY_FILENAMES',None)
 
 
-def render_scene(scene):
+def render_scene(scene, *, copy_static=True):
     """Omit unresolved cameras only from the transient render description.
 
     An uninitialized sensor must not block registered photo renders. Original
     Candidate cameras and all object/geometry completeness checks remain intact.
     """
     import copy
-    result=copy.deepcopy(scene)
+    result=copy.deepcopy(scene) if copy_static else {**scene,'cameras':copy.deepcopy(scene['cameras'])}
     from .scene import value
     for camera in result['cameras']:
         if camera['pose']['value']is None:
@@ -447,7 +447,7 @@ class Renderer:
         self.mode=mode
         configure(mode)
         import mujoco
-        self.mj=mujoco;self.scene=scene;self.camera_views={c['id']:c for c in scene['cameras']};self.renderers={};self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
+        self.mj=mujoco;self.scene=scene;self.objects_by_id={o['id']:o for o in scene['objects']};self.camera_views={c['id']:c for c in scene['cameras']};self.renderers={};self.resolutions={c['id']:c['resolution']for c in scene['cameras']}
         scratch=Path(scratch);scratch.mkdir(parents=True,exist_ok=True)
         self.root=root;self.scratch=scratch
         from .cameras import pinhole_scene
@@ -462,11 +462,12 @@ class Renderer:
         from scipy.spatial.transform import Rotation
         from .calibration.geometry import parts
         from .exporters.mjcf import material_parameters
-        scene=render_scene(scene)
+        scene=render_scene(scene,copy_static=False)
         if scene['assets']!=self.scene['assets']:raise ValueError('Renderer geometry changed; recompile explicitly')
+        if {o['id']for o in scene['objects']}!=set(self.objects_by_id):raise ValueError('Renderer objects changed; recompile explicitly')
         resized=False
         for obj in scene['objects']:
-            old=next(o for o in self.scene['objects']if o['id']==obj['id'])
+            old=self.objects_by_id[obj['id']]
             if any(obj[k]!=old[k]for k in('visual','collision')):raise ValueError('Renderer geometry changed; recompile explicitly')
             if obj['dimensions']['value']!=old['dimensions']['value']:
                 from .calibration.geometry import dimension_axes

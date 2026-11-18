@@ -2,7 +2,8 @@
 import json
 import yaml
 from pathlib import Path
-from PyQt6.QtWidgets import QDialog,QVBoxLayout,QHBoxLayout,QComboBox,QPlainTextEdit
+from PyQt6.QtWidgets import QDialog,QVBoxLayout,QHBoxLayout,QComboBox,QPlainTextEdit,QPushButton,QMessageBox
+from PyQt6.QtCore import QTemporaryDir
 from .view import CameraView
 
 
@@ -23,4 +24,17 @@ class ResultsDialog(QDialog):
         if self.files:self.view.show_image(self.files[0])
         details=dict(row)
         if (root/'pair.json').is_file():details['comparison']=json.loads((root/'pair.json').read_text())
+        if details.get('comparison',{}).get('comparison_images',{}).get('status')=='DEFERRED':
+            button=QPushButton('비교 이미지 생성 · 원본 보존');layout.addWidget(button)
+            self.comparison_temporary=QTemporaryDir()
+            self.finished.connect(lambda _:self.comparison_temporary.remove())
+            def comparisons():
+                try:
+                    from ..robot.pairs import render_comparisons
+                    folder=Path(self.comparison_temporary.path())
+                    for path in render_comparisons(root,folder):
+                        self.selection.addItem('comparison/'+str(Path(path).relative_to(folder)),path)
+                    button.setEnabled(False)
+                except Exception as error:QMessageBox.warning(self,'비교 이미지',str(error))
+            button.clicked.connect(comparisons)
         text=QPlainTextEdit(json.dumps(details,ensure_ascii=False,indent=2));text.setReadOnly(True);layout.addWidget(text,1)

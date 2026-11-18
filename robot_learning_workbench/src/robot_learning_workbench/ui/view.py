@@ -17,7 +17,9 @@ def capture_progress_text(progress):
     labels.update(queued='원본 저장 대기',raw_saved='원본 저장 완료 · 후처리 대기',sim_pair='같은 측정 q의 Sim/Pair 처리 중',registering='Evidence 등록 중')
     text=labels.get(progress.get('capture_phase'),'캡처 중…')
     if progress.get('capture_queue_capacity'):
-        text+=f" · 처리 중 {progress.get('capture_queue_size',0)}/{progress['capture_queue_capacity']}"
+        text+=f" · 원본 저장 {progress.get('capture_queue_size',0)}/{progress['capture_queue_capacity']}"
+        if progress.get('postprocessing_queue_capacity'):
+            text+=f" · 후처리 {progress.get('postprocessing_queue_size',0)}/{progress['postprocessing_queue_capacity']}"
         if progress.get('capture_request_allowed'):text+=' · 추가 촬영 가능'
     elapsed=progress.get('capture_elapsed_s')
     if isinstance(elapsed,(int,float)):text+=f' · {elapsed:.1f}초'
@@ -129,11 +131,11 @@ class CameraView(QLabel):
 
 
 class LiveCameraView(CameraView):
-    """Fill live panels without stretching; double click shows the whole frame."""
+    """Fit the whole live frame at its original aspect ratio; double click enlarges."""
     def __init__(self,text='',*,title='Camera'):
         super().__init__(text,(240,180));self.title=title;self._expanded=None
         self.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
-        self.setToolTip('화면 채움 확대 · 가장자리 일부가 잘릴 수 있습니다. 더블클릭: 전체 영상 크게 보기')
+        self.setToolTip('원본 비율 유지 · 전체 영상 표시 · 더블클릭: 전체 영상 크게 보기')
 
     def sizeHint(self):
         from PyQt6.QtCore import QSize
@@ -151,14 +153,6 @@ class LiveCameraView(CameraView):
     def clear(self):
         super().clear()
         if self._expanded is not None:self._expanded.clear()
-
-    def paintEvent(self,event):
-        pix=self.pixmap()
-        if pix is None or pix.isNull():return super().paintEvent(event)
-        painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        size=pix.size().scaled(self.size(),Qt.AspectRatioMode.KeepAspectRatioByExpanding)
-        painter.drawPixmap((self.width()-size.width())//2,(self.height()-size.height())//2,size.width(),size.height(),pix)
-        painter.end()
 
     def mouseDoubleClickEvent(self,event):
         pix=self.pixmap()

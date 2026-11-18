@@ -210,7 +210,7 @@ def _collision_inputs(package):
     return result
 
 
-def build_model(scene, prepared):
+def build_model(scene, prepared, *, projection_adapter=False):
     """Compile the package's authored geometry with one real calibrated SO101.
 
     `prepared` is a resolved ModelConfig (or PreparedRun effective_settings['mujoco']
@@ -313,7 +313,11 @@ def build_model(scene, prepared):
             body.append(geom)
     for name,camera in scene.scene['cameras'].items():
         original=next(c for c in canonical['cameras'] if c['id']==name)
-        if any(camera['distortion']):raise ValueError('MuJoCo requires explicitly undistorted camera input')
+        if any(camera['distortion']):
+            if not projection_adapter:raise ValueError('MuJoCo requires explicitly undistorted camera input outside the Native Real/Sim projection adapter')
+            projection=json.loads(package_asset(scene,'camera_projection.json').read_text())
+            if projection.get('cameras',{}).get(name,{}).get('distortion')!=list(camera['distortion']):
+                raise ValueError('MuJoCo camera distortion requires a matching manifest-bound projection adapter')
         link=mounted(original['frame'])
         if link:
             parent=world.find(".//body[@name='robot_"+link+"']");pose=resolve_transform(frames,source=camera['frame_id'],target='robot_link_'+link)

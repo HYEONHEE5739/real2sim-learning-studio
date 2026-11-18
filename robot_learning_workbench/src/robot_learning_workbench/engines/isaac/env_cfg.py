@@ -79,14 +79,16 @@ def _native_pinhole_matrix(sensor,resolution):
     return k
 
 
-def execution_inputs(package, settings):
+def execution_inputs(package, settings, *, projection_adapter=False):
     """Bind explicit engine settings to this immutable package.
 
     No original repository, active calibration pointer or default robot fallback.
     """
     from collections.abc import Mapping
     if not isinstance(settings,Mapping):raise ValueError('Explicit engine settings mapping required; Recipe preparation is a separate boundary')
-    if 'baseline_metadata'not in settings:return scene_execution_inputs(package,settings)
+    if settings.get('render_type','native')!='native' or settings.get('simulation_mode','physics')!='physics':
+        raise ValueError('Task Physics requires a Native Physics profile; Pose/Authored is not physics')
+    if 'baseline_metadata'not in settings:return scene_execution_inputs(package,settings,projection_adapter=projection_adapter)
     identity=settings['scene_identity']
     if any(identity[k]!=getattr(package.identity,k) for k in ('scene_id','revision','manifest_sha256')):
         raise ValueError('Scene identity differs from execution input')
@@ -206,12 +208,12 @@ def spawn_robot(prim_path,cfg,translation=None,orientation=None,**kwargs):
     return robot
 
 
-def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=1):
+def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=1,projection_adapter=False):
     """Create concrete ManagerBasedEnvCfg after AppLauncher, without an Env adapter.
 
     settings is explicit bound engine input, not a PreparedRun/Recipe runner.
     """
-    inputs=execution_inputs(package,settings)
+    inputs=execution_inputs(package,settings,projection_adapter=projection_adapter)
     camera_properties={name:_pinhole_properties(camera['K'],camera['resolution'])for name,camera in inputs['profile']['cameras'].items()}
     if type(num_envs) is not int or num_envs<1:raise ValueError('Positive num_envs required')
     if device not in ('cpu','cuda:0'):raise ValueError('Explicit supported device required')
@@ -339,7 +341,7 @@ def build_env_cfg(package,settings,*,runtime_directory,device='cuda:0',num_envs=
     return cfg
 
 
-def scene_execution_inputs(package,settings):
+def scene_execution_inputs(package,settings,*,projection_adapter=False):
     """Resolve a new Scene from its declared assets, not v8 baseline file names."""
     from dataclasses import asdict
     from collections.abc import Mapping
@@ -369,7 +371,12 @@ def scene_execution_inputs(package,settings):
     authored=json.loads((package.root/'authored_scene.json').read_text())if(package.root/'authored_scene.json').is_file()else json.loads((package.root/'provenance.json').read_text())['original_scene']
     cameras={};rows={c['id']:c for c in authored['cameras']}
     for name,camera in package.scene['cameras'].items():
-        if any(camera['distortion']):raise ValueError(name+': undistorted pinhole camera required')
+        if name not in ('side','wrist'):continue  # Photo cameras remain package references, not live sensors.
+        if any(camera['distortion']):
+            if not projection_adapter:raise ValueError(name+': undistorted pinhole camera required outside the Native Real/Sim projection adapter')
+            projection=json.loads((package.root/'camera_projection.json').read_text())
+            if projection.get('cameras',{}).get(name,{}).get('distortion')!=list(camera['distortion']):
+                raise ValueError(name+': matching manifest-bound camera projection required')
         frame=rows[name]['frame'];parent='world'
         while frame is not None:
             if frame.startswith('robot_link_'):parent=frame.removeprefix('robot_link_');break

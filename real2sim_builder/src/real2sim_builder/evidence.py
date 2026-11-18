@@ -61,6 +61,36 @@ def add_image(project, path, camera='side', split='train', timestamp=None, conte
     return row
 
 
+def register_observation_images(project, root):
+    """One locked Evidence publication for an already sealed camera observation."""
+    from .candidate import exclusive
+    root=Path(root).resolve()
+    if not root.is_relative_to((project.root/'input/observations').resolve()):
+        raise ValueError('Observation images must be owned by this Project')
+    document=root/'observation.json'
+    record=read(document)
+    if not(root/'COMPLETE').is_file():raise ValueError('Original observation is not sealed')
+    digest=sha(document);relative=document.relative_to(project.root).as_posix()
+    if read(root/'COMPLETE').get('observation_sha256')!=digest:raise ValueError('Sealed observation metadata changed')
+    with exclusive(project):
+        evidence=project.read_evidence(resolve=False)
+        previous=next((r for r in evidence.get('documents',[])if r['path']==relative),None)
+        if previous:
+            if previous['sha256']!=digest:raise ValueError('Registered observation identity changed')
+            return
+        for name in('side','wrist'):
+            source=root/(name+'.png')
+            if sha(source)!=record['image_sha256'][name]:raise ValueError('Sealed observation image changed')
+            with Image.open(source)as image:resolution=list(image.size)
+            evidence['images'].append({'path':source.relative_to(project.root).as_posix(),'camera':name,'split':'train',
+                'timestamp':record['camera_timing'][name]['read_end']['monotonic_ns'],'resolution':resolution,
+                'sha256':record['image_sha256'][name],'source':str(source),'original_name':source.name,'role':'scene_photo',
+                'eligible':False,'exclusion_reasons':['reference_camera_not_calibrated_for_pixel_fitting']})
+        evidence.setdefault('documents',[]).append({'path':relative,'sha256':digest,'role':'unbound_sdk_camera_observation','status':'UNVERIFIED'})
+        project.write_evidence(evidence)
+        project.invalidate()
+
+
 def add_video(project, path, camera='side', split='train', max_frames=12, *, role=None, scene_state=None):
     project.require_writable()
     import cv2

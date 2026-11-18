@@ -67,9 +67,9 @@ def test_capture_queue_is_bounded_and_full_is_explicit_without_stopping_teleop(t
                 time.sleep(.04)
                 session.dispatch([dict(kind='session_snapshot',command_id='burst_'+str(index),payload={'requested_ns':time.monotonic_ns()})])
             receipts=[e['payload']for e in events if e['kind']=='command_ack']
-            assert [r['command_id']for r in receipts if r['status']=='accepted']==['burst_'+str(i)for i in range(4)]
+            assert [r['command_id']for r in receipts if r['status']=='accepted']==['burst_'+str(i)for i in range(session.capture_queue.capacity)]
             assert any(r['command_id']=='burst_4'and r['status']=='rejected'and 'queue full'in r['reason']for r in receipts)
-            assert len(held)==len(session.capture_queue.jobs)==4
+            assert len(held)==len(session.capture_queue.jobs)==session.capture_queue.capacity
             assert session.teleoperation.active and session.teleoperation.sequence>sequence+2
             assert session.state=='TELEOP_ACTIVE'
         finally:

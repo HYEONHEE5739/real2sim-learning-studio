@@ -21,7 +21,7 @@ class RealSimSession:
         self.store=SnapshotStore(self.project,session_id=plan.output_path.name.replace('-','_'),model=plan.resolved_inputs['robot_model']['path'],mapping=self.follower.precision_mapper.metadata())
         self.state='DISCONNECTED';self.terminal=False;self.closing=False;self.cancelled=False;self.renderer=None;self.snapshots=[];self.seen=set();self.last_heartbeat=time.monotonic_ns()
         self.writer=snapshot_writer(self.store);self.capture_queue=CaptureQueue(self,paired=True)
-        self.teleoperation=None;self.control=None;self.control_history=deque(maxlen=300);self.last_error=None
+        self.teleoperation=None;self.control=None;self.control_history=deque(maxlen=300);self.last_error=None;self.connection_times_ns={}
         if 'leader'in devices:
             from .calibration import joint_specs
             bounds={n:e['limits']for n,e in joint_specs(plan.resolved_inputs['robot_model']['path']).items()}
@@ -35,14 +35,22 @@ class RealSimSession:
     def ack(self,c,status='completed',reason=None):
         self.events({'kind':'command_ack','payload':{'command_id':c['command_id'],'status':status,**({'reason':reason}if reason else{})}})
     def connect(self):
-        self.state='CONNECTING';self.emit(capture_reason='Follower/Camera 연결과 선택 Scene 초기화 중')
+        self.state='CONNECTING';self.connection_times_ns['connect_started']=time.monotonic_ns()
+        self.emit(connection_phase='scene_check',capture_reason='Scene 검사와 저장 Worker 준비 중')
         try:
             self.writer.submit(writer_ready).result(timeout=30)
-            for device in self.devices.values():device.connect()
-            for camera in self.cameras.values():camera.start()
+            self.connection_times_ns['writer_ready']=time.monotonic_ns();self.emit(connection_phase='devices')
+            for role,device in self.devices.items():
+                self.connection_times_ns[role+'_connect_started']=time.monotonic_ns();device.connect();self.connection_times_ns[role+'_connected']=time.monotonic_ns()
+            self.emit(connection_phase='cameras')
+            for role,camera in self.cameras.items():
+                self.connection_times_ns[role+'_camera_start']=time.monotonic_ns();camera.start()
             from ..recipe import verify_prepared_inputs
-            verify_prepared_inputs(self.plan)
+            self.connection_times_ns['input_verify_started']=time.monotonic_ns();verify_prepared_inputs(self.plan)
+            self.connection_times_ns['input_verified']=time.monotonic_ns();self.emit(connection_phase='sim_initialization')
             self.renderer=RenderProcess(self.plan,self.follower.precision_mapper.metadata());self.render_deadline=time.monotonic()+180
+            self.connection_times_ns['renderer_spawned']=time.monotonic_ns()
+            self.emit(connection_phase='first_frame',connection_times_ns=dict(self.connection_times_ns))
         except BaseException:self.close();raise
     def dispatch(self,commands):
         rows=list(commands);stops=[c for c in rows if c['kind']in('cancel','session_disconnect','session_finish','teleop_stop')]
@@ -90,10 +98,15 @@ class RealSimSession:
         self.packets={n:c.nearest(t,not_after=True)for n,c in self.cameras.items()};self.observed_at=time.monotonic_ns()
     def observe(self):
         self.read_observation();t=self.history[-1]['timestamp_ns'];self.collect_control()
+        if 'first_real_frames'not in self.connection_times_ns and all(p is not None for p in self.packets.values()):
+            self.connection_times_ns['first_real_frames']=time.monotonic_ns()
         if not self.capture_queue.render_error:
             try:
                 self.renderer.observe(self.history[-1]['q_measured']);result=self.renderer.poll()
-                if self.renderer.last_live is not None and self.state=='CONNECTING':self.state='OBSERVING'
+                if self.renderer.last_live is not None and self.state=='CONNECTING':
+                    self.connection_times_ns['first_sim_frame']=time.monotonic_ns();self.state='OBSERVING'
+                    self.emit(connection_phase='ready',connection_times_ns=dict(self.connection_times_ns),
+                        renderer_startup=getattr(self.renderer,'ready',None))
                 if result is not None:self.capture_queue.rendered(result)
             except Exception as error:
                 if self.state=='CONNECTING':raise
@@ -168,6 +181,7 @@ def run(plan,*,events,commands):
             'unwritten_control_records':list(session.control.rows)if session and session.control else[],
             'recent_control_records':list(session.control_history)if session else[],
             'teleoperation_activation':session.teleoperation.last_activation if session and session.teleoperation else None,'teleoperation_last_attempt':session.teleoperation.last_attempt if session and session.teleoperation else None,'motion_verified':False,'stop_policy':'preserve_torque_no_new_goal'}
+            report['connection_times_ns']=session.connection_times_ns if session else{}
             if report['error']or report['snapshots']or report['pending_snapshot']or report['pending_control_rows']or report['state']=='FAILED':
                 atomic_json(plan.output_path/'session-report.json',report)
             else:

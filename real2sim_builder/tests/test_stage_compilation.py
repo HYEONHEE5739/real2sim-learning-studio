@@ -20,6 +20,7 @@ class FullModels(PoseModels):
 
 def full_config():
     return {'scene_state_id':'layout','execute_modeling':True,
+        'simulator':{'mode':'authored'},  # Explicit review-only coverage; no robot/sensors in this fixture.
         'support':{'frame_selection':{'mode':'heuristic','min_component_px':4}},
         'image_preparation':{'size':32},
         'physics':{'properties':{'block':{'mass_kg':{'value':.03,'provenance':'estimated','evidence':['synthetic fixture']},
@@ -45,6 +46,23 @@ def test_real_all14_orchestrator_package_and_mock_provenance(tmp_path,monkeypatc
     again=_run_stage_pipeline(p,candidate='test',config=full_config(),worker=worker)
     assert all(v['reused']for v in again['stages'].values())
     assert worker.calls.count('physics')==1
+
+
+def test_native_initial_q_change_rebuilds_stage13_without_repeating_completed_model_stages(tmp_path,monkeypatch):
+    from real2sim_builder.automation import _run_stage_pipeline
+    project=synthetic_project(tmp_path);worker=FullModels()
+    monkeypatch.setattr('real2sim_builder.authoring.run_codex_modeling',fake_codex_mesh)
+    config=full_config();config['simulator']={'mode':'native','native_options':{'initial_joint_rad':[0.]*6}}
+    first=_run_stage_pipeline(project,candidate='native_cache',config=config,worker=worker,through_stage=13)
+    assert first['status']=='STAGES_COMPLETE'
+    calls=list(worker.calls)
+    config['simulator']['native_options']['initial_joint_rad'][0]=.1
+    second=_run_stage_pipeline(project,candidate='native_cache',config=config,worker=worker,through_stage=13)
+    assert not second['stages']['13']['reused'],'New Native initial q reused an old execution Package'
+    assert all(second['stages'][str(i)]['reused']for i in range(1,13))
+    assert worker.calls==calls
+    third=_run_stage_pipeline(project,candidate='native_cache',config=config,worker=worker,through_stage=13)
+    assert all(row['reused']for row in third['stages'].values())
 
 
 def test_robot_world_is_not_assumed_and_articulation_not_faked(tmp_path,monkeypatch):
