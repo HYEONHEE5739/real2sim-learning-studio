@@ -13,6 +13,19 @@ from test_workbench_window import UI
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_launcher_uses_checkout_local_qt_runtime_when_no_override_is_set(tmp_path):
+    project,_,_,capture,env=_launcher(tmp_path)
+    runtime=project/'workbench_runs/runtime/qt/bin/python3.11'
+    runtime.parent.mkdir(parents=True)
+    shutil.copy2(env.pop('QT_PYTHON'),runtime)
+    result=subprocess.run(['bash',str(project/'run_workbench_ui.sh')],cwd=tmp_path,
+        env=env,capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+    record=json.loads(capture.read_text())
+    assert record['args'][:3]==['-B','-m','robot_learning_workbench.ui.app']
+    assert record['args'][record['args'].index('--workspace')+1]==env['WORKBENCH_WORKSPACE']
+
+
 def _launcher(tmp_path):
     project = tmp_path / 'other user' / 'relocated studio'
     project.mkdir(parents=True)
@@ -86,8 +99,9 @@ from PyQt6.QtWidgets import QApplication
 from robot_learning_workbench.ui.recipe_editor import RecipeEditor
 app=QApplication([]);root=Path(sys.argv[1]);home=root/'another user';home.mkdir()
 editor=RecipeEditor();editor.text.setPlainText('schema_version: 1\\n')
-for name in ('soarm_isaaclab','miniconda3','IsaacLab'):
+for name in ('independent-checkout','miniconda3','IsaacLab'):
     original=home/name/'protected.yaml';original.parent.mkdir();original.write_text('original')
+    if name=='independent-checkout':(original.parent/'.git').mkdir()
     with patch.object(Path,'home',return_value=home):
         try:editor.save(original)
         except ValueError:pass

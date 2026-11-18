@@ -365,6 +365,10 @@ def test_native_renderer_metadata_uses_sensor_pixel_grid_and_intrinsics(tmp_path
     cfg=env_cfg.build_env_cfg(package,settings,runtime_directory=tmp_path/'runtime',device='cpu')
     renderer=object.__new__(NativeRenderer);renderer.env=_sample_environment(cfg)
     renderer.view=SimpleNamespace(verify=lambda:None,engine='isaac',scene_identity={'test':'synthetic'},source_scene={},mapping={})
+    from robot_learning_workbench.robot.calibration import joint_specs,execution_urdf,JOINTS
+    bounds=joint_specs(execution_urdf(package));renderer.joint_limits=np.asarray([bounds[n]['limits']for n in JOINTS])
+    renderer.projection={name:{'resolution':list(row['resolution']),'K':{'value':np.asarray(row['K']).tolist()},
+        'distortion':{'value':list(row['distortion'])}}for name,row in package.scene['cameras'].items()}
     renderer.total_physics_steps=renderer.last_frame_steps=0
     renderer._advance=lambda measured:(measured.copy(),cfg.decimation)
     result=renderer.render(np.zeros(6))

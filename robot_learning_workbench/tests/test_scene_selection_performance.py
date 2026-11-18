@@ -9,14 +9,14 @@ from real2sim_builder.export import export_revision
 from real2sim_builder.files import read, write
 from robot_learning_workbench.ui.session_operations import execution_scenes, real_sim_setup
 from scene_contract import package
-from test_export_registration import export_project
+from test_native_reconstruction_execution import native_project
 
 
 @pytest.fixture
 def exported_scene(tmp_path):
-    workspace, project = export_project(tmp_path)
+    workspace, project, _ = native_project(tmp_path)
     destination = project.root / "exports" / "selection-review"
-    identity = export_revision(project, destination=destination, revision="selection_review", allow_unvalidated=True)
+    identity = export_revision(project, destination=destination, revision="selection_review", allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     return workspace, project, destination, identity
 
 
@@ -67,14 +67,14 @@ def _bind_synthetic_configuration(workspace, project):
 def test_execution_scene_catalog_lists_registered_packages_without_full_validation(exported_scene, monkeypatch):
     workspace, project, first, first_identity = exported_scene
     second = project.root / "exports" / "second-review"
-    second_identity = export_revision(project, destination=second, revision="second_review", allow_unvalidated=True)
+    second_identity = export_revision(project, destination=second, revision="second_review", allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     calls = _observe_full_validation(monkeypatch)
 
     rows = execution_scenes(workspace)["scenes"]
 
     assert {row["scene"] for row in rows} == {str(first / "scene.json"), str(second / "scene.json")}
     assert {row["revision"] for row in rows} == {first_identity.revision, second_identity.revision}
-    assert all(set(row["engines"]) == {"mujoco", "isaac"} for row in rows)
+    assert all(set(row["engines"]) == {"mujoco"} for row in rows)
     assert calls == Counter(), "Catalog selection expanded the immutable asset closure"
 
 
@@ -89,7 +89,7 @@ def test_changed_manifest_is_not_a_normal_selectable_scene(exported_scene):
     assert not rows or all(row.get("valid") is False and row.get("reason") for row in rows)
 
 
-@pytest.mark.parametrize("engine", ["mujoco", "isaaclab"])
+@pytest.mark.parametrize("engine", ["mujoco"])
 def test_real_sim_settings_resolution_does_not_validate_asset_closure(exported_scene, monkeypatch, engine):
     workspace, project, destination, _ = exported_scene
     configuration = _bind_synthetic_configuration(workspace, project)

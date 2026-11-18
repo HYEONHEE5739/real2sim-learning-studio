@@ -22,7 +22,6 @@ class SourceSettings(QWidget):
         self.load_button=QPushButton('Recipe 불러오기');box.addWidget(self.load_button)
         self.script_path=QLineEdit();self.script_path.setReadOnly(True);self.script_path.setPlaceholderText('아직 저장하지 않은 Source Script');box.addWidget(self.script_path)
         self.editor=RecipeEditor(self);self.editor.label.hide();self.editor.text.setMinimumHeight(380)
-        self.editor.text.setStyleSheet('QPlainTextEdit { background: #f4f5f8; color: #172030; selection-background-color: #a9cced; font-family: monospace; padding: 8px; }')
         box.addWidget(self.editor,1);self.save_button=QPushButton('저장 및 적용');self.save_button.setObjectName('primaryAction');box.addWidget(self.save_button)
         hint=QLabel('single_task에 작업 문장을 입력하세요. Episode 수·환경 수·시간·Resume·저장 위치도 YAML에서 수정합니다. Script 저장 위치: scripts/source');hint.setWordWrap(True);box.addWidget(hint)
         self.scene.addItem('Scene 선택',None);self.scene.currentIndexChanged.connect(self.select_scene)

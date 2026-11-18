@@ -9,7 +9,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 from real2sim_builder.calibration.camera import project_point,fit_cameras,fit_geometry,landmark_metrics
 
-B=Path('/home/hyeonhee/soarm_isaaclab/real2sim-builder/app')
+B=Path(__file__).resolve().parents[2]/'docs/evidence/architecture-review-fixes/before/real2sim_builder/src/real2sim_builder'
 
 @pytest.fixture
 def scene():

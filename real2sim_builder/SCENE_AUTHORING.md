@@ -59,11 +59,11 @@ Precision Calibration, 명시 landmark/수치 joint fitting, Teleop/Capture, Tas
 
 ### Scene Export 후 Real/Sim 비교
 
-사용자가 명시적으로 Export를 요청하면 검토 중인 Candidate도 기존 `export --candidate NAME --allow-unvalidated`로 새 비교용 Package를 게시할 수 있다. 기존 승인 Revision을 대체하지 않는다. 새 Package는 Real/Sim Scene 선택 목록에 등록되고, `render_type: authored`이면 같은 measured q로 Side/Wrist FK 이미지를 보여주며 Pair 캡처·Reconstruction Memo 재정합에 사용할 수 있다. 화면은 “FK 시각 비교 · 물리 실행 없음”을 표시한다.
+사용자가 명시적으로 Export를 요청하면 검토 중인 Candidate도 기존 `export --candidate NAME --allow-unvalidated`로 새 Native Review Package를 게시할 수 있다. 기존 승인 Revision을 대체하지 않는다. 모든 Export는 URDF·Follower Mapping·Base·Side/Wrist·Collision·초기 q를 검사해 Native Pose/Physics 프로필을 생성한다. 부족한 Review Package는 차단 사유만 보존하고 실행 설정을 만들지 않는다. Authored Preview 실행은 제거했다. 기존 자료를 자동 이전하거나 삭제하지 않는다.
 
-이는 Native Articulation 물리 실행과 별도다. `render_type: native`의 중력·충돌·관절 목표 추종은 기존 실행 자산/물성 설정을 요구한다. 비교용 Export를 물리 검증 성공으로 표시하지 않는다. Photo Camera는 Package에 보존하되 Real/Sim 렌더에서는 Side/Wrist만 생성한다.
+Real/Sim은 `simulation_mode: pose`로 같은 measured q를 실제 Native Articulation에 적용한다. Source/DataGen/물리 평가는 `simulation_mode: physics`로 중력·접촉·관절 목표 추종을 실행하며 양수 mass·유효 friction을 추가로 요구한다. 두 모드를 서로 대체하거나 다른 엔진으로 바꾸지 않는다. Review Export나 Pose 영상을 물리 검증 성공으로 표시하지 않는다. Photo Camera는 Package에 보존하되 Real/Sim 렌더에서는 Side/Wrist만 생성한다.
 
-렌더 대상 선택은 `cameras.camera_roles/select_render_cameras`를 공통으로 사용한다. Image role/camera_type과 저장된 View 등록, 명시 Camera 메타데이터를 대조하며 ID 이름으로 추측하지 않는다. Real/Sim AuthoredRenderer는 확인된 Side/Wrist만 생성한다. `rendering.render_views`는 센서 자원을 재사용하고 Photo Camera는 한 대씩 렌더 후 자원을 해제한다. Isaac은 같은 Scene/SimulationContext를 유지하며 Camera만 활성화·전환하고, MuJoCo는 View 문맥을 닫는다. 이는 MuJoCo/Isaac 비교와 고급 `fit_scene`에 동일하게 적용되며 원 Scene·K/Pose·Calibration·q는 수정하지 않는다. Isaac은 Replicator annotator를 명시 detach한 뒤 자신의 Render Product와 authored prim까지 해제한다. Camera SDK 객체의 지연 소멸에 의존하지 않는다. 사진 RGB 비교는 RGB만, 물체 Mask 비교는 semantic output도 요청하며 Depth는 고급 수치 정합에서 사용한다. 역할 메타데이터가 없는 과거 Package는 이름을 보고 임의 센서를 만들지 않고 명시적인 오류를 반환한다.
+Native 센서는 명시 Side/Wrist 역할, 고정 Side·공유 Wrist mount와 640×480 Grid를 요구한다. `authored_scene.json`은 Native Geometry/Material/Frame/FK·Memo 재정합·Task가 읽는 Scene 데이터이며 보존한다. Builder 내부의 `rendering.render_views`와 `IsaacRenderer`는 제작 중 사진/Asset/수치 정합을 위한 기하 도구다. 이 도구를 실행 Package의 Authored Preview로 연결하는 분기는 없다. Camera 역할 메타데이터와 원 Scene·K/Pose·Calibration·q 보호는 유지한다. 상세 계약과 검증 한계는 [Native-only 실행 기록](../docs/reviews/native-only-simulation.md)을 따른다.
 
 ## Stage Runtime 설정
 

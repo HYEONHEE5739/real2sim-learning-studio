@@ -1,6 +1,10 @@
 # Copy values into the existing Workspace reconstruction configuration.
 # Paths refer to existing installations. No credentials, installation or download.
 scene_state_id: REPLACE_WITH_ONE_STATIC_LAYOUT_ID
+# Optional explicit reusable hardware variant. The Scene Prepare Robot Model
+# selector saves its Workspace-owned rig.yaml path and SHA in project metadata.
+# robot_rig: /EXISTING/workspace/robot_rigs/so101_with_camera/rig.yaml
+# Rig mounts are estimated/uncalibrated; existing Capture/Mapping is not rebound.
 video_candidates: 15
 depth:
   batch_size: 4
@@ -38,13 +42,11 @@ physics:
   apply_stabilized_poses: false  # Requires matching explicit pose_review; never automatic promotion.
 simulator:
   engine: mujoco
-  mode: native  # Loader-checked Native Pose/Physics profiles; never authored fallback.
   # Native readiness needs a manifest-bound Follower mapping, Robot Base,
   # shared Wrist mount and explicit Side/Wrist sensor calibration. Initial q
   # comes from a matching measured Capture or explicit six model-radian values.
   # native_options:
   #   initial_joint_rad: [USER_MEASURED_OR_EXPLICIT_VALUES]
-  # Use mode: authored only for an explicit visual Review Package.
 runtimes:
   blender:
     executable: /EXISTING/Blender/blender  # Scoped existing REAL2SIM_BLENDER selector.

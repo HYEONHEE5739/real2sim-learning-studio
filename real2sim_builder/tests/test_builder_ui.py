@@ -2,7 +2,7 @@
 import os,subprocess
 from pathlib import Path
 
-UI_PYTHON=Path('/home/hyeonhee/soarm_isaaclab/soarm101_lab/.venv-real2sim-ui/bin/python3.11')
+UI_PYTHON=Path(__file__).resolve().parents[2]/'workbench_runs/runtime/qt/bin/python3.11'
 
 
 def test_offscreen_project_reload_inventory_and_no_engine_imports(tmp_path):

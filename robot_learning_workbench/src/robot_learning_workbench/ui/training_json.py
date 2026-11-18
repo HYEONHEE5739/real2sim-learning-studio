@@ -11,7 +11,7 @@ class TrainingJsonDialog(QDialog):
         super().__init__(page);self.page=page;self.operation=None;self.setWindowTitle('공식 LeRobot Training JSON');self.resize(850,700)
         box=QVBoxLayout(self);row=QHBoxLayout();box.addLayout(row)
         self.model=QComboBox();row.addWidget(self.model,1);create=QPushButton('공식 기본 JSON 생성');row.addWidget(create);create.clicked.connect(self.create)
-        self.text=QPlainTextEdit();self.text.setStyleSheet('background: #f4f5f8; color: #172030; font-family: monospace;');box.addWidget(self.text,1)
+        self.text=QPlainTextEdit();self.text.setObjectName('codeEditor');box.addWidget(self.text,1)
         self.status=QLabel('모델별 파라미터는 공식 JSON에서 편집합니다.');self.status.setWordWrap(True);box.addWidget(self.status)
         row=QHBoxLayout();box.addLayout(row);load=QPushButton('JSON 불러오기');save=QPushButton('JSON 저장 · Script에 연결');row.addWidget(load);row.addWidget(save)
         load.clicked.connect(self.choose);save.clicked.connect(self.save)

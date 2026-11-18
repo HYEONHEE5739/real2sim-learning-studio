@@ -1,5 +1,7 @@
 # Teleoperation 설정 정리·Precision 기준각·Builder Export 연결
 
+> 2026-11-18 후속: Authored 실행은 제거됐다. 현재 모든 Export/Real-Sim 실행은 [Native-only 전환](reviews/native-only-simulation.md)을 따른다. 아래 이전 실행 기록은 당시 상태다.
+
 2026-10-30. 기준 `b6ba771d9bae5b0e5c992075fd351e617666a633`, 새 브랜치 `precision-export-integration`. 기존 Scene/Calibration 원본은 유지하고 세 요청 범위를 구현했다. main 변경·Push·Merge·실제 장치 연결·모터 명령·새 학습은 수행하지 않았다.
 
 ## Teleoperation

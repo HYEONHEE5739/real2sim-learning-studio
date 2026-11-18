@@ -44,7 +44,7 @@ Builder 내부 Codex가 최신 정책을 사용하도록 하려면 **기존 `aut
 
 ## 저장 이름과 입력 역할 (2026-11-08)
 
-- 현재 활성 Scene 폴더는 `workbench_runs/scenes/auto-version`, `pickplace-colorblock`이다. 내부 Project ID와 폴더 이름은 다르며 동일성 비교에는 ID/Manifest를 사용한다.
+- 현재 활성 Scene 폴더는 `workbench_runs/scenes/pickplace-colorblock`, `pickplace-new`다. `auto-version` 전용 데이터는 2026-11-18 사용자 요청으로 삭제했다. 내부 Project ID와 폴더 이름은 다르며 동일성 비교에는 ID/Manifest를 사용한다.
 - Scene/Device/출력은 사람이 읽는 이름과 충돌 번호를 사용한다. 이미지의 원본 이름은 `input/scene_photos` / `input/model_references`에 저장하고 SHA는 Evidence에 둔다.
 - `scene_photo`만 초기 Scene SfM에 사용한다. `model_reference`는 Codex/Blender 참고자료, Side/Wrist Capture는 이후 Sensor/Real-Sim 정합 관측이다. 서로 다른 배치와 미확인 물리 렌즈를 임의로 합치지 않는다.
 - Asset은 `v001` 등 저장 버전과 `content_sha256`를 구분한다. 동일 내용은 재사용한다. Capture/Precision/Codex/Blender/Checkpoint는 날짜/순번 경로이며 내부 ID·SHA·원자적 임시 파일은 유지한다.

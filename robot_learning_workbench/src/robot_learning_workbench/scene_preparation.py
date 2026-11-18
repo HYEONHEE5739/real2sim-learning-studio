@@ -17,6 +17,47 @@ def create_scene(workspace,name):
     return scene_details(Project.create(Path(workspace)/'scenes',name).root)
 
 
+def robot_variants(workspace):
+    """Discover named and versioned Workspace Rigs; no new database/loader."""
+    rows=[];sources=set();workspace=Path(workspace).resolve()
+    rigs=workspace/'robot_rigs'
+    paths=set(rigs.glob('*/rig.yaml'))|set(rigs.glob('*/v*/rig.yaml'))
+    for path in sorted(paths):
+        if path.is_symlink()or not path.resolve().is_relative_to(rigs):continue
+        record=read(path)
+        if record.get('schema')!='real2sim.robot-rig/1':continue
+        source=(path.parent/record['source_robot']).resolve()
+        if record['source_robot_sha256']not in sources:
+            rows.append({'name':'SO-ARM101','rig':None,'path':str(source),'model_sha256':record['source_robot_sha256']})
+            sources.add(record['source_robot_sha256'])
+        version=path.parent.name if path.parent.parent!=rigs else None
+        label=record['name']if version is None or record.get('status')=='FINAL_VISUAL_MODEL'else record['name']+' · '+version+' · '+record['mount_status']
+        rows.append({'name':record['name'],'version':version,
+            'label':label,
+            'rig':str(path.resolve()),'path':str((path.parent/record['model']['path']).resolve()),
+            'model_sha256':record['model']['sha256'],'mount_status':record['mount_status'],'calibration_status':record['calibration_status']})
+    return rows
+
+
+def select_robot_rig(path,rig_path):
+    """An explicit Scene preparation choice; existing Candidates are unchanged."""
+    import os
+    from real2sim_builder.evidence import load_robot_rig
+    project=Project(path);project.require_writable()
+    selected=None
+    if rig_path:
+        rig_path=Path(rig_path).resolve()
+        if not rig_path.is_relative_to(project.workspace/'robot_rigs'):raise ValueError('Select a Workspace-owned Robot Rig')
+        load_robot_rig(rig_path)
+        selected={'path':os.path.relpath(rig_path,project.root),'sha256':sha(rig_path)}
+    with exclusive(project):
+        info=project.info
+        if selected:info['robot_rig']=selected
+        else:info.pop('robot_rig',None)
+        write(project.root/'project.yaml',info)
+    return scene_details(project.root)
+
+
 def scene_details(path):
     project=Project(path,read_only=True);evidence=project.evidence;inputs=[]
     for kind,key in [('image','images'),('video','videos'),('document','documents'),('robot','robot_inputs'),('capture','capture_sessions')]:
@@ -31,7 +72,8 @@ def scene_details(path):
         from real2sim_builder.scene import validate
         try:validate(read(current),project.root,complete=True);ready=True;needs=[]
         except(ValueError,FileNotFoundError)as error:needs=[str(error)]
-    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':memo['text'],'notes_saved':memo['saved'],'scene_memo':{k:v for k,v in memo.items()if k!='text'},'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[])}
+    return {'project':str(project.root),'id':project.info['id'],'name':project.info['name'],'inputs':inputs,'notes':memo['text'],'notes_saved':memo['saved'],'scene_memo':{k:v for k,v in memo.items()if k!='text'},'reconstruction_ready':ready,'needs':needs,'device_configuration':project.info.get('device_configuration'),'execution_packages':project.info.get('execution_packages',[]),
+        'robot_variants':robot_variants(project.workspace),'robot_rig':project.info.get('robot_rig')}
 
 
 def save_inputs(path,files,notes,*,scene_state=None):
@@ -85,12 +127,12 @@ def source_inputs(path,engine):
     from .robot.registration import bound_configuration
     project=Project(path,read_only=True);engine_key='isaac'if engine=='isaaclab'else engine
     if engine_key not in('mujoco','isaac'):raise ValueError('MuJoCo 또는 Isaac을 선택하세요.')
-    records=[row for row in project.info.get('execution_packages',[])if engine_key in row.get('engine_config',{})or engine_key in row.get('execution_readiness',{})]
+    records=project.info.get('execution_packages',[])
     if not records:raise ValueError('선택한 Scene에 이 엔진의 실행 Package가 등록되지 않았습니다.')
     # Registration order is the Project's revision order; never fall back from a
     # broken newest revision to an older Package without the user's knowledge.
     record=records[-1];scene=(project.root/record['path']/'scene.json').resolve()
-    settings_path=record.get('engine_profiles',{}).get(engine_key,{}).get('physics')if 'engine_profiles'in record else record['engine_config'][engine_key]
+    settings_path=record.get('engine_profiles',{}).get(engine_key,{}).get('physics')
     if not settings_path:
         needs=record.get('execution_readiness',{}).get(engine_key,{}).get('needs',[])
         raise ValueError('Native Physics 실행 준비가 부족합니다: '+'; '.join(needs))
@@ -99,8 +141,7 @@ def source_inputs(path,engine):
     package=load_scene(scene,expected=SceneIdentity(record['scene_id'],record['revision'],record['manifest_sha256']))
     if engine_key not in package.scene['engines']:raise ValueError('Scene Package가 선택 엔진을 지원하지 않습니다.')
     config=read(settings)
-    if config.get('render_type')=='authored':raise ValueError('이 Scene에는 비교용 렌더 설정만 있습니다. Builder에서 Source용 물리 실행 자산과 설정을 등록하세요.')
-    if config.get('simulation_mode','physics')!='physics':raise ValueError('Source에는 Native Physics 설정이 필요합니다. Native Pose는 영상 비교용입니다.')
+    if config.get('render_type')!='native'or config.get('simulation_mode')!='physics':raise ValueError('Source에는 Native Physics 설정이 필요합니다. Native Pose는 영상 비교용입니다.')
     workspace=project.root.parent.parent;configuration=bound_configuration(project.root,workspace)
     if configuration is None:raise ValueError('이 Scene에 장치 설정이 없습니다. Scene Prepare에서 Leader 장치 구성을 저장하세요.')
     device=read(configuration).get('inputs',{}).get('leader_device_profile')

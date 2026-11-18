@@ -356,6 +356,9 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     from scene_contract.package import load_scene
     from .data.native import load_catalog
     spec=doc.spec;resolved={};documents={};dataset=None;catalog=inputs or {}
+    if spec.engine in('isaac','isaaclab')and spec.stage in('source','annotation','datagen','simulation_evaluation'):
+        from .engines.isaac.env_cfg import prepare_camera_schema
+        prepare_camera_schema()  # Before any Package parser opens the first USD Stage.
     if spec.stage=='source':
         selected=_resolve(doc,spec.inputs['scene'])
         if selected.is_dir()and(selected/'project.yaml').is_file():
@@ -439,8 +442,16 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         if len(rows)!=1:_fail('inputs.scene','registered Scene Package required for Real/Sim',doc.path)
         if any(rows[0].get(k)!=getattr(scene.identity,k)for k in('scene_id','revision','manifest_sha256')):_fail('inputs.scene','registered Scene Revision/Manifest identity differs',doc.path,code='SCENE_INTEGRITY_MISMATCH')
         key='isaac'if spec.engine=='isaaclab'else spec.engine
-        settings=rows[0].get('engine_config',{}).get(key)
-        if not settings or not(project.root/settings).resolve().is_relative_to(project.root)or(project.root/settings).resolve()!=Path(resolved['engine_config']['path']):_fail('inputs.engine_config','registered Scene engine configuration required',doc.path)
+        settings=rows[0].get('engine_profiles',{}).get(key,{}).get('pose')
+        if not settings or not(project.root/settings).resolve().is_relative_to(project.root)or(project.root/settings).resolve()!=Path(resolved['engine_config']['path']):_fail('inputs.engine_config','registered Native Pose configuration required for Real/Sim',doc.path)
+    if spec.stage in('source','annotation','datagen','simulation_evaluation','paired_session'):
+        config=documents.get('engine_config')
+        required_mode='pose'if spec.stage=='paired_session'else'physics'
+        # Annotation/DataGen may consume the Dataset's already pinned Native
+        # physics model_config. Their engine loader validates that recorded
+        # contract; do not require an unrelated second settings file.
+        if config is not None and(config.get('render_type','native')!='native'or config.get('simulation_mode',None if required_mode=='pose'else'physics')!=required_mode):
+            _fail('inputs.engine_config','Native '+required_mode+' configuration required',doc.path)
     if scene is not None and 'scene' not in resolved:
         scene=load_scene(scene.root/'scene.json',expected=scene.identity)
         resolved['scene']=_freeze({'kind':'scene','path':str(scene.root/'scene.json'),'identity':_plain(scene.identity)})
@@ -520,7 +531,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage in('scene_capture','sdk_calibration'):code_names+=['robot/scene_observation.py','robot/sdk_calibration.py','robot/registration.py','robot/devices.py','robot/offline.py','robot/snapshots.py']
     if spec.stage in('capture_session','paired_session'):code_names+=['robot/teleop_loop.py']
     if spec.stage=='capture_session':code_names+=['robot/registration.py']
-    if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/authored_render.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','robot/supervised.py','robot/control.py','robot/telemetry.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
+    if spec.stage=='paired_session':code_names+=['robot/real_sim.py','robot/scene_render.py','robot/render_transport.py','robot/render_worker.py','robot/session_devices.py','robot/configuration.py','robot/calibration.py','robot/devices.py','robot/registration.py','robot/capture.py','robot/snapshots.py','robot/pairs.py','robot/supervised.py','robot/control.py','robot/telemetry.py','engines/mujoco/model.py','engines/mujoco/state.py','engines/isaac/env_cfg.py','engines/isaac/state.py','engines/isaac/mdp.py','data/video.py']
     if spec.stage=='source':code_names+=['scene_preparation.py','robot/registration.py']
     if spec.stage=='paired_session':code_names+=['engines/mujoco/rendering.py','robot/pose_render.py']
     code_files={str(p):_sha(p.read_bytes()) for name in code_names if (p:=Path(__file__).parent/name).is_file()}
@@ -531,7 +542,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
         from .robot.offline import capture_reader
         capture=capture_reader()
         builder_names=('capture.py','files.py','scene.py','project.py','candidate.py','evidence.py','rendering.py','validation.py','calibration/geometry.py','exporters/usd.py','exporters/mjcf.py')
-        if spec.stage=='paired_session':builder_names+=('cameras.py','isaac_render.py')
+        if spec.stage=='paired_session':builder_names+=('cameras.py',)
         for name in builder_names:
             p=Path(capture.__file__).parent/name;code_files[str(p)]=_sha(p.read_bytes())
     runtime_execution=_plain(spec.execution)

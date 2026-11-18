@@ -59,13 +59,15 @@ def register_package(project,source,workspace):
     from scene_contract.package import load_scene
     from dataclasses import asdict
     source=Path(source).resolve();package=load_scene(source/'scene.json');destination=project.root/'exports'/package.identity.revision
+    if 'execution_profiles.json'not in{f.path for f in package.files}or not package.scene['validation'].get('native_readiness'):
+        raise ValueError('Native execution profiles required; archived Scene is preserved and cannot be registered for execution')
     records=[]
     for file in sorted(source.rglob('*')):
         if file.is_file():own_file(file,destination/file.relative_to(source),workspace,records)
     owned=load_scene(destination/'scene.json')
     if owned.identity!=package.identity:raise ValueError('Closed package identity changed while registering')
     from real2sim_builder.registration import register_export
-    row=register_export(project,destination,engine_config={},source_project_id=package.identity.scene_id)
+    row=register_export(project,destination,source_project_id=package.identity.scene_id)
     write(project.root/'input/migration/package-provenance.json',{'identity':asdict(owned.identity),'files':records,'relation':'same closed execution revision, new authoring project ownership; not a re-export'})
     return {**row,'path':str(destination)}
 

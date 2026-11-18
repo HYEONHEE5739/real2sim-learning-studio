@@ -7,7 +7,7 @@ import base64
 import numpy as np
 from PyQt6 import sip
 from PyQt6.QtCore import Qt,QTimer,pyqtSignal,QPointF
-from PyQt6.QtGui import QImage,QSurfaceFormat,QMatrix3x3,QColor,QPainter
+from PyQt6.QtGui import QImage,QSurfaceFormat,QMatrix3x3,QColor,QPainter,QOpenGLContext
 from PyQt6.QtOpenGL import (QOpenGLFunctions_4_1_Core,QOpenGLBuffer,
     QOpenGLShader,QOpenGLShaderProgram,QOpenGLTexture,QOpenGLVertexArrayObject)
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -292,12 +292,23 @@ class AssetViewport(QOpenGLWidget):
         if generation==self.generation:self.running=False;self.rendered.emit(self.image)
 
     def cleanup(self):
-        if self.context()and self.context().isValid():
-            self.makeCurrent();self.release_meshes()
-            if self.vao:self.vao.destroy();self.vao=None
-            if self.program:sip.delete(self.program);self.program=None
-            self.doneCurrent()
         self.dirty=True
+        context=self.context()
+        if context and context.isValid():
+            previous=QOpenGLContext.currentContext()
+            surface=previous.surface()if previous else None
+            self.makeCurrent()
+            try:
+                if QOpenGLContext.currentContext()is context:
+                    self.release_meshes()
+                    if self.vao:self.vao.destroy();self.vao=None
+                    if self.program:sip.delete(self.program);self.program=None
+            finally:
+                self.doneCurrent()
+                # Cleanup may run during another preview's upload (e.g. GC of
+                # an old dialog). Do not leave that preview without a context.
+                if previous is not None and previous is not context and previous.isValid()and surface is not None:
+                    previous.makeCurrent(surface)
 
     def mousePressEvent(self,event):self.last=event.position()
     def mouseMoveEvent(self,event):

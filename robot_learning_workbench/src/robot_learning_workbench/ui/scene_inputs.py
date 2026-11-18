@@ -1,7 +1,7 @@
 """Optional Scene materials and one free-form note buffer."""
 from pathlib import Path
 from PyQt6.QtCore import pyqtSignal,Qt
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QPushButton,QLabel,QListWidget,QPlainTextEdit,QFileDialog
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QPushButton,QLabel,QListWidget,QPlainTextEdit,QFileDialog,QComboBox
 
 
 DEFAULT_NOTES = """Codex에게 Scene 제작을 요청하듯 자유롭게 적어주세요.
@@ -13,14 +13,18 @@ DEFAULT_NOTES = """Codex에게 Scene 제작을 요청하듯 자유롭게 적어�
 
 class SceneInputs(QWidget):
     saveRequested=pyqtSignal(list,str)
+    robotRigRequested=pyqtSignal(str)
     def __init__(self,workspace,parent=None):
         super().__init__(parent);self._loaded_notes='';self._displayed_notes='';self.workspace=str(workspace);self.pending=[];box=QVBoxLayout(self);box.setContentsMargins(0,0,0,0)
         box.addWidget(QLabel('Input Data · 모두 선택 사항'))
+        box.addWidget(QLabel('Robot Model'))
+        self.robot_variant=QComboBox();self.robot_variant.addItem('기존 로봇 / Rig 미선택','');box.addWidget(self.robot_variant)
+        self.robot_variant.currentIndexChanged.connect(lambda _:self.robotRigRequested.emit(self.robot_variant.currentData()or''))
         self.scene_add=QPushButton('＋ Scene 이미지 추가');box.addWidget(self.scene_add);self.scene_add.clicked.connect(lambda:self.choose('scene_photo'))
         self.model_add=QPushButton('＋ Model 이미지 추가');box.addWidget(self.model_add);self.model_add.clicked.connect(lambda:self.choose('model_reference'))
         self.add=QPushButton('기타 자료 추가');box.addWidget(self.add);self.add.clicked.connect(lambda:self.choose('attachment'))
         self.files=QListWidget();self.files.setTextElideMode(Qt.TextElideMode.ElideMiddle);self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff);self.files.setMaximumHeight(170);box.addWidget(self.files)
-        box.addWidget(QLabel('Scene 메모'));self.notes=QPlainTextEdit();self.notes.setPlaceholderText(DEFAULT_NOTES);self.notes.setMinimumHeight(140);self.notes.setStyleSheet('QPlainTextEdit { background: #f4f5f7; color: #18212d; border: 1px solid #abb9c8; border-radius: 6px; padding: 8px; }');box.addWidget(self.notes,1)
+        box.addWidget(QLabel('Scene 메모'));self.notes=QPlainTextEdit();self.notes.setPlaceholderText(DEFAULT_NOTES);self.notes.setMinimumHeight(140);box.addWidget(self.notes,1)
         self.save=QPushButton('Scene 자료 저장');self.save.clicked.connect(lambda:self.saveRequested.emit(self.pending,self.note_text()));box.addWidget(self.save)
         self.reconstruct=QPushButton('Auto Reconstruction');box.addWidget(self.reconstruct);self.reconstruct.setEnabled(False)
         self.reconstruct.clicked.connect(self.open_reconstruction);self.project_path=None;self.backend_python=None
@@ -47,6 +51,18 @@ class SceneInputs(QWidget):
             row={'path':file,'role':role}
             if row not in self.pending:self.pending.append(row);self.files.addItem('추가 예정 · '+role+' · '+Path(file).name)
     def load(self,data):
+        self.robot_variant.blockSignals(True);self.robot_variant.clear();self.robot_variant.addItem('기존 로봇 / Rig 미선택','')
+        selected=(Path(data['project'])/data['robot_rig']['path']).resolve()if data.get('project')and data.get('robot_rig')else None
+        for row in data.get('robot_variants',[]):
+            if row.get('rig'):
+                self.robot_variant.addItem(row.get('label',row['name']),row['rig'])
+                detail=' · '.join(str(row[key])for key in('version','mount_status','calibration_status')if row.get(key))
+                self.robot_variant.setItemData(self.robot_variant.count()-1,detail,Qt.ItemDataRole.ToolTipRole)
+        if selected:
+            index=self.robot_variant.findData(str(selected))
+            if index<0:self.robot_variant.addItem('등록된 Robot Rig 확인 필요',str(selected));index=self.robot_variant.count()-1
+            self.robot_variant.setCurrentIndex(index)
+        self.robot_variant.blockSignals(False)
         self.project_path=data.get('project');self.reconstruct.setEnabled(bool(self.project_path and self.backend_python))
         self.library.setEnabled(bool(self.project_path and self.backend_python))
         self.pending=[];self.files.clear();self._loaded_notes=data.get('notes','');self.notes.setPlainText(self._loaded_notes);self._displayed_notes=self.notes.toPlainText()

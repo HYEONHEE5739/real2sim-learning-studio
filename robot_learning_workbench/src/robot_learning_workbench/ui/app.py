@@ -16,12 +16,10 @@ class Window(QMainWindow):
         from scene_contract.naming import check_storage_available
         check_storage_available(workspace)
         from .theme import STYLE
-        from .paths import GROUPS
         self.setStyleSheet(STYLE);self.setWindowTitle('Real2Sim Learning Studio');self.resize(1320,900);self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
-        for folder in set(GROUPS.values()):(self.workspace/folder).mkdir(exist_ok=True)
         self.closing=False
         central=QWidget();self.setCentralWidget(central);layout=QVBoxLayout(central)
-        self.safety=QLabel('연결은 관측으로 시작 · Teleoperation 시작 버튼으로 실제 Leader → Follower 구동');self.safety.setWordWrap(True);layout.addWidget(self.safety)
+        self.safety=QLabel();self.safety.setObjectName('safetyBanner');self.safety.setWordWrap(True);layout.addWidget(self.safety)
         self.tabs=LiveSessionTabs();layout.addWidget(self.tabs,1)
         self.curation=CurationPage(backend_python,self.workspace,self)
         self.workflows={stage:WorkflowPage(stage,backend_python,modules,self)for stage in ('annotation','datagen','train','simulation_evaluation','offline_validation','hub_download','hub_upload','real_evaluation')}
@@ -55,11 +53,11 @@ class Window(QMainWindow):
         self.navigation.currentRowChanged.connect(self.select_stage);self.section.currentIndexChanged.connect(self.change_section);self.change_section(0);self.navigation.setCurrentRow(self.page_rows['Source Demo'])
         self.tabs.currentChanged.connect(self.update_banner)
         self.tabs.setCurrentIndex(0)
-        self.statusBar().showMessage('Scene v8 원본 보존 · Teleoperation 시작/중단은 사용자 조작 · Hub 쓰기 별도 승인')
+        self.statusBar().showMessage('Real2Sim Studio · 원본 보존 · 연결과 중단은 사용자 조작')
 
     def update_banner(self,index):
         if index not in(0,1,2,3):return
-        text={0:'로봇 연결은 관측으로 시작 · 텔레옵 시작으로 실제 Leader → Follower 구동',1:'Real/Sim: Leader → 실제 Follower 제어 · Follower 측정 자세를 Sim에 반영',3:'Precision: 연결 버튼으로 선택 로봇의 토크 해제 · 기준 자세 기록과 보정 저장'}
+        text={0:'로봇 연결 · Teleop 버튼으로 연결 후 Leader → Follower 제어 시작 · 종료하면 새 목표 전송 중단',1:'Real/Sim: Leader → 실제 Follower 제어 · Follower 측정 자세를 Sim에 반영',3:'Precision: 연결 버튼으로 선택 로봇의 토크 해제 · 기준 자세 기록과 보정 저장'}
         if index==2:text[index]='Source Demo: Leader → Simulation 로봇 · 실제 Follower 명령 없음'if self.pages[self._last_pipeline_row][1]is self.source else'Workspace Pipeline · 선택 단계의 Script와 입력으로 실행'
         self.safety.setText(text[index])
 

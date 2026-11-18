@@ -1,4 +1,4 @@
-"""Explicit offline calibration projections, independent of interactive simulation."""
+"""Native measured-q/FK projection without physics steps, used by Real/Sim."""
 from .scene_render import NativeRenderer
 from .calibration import JOINTS
 
@@ -22,7 +22,5 @@ class PoseRenderer(NativeRenderer):
 
 
 def create_pose_renderer(view,directory):
-    if view.render_type=='authored':
-        from .authored_render import AuthoredRenderer
-        return AuthoredRenderer(view,directory)
+    if view.simulation_mode!='pose':raise ValueError('Native Pose profile required for measured-q rendering')
     return PoseRenderer(view,directory)

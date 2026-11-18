@@ -81,13 +81,14 @@ def execution_scenes(workspace):
             scene=(project.root/record['path']/'scene.json').resolve()
             try:
                 scene,metadata=_execution_metadata(project,record);valid=True;reason=None
-                engines=sorted(set(record.get('engine_config',{}))&set(metadata['engines']))
+                configs={key:modes['pose']for key,modes in record.get('engine_profiles',{}).items()if 'pose'in modes}
+                engines=sorted(set(configs)&set(metadata['engines']))
                 if not engines:
-                    reason='; '.join(n for r in record.get('execution_readiness',{}).values()for n in r.get('needs',[]))or'No bound execution settings'
+                    reason='; '.join(n for r in record.get('execution_readiness',{}).values()for n in r.get('needs',[]))or'Native Pose profile required; this Package is not executable'
             except (ValueError,OSError,KeyError)as error:
-                valid=False;reason=str(error);engines=[]
+                valid=False;reason=str(error);engines=[];configs={}
             rows.append({'name':item['name'],'revision':record['revision'],'project':item['project'],'project_id':project.info['id'],'scene_id':record['scene_id'],'scene':str(scene),
-                'engines':engines,'engine_config':record.get('engine_config',{}),'manifest_sha256':record['manifest_sha256'],
+                'engines':engines,'engine_config':configs,'manifest_sha256':record['manifest_sha256'],
                 'valid':valid,'reason':reason,'asset_integrity':'CHECKED_AT_PREPARE'})
     return {'scenes':rows,'catalog_ms':(time.monotonic_ns()-begin)/1e6}
 
@@ -102,14 +103,19 @@ def real_sim_setup(workspace,project,scene,engine):
     matches=[r for r in project.info.get('execution_packages',[])if(project.root/r['path']/'scene.json').resolve()==scene]
     if len(matches)!=1:raise ValueError('Choose a registered executable Scene Package')
     registered=matches[0];_execution_metadata(project,registered)
-    if engine_key not in('isaac','mujoco')or engine_key not in matches[0].get('engine_config',{}):raise ValueError('Selected Scene has no bound configuration for this engine')
+    settings_path=registered.get('engine_profiles',{}).get(engine_key,{}).get('pose')
+    if engine_key not in('isaac','mujoco')or not settings_path:
+        needs=registered.get('execution_readiness',{}).get(engine_key,{}).get('needs',[])
+        raise ValueError('Native Pose is unavailable for '+engine_key+': '+'; '.join(needs or ['No registered Native Pose profile']))
     config=bound_configuration(project.root,workspace)
     if config is None:raise ValueError('장치 구성이 없습니다. Scene Prepare의 장치 설정을 먼저 저장하세요.')
     data=read(config);keys=('device_profile','calibration_profile','leader_device_profile','leader_calibration_profile','camera_config','robot_model','source_robot_model');inputs={k:str((config.parent/v).resolve())for k,v in data['inputs'].items()if k in keys}
     required={'device_profile','calibration_profile','camera_config','robot_model'}
     if not required<=inputs.keys():raise ValueError('Follower의 Model/Precision/Camera 구성을 확인하세요.')
-    settings=(project.root/matches[0]['engine_config'][engine_key]).resolve()
+    settings=(project.root/settings_path).resolve()
     if not settings.is_relative_to(project.root):raise ValueError('Scene engine settings escaped selected Project')
+    values=read(settings)
+    if values.get('render_type')!='native'or values.get('simulation_mode')!='pose':raise ValueError('Real/Sim requires Native Pose settings')
     inputs.update(project=str(project.root),scene=str(scene),engine_config=str(settings))
     recipe={'schema_version':1,'stage':'paired_session','engine':engine,'inputs':inputs,'execution':{'device_source':data['execution']['device_source']},'output':{'directory':'new-real-sim'}}
     return {'project':str(project.root),'name':project.info['name'],'recipe':recipe,'configuration':str(config),
@@ -123,6 +129,9 @@ def execute(operation,arguments):
     if operation=='session_materials':
         from ..scene_preparation import save_inputs
         save_inputs(arguments['path'],arguments['files'],arguments['notes']);return catalog(arguments['path'],arguments['workspace'])
+    if operation=='session_robot_rig':
+        from ..scene_preparation import select_robot_rig
+        select_robot_rig(arguments['path'],arguments.get('rig_path'));return catalog(arguments['path'],arguments['workspace'])
     if operation=='session_devices':
         from ..robot.registration import discover
         return discover()

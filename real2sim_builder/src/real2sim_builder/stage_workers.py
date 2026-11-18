@@ -200,8 +200,46 @@ def segments_raw(request):
     return {'path':str(path),'phrases':phrases,'point_fallback':fallback,'provenance':provenance}
 
 
+def preview_segments(request):
+    """Role-bound preview association; retain clipped/context observations.
+
+    Original per-category mask pruning and unique pixel assignment are reused.
+    This CPU path neither initializes an encoder nor certifies physical IDs.
+    """
+    import numpy as np
+    from PIL import Image
+    pure=_module('r2s_decomposition_math',Path(__file__).parent/'calibration/decomposition.py')
+    raw=request['sam_result'];objects=request['objects'];rows=[];bound_masks=[]
+    with np.load(raw['path'])as data:masks=list(data['masks']);boxes=np.asarray(data['boxes']);scores=np.asarray(data['scores'])
+    categories={o['id']:pure.get_primary_object_name(o.get('category',o['prompt']))for o in objects}
+    for category in dict.fromkeys(categories.values()):
+        expected=[o for o in objects if categories[o['id']]==category]
+        indices=[i for i,p in enumerate(raw['phrases'])if p==category]
+        selected=[masks[i]for i in indices];b=boxes[indices];s=scores[indices]
+        if selected:
+            selected,b,s,_=pure.prune_redundant_masks(selected,b,s,[category]*len(selected),
+                boundary_proportion=None,text_encoder=None)
+        try:assignment=pure.associate_masks(expected,b)if selected else{}
+        except ValueError:assignment={}
+        for obj in expected:
+            if obj['id']not in assignment:
+                rows.append({'id':obj['id'],'status':'AMBIGUOUS'if indices else'NOT_FOUND'});continue
+            i=assignment[obj['id']];mask=np.asarray(selected[i],bool)
+            if not mask.any():rows.append({'id':obj['id'],'status':'AMBIGUOUS'});continue
+            row={'id':obj['id'],'status':'UNIQUE_ESTIMATED','confidence':float(s[i]),'category':category}
+            rows.append(row);bound_masks.append((row,mask))
+    disjoint=pure.disentangle_masks([m for _,m in bound_masks],[r['category']for r,_ in bound_masks])
+    for (row,_),mask in zip(bound_masks,disjoint):
+        if not mask.any():row['status']='AMBIGUOUS';continue
+        path=Path(request['output'])/(row['id']+'_mask.png');Image.fromarray(mask.astype('uint8')*255).save(path)
+        row['path']=str(path)
+    return {'objects':rows,'sam_provenance':raw['provenance'],'point_fallback':raw['point_fallback'],
+            'policy':'per-category original pruning without boundary deletion; unique pixel assignment; unknown retained'}
+
+
 def segments(request):
     """Unchanged pruning/association in a CPU environment after SAM child exits."""
+    if request.get('association_policy')=='semantic_preview':return preview_segments(request)
     import numpy as np
     from PIL import Image
     from sentence_transformers import SentenceTransformer
@@ -509,61 +547,35 @@ def physics(request):
 
 def simulator(request):
     from PIL import Image
-    if request.get('execution_mode')=='native':
-        from real2sim_builder.export import verify_package
-        from robot_learning_workbench.robot.calibration import mapper_from_scene
-        from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
-        from robot_learning_workbench.robot.pose_render import create_pose_renderer
-        package=verify_package(request['package'])
-        records=[name for name,row in package.calibration['records'].items()
-            if row['kind']=='encoder_mapping'and row['application'].get('phase')=='device_observation']
-        if len(records)!=1:raise ValueError('Native simulator requires one Follower Mapping')
-        mapping=mapper_from_scene(package,records[0],role='follower',phase='device_observation').metadata()
-        view=SceneView(package.root/'scene.json',request['engine'],request['engine_config'],mapping)
-        if view.render_type!='native':raise ValueError('Native integration cannot substitute authored rendering')
-        launcher=None
-        try:
-            if request['engine']=='isaac':
-                from isaaclab.app import AppLauncher
-                launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
-            factory=create_pose_renderer if view.simulation_mode=='pose'else create_renderer
-            with factory(view,Path(request['output'])/'runtime')as renderer:
-                result=renderer.render(view.settings['initial_joint_rad'])
-                if set(request['camera_ids'])!=set(result['images']):raise ValueError('Native sensors differ from Stage14 selection')
-                paths=[]
-                for name,rgb in result.pop('images').items():
-                    path=Path(request['output'])/(name+'.png');Image.fromarray(rgb).save(path);paths.append(str(path))
-            return {**result,'status':'NOT_VERIFIED','runtime_loaded':True,'physical_verified':False,
-                'camera_ids':request['camera_ids'],'renders':paths,'q_scope':'declared initial model-radian state; no hardware or independent sensor validation'}
-        finally:
-            if launcher is not None:launcher.app.close()
-    _builder_runtime()
-    from real2sim_builder.files import read
+    if 'execution_mode'in request:raise ValueError('execution_mode was removed; Native Pose/Physics settings required')
+    if request['engine']=='isaac':
+        from robot_learning_workbench.engines.isaac.env_cfg import prepare_camera_schema
+        prepare_camera_schema()
     from real2sim_builder.export import verify_package
-    from real2sim_builder.cameras import camera_roles,select_render_cameras
-    from real2sim_builder.scene import validate
-    from PIL import Image
-    scene=read(request['scene']);root=Path(request['project']);verify_package(request['package'])
-    validate(scene,root,complete=True)
-    ids=request['camera_ids'];roles=camera_roles(scene,request.get('image_records',[]))
-    if any(roles.get(name)not in('side','wrist')for name in ids):raise ValueError('Only metadata-identified sensors may be runtime cameras')
-    descriptor=select_render_cameras(scene,camera_ids=ids,image_records=request.get('image_records',[]))if ids else {**scene,'cameras':[]}
-    launcher=None;renderer=None;paths=[]
+    from robot_learning_workbench.robot.calibration import mapper_from_scene
+    from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
+    from robot_learning_workbench.robot.pose_render import create_pose_renderer
+    package=verify_package(request['package'])
+    records=[name for name,row in package.calibration['records'].items()
+        if row['kind']=='encoder_mapping'and row['application'].get('phase')=='device_observation']
+    if len(records)!=1:raise ValueError('Native simulator requires one Follower Mapping')
+    mapping=mapper_from_scene(package,records[0],role='follower',phase='device_observation').metadata()
+    view=SceneView(package.root/'scene.json',request['engine'],request['engine_config'],mapping)
+    launcher=None
     try:
         if request['engine']=='isaac':
             from isaaclab.app import AppLauncher
-            launcher=AppLauncher(headless=True,enable_cameras=bool(ids),device='cuda:0',fast_shutdown=False)
-            from real2sim_builder.isaac_render import IsaacRenderer
-            renderer=IsaacRenderer(descriptor,root,request['output'],data_types=('rgb',))
-        else:
-            from real2sim_builder.rendering import Renderer
-            renderer=Renderer(descriptor,root,request['output'])
-        for name in ids:
-            path=Path(request['output'])/(name+'.png');Image.fromarray(renderer.rgb(name)).save(path);paths.append(str(path))
-        return {'status':'NOT_VERIFIED','runtime_loaded':True,'physics_steps':0,
-                'camera_ids':ids,'renders':paths,'q_scope':'candidate state only; no measured Capture comparison or hardware control'}
+            launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
+        factory=create_pose_renderer if view.simulation_mode=='pose'else create_renderer
+        with factory(view,Path(request['output'])/'runtime')as renderer:
+            result=renderer.render(view.settings['initial_joint_rad'])
+            if set(request['camera_ids'])!=set(result['images']):raise ValueError('Native sensors differ from Stage14 selection')
+            paths=[]
+            for name,rgb in result.pop('images').items():
+                path=Path(request['output'])/(name+'.png');Image.fromarray(rgb).save(path);paths.append(str(path))
+        return {**result,'status':'NOT_VERIFIED','runtime_loaded':True,'physical_verified':False,
+            'camera_ids':request['camera_ids'],'renders':paths,'q_scope':'declared initial model-radian state; no hardware or independent sensor validation'}
     finally:
-        if renderer is not None:renderer.close()
         if launcher is not None:launcher.app.close()
 
 def main(kind, request):

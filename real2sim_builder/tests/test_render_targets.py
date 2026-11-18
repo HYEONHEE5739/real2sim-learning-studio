@@ -126,31 +126,6 @@ def test_sensor_context_is_reused_and_closed_before_opening_a_photo_or_after_fai
     assert created==closed==[['optical_a','optical_b'],['side'],['optical_a','optical_b']]
 
 
-@pytest.mark.parametrize('engine',['mujoco','isaac'])
-def test_authored_realsim_uses_role_to_camera_binding_in_both_engines(tmp_path,monkeypatch,engine):
-    from types import SimpleNamespace
-    from robot_learning_workbench.robot import authored_render
-    from real2sim_builder import rendering,isaac_render,capture
-    scene,images=scene_with_roles();scene['robot_model']={'path':'unused.urdf'}
-    before=copy.deepcopy(scene);allocated=[]
-    class Native:
-        def __init__(self,scene,*args,**kwargs):
-            self.names=[c['id']for c in scene['cameras']];allocated.append(self.names)
-        def update_scene(self,scene):assert [c['id']for c in scene['cameras']]==self.names
-        def rgb(self,name):assert name in self.names;return np.zeros((480,640,3),np.uint8)
-        def close(self):pass
-    monkeypatch.setattr(rendering,'Renderer',Native);monkeypatch.setattr(isaac_render,'IsaacRenderer',Native)
-    monkeypatch.setattr(authored_render,'joint_specs',lambda path:{n:{'limits':[-1.,1.]}for n in authored_render.JOINTS})
-    monkeypatch.setattr(capture,'observation_scene',lambda scene,*args,**kwargs:copy.deepcopy(scene))
-    view=SimpleNamespace(authored_scene=scene,package=SimpleNamespace(root=tmp_path),engine=engine,verify=lambda:None,scene_identity={},source_scene={},mapping={})
-    with authored_render.AuthoredRenderer(view,tmp_path)as renderer:result=renderer.render([0.]*6)
-    assert allocated==[['optical_a','optical_b']]
-    assert set(result['images'])==set(result['sim_cameras'])=={'side','wrist'}
-    assert result['sim_cameras']['side']['camera_id']=='optical_a'
-    assert result['sim_cameras']['wrist']['camera_id']=='optical_b'
-    assert scene==before and result['physics_steps']==0
-
-
 def test_isaac_close_still_destroys_products_and_stops_context_when_detach_fails():
     from real2sim_builder.isaac_render import IsaacRenderer
     events=[]

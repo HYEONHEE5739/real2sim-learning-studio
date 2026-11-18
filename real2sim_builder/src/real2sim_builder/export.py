@@ -303,8 +303,8 @@ def verify_package(path):
 
 
 def export_revision(project,*,destination,candidate=None,calibration=None,required_files=(),engine_sources=None,
-                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,mujoco_robot_asset=None,asset_resolutions=None,engine_config=None,
-                    execution_mode='authored',native_options=None):
+                    scene_id=None,revision=None,allow_unvalidated=False,isaac_robot_asset=None,mujoco_robot_asset=None,asset_resolutions=None,
+                    native_options=None):
     """Publish a new revision only after file/closure checks; never replace originals.
 
     Inputs are project-owned edit data or explicit read-only source files. Calibration
@@ -313,17 +313,10 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
     from .project import Candidate
     from scene_contract.package import load_scene
     destination=Path(destination).resolve();scene_id=scene_id or project.info['id'];revision=revision or destination.name
-    if execution_mode not in('authored','native'):raise ValueError('Explicit authored/native execution mode required')
     native_options=dict(native_options or{})
     if set(native_options)-{'mapping','initial_joint_rad'}:raise ValueError('Unknown native execution option')
-    if execution_mode=='native'and engine_config is not None:raise ValueError('Native registration must use loader-checked settings')
-    if engine_sources:raise ExportError('ENGINE_SOURCE_UNSUPPORTED','engine_sources','replacement native assets require separately verified bindings; use the authored Scene exporter')
+    if engine_sources:raise ExportError('ENGINE_SOURCE_UNSUPPORTED','engine_sources','replacement native assets require separately verified bindings; use the Builder Native exporters')
     if destination.exists():raise ExportError('OUTPUT_EXISTS',str(destination),'new Revision destination required')
-    if engine_config is not None:
-        if not isinstance(engine_config,dict)or not engine_config or set(engine_config)-{'mujoco','isaac'}:raise ValueError('Explicit engine settings mapping required')
-        for relative in engine_config.values():
-            path=local_path(project.root,relative)
-            if not path.is_relative_to(project.root)or not path.is_file()or not isinstance(read(path),dict):raise ValueError('Owned engine settings file required')
     if (project.read_only and destination.is_relative_to(project.root)) or project.root.is_relative_to(destination) or destination==project.root:raise ExportError('OUTPUT_CONFLICT',str(destination),'must not contain/replace input project')
     if candidate is not None:
         selected=Candidate(project,candidate);scene=selected.scene;report_path=selected.root/'metrics.json'
@@ -381,7 +374,7 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
         distorted=any(any(c['distortion']['value'])for c in working['cameras'])
         if distorted:
             write(staging/'camera_projection.json',{'schema':'real2sim.camera-projection/1',
-                'native_projection':'pinhole; authored Real/Sim renderer applies original distortion after rendering',
+                'native_projection':'pinhole; Native Real/Sim renderer applies original distortion after rendering',
                 'source_camera_calibration_changed':False,
                 'cameras':{c['id']:{'K':c['K']['value'],'resolution':c['resolution'],'distortion':c['distortion']['value']}for c in working['cameras']}})
         for engine,module,suffix in [('mujoco',mjcf,'.xml'),('isaac',usd,'.usda')]:
@@ -404,7 +397,7 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
         if working.get('robot_model')and any(p.name in('finger_convex_parts.json','usd_contact_pads.json')for p in copied):
             spec['robot']['collision']=_collision_binding(staging,copied)
         calibration=copy.deepcopy(calibration) if calibration is not None else {'schema_version':1,'records':{},'evidence':{}}
-        if execution_mode=='native'and not any(r['kind']=='encoder_mapping'for r in calibration['records'].values()):
+        if not any(r['kind']=='encoder_mapping'for r in calibration['records'].values()):
             mapping=native_options.get('mapping',working.get('robot_model',{}).get('mapping'))
             if mapping:
                 from robot_learning_workbench.robot.calibration import mapper_from_metadata,JOINTS
@@ -453,13 +446,12 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
         spec['engines']['mujoco']['loader_validation']={'status':'PARSED','ngeom':m.ngeom}
         spec['engines']['isaac']['loader_validation']={'status':'PARSED','runtime':'NOT_TESTED'}
         write(staging/'scene.json',spec);manifest();package=verify_package(staging)
-        if execution_mode=='native':
-            from .registration import native_profiles
-            profiles,readiness=native_profiles(package,native_options,project.evidence['images'])
-            write(staging/'execution_profiles.json',profiles)
-            spec['validation']['native_readiness']=readiness
-            if profiles:spec['robot']['reference_snapshot_only']=False
-            write(staging/'scene.json',spec);manifest();package=verify_package(staging)
+        from .registration import native_profiles
+        profiles,readiness=native_profiles(package,native_options,project.evidence['images'])
+        write(staging/'execution_profiles.json',profiles)
+        spec['validation']['native_readiness']=readiness
+        if profiles:spec['robot']['reference_snapshot_only']=False
+        write(staging/'scene.json',spec);manifest();package=verify_package(staging)
         if project.signature(scene)!=signature:raise ExportError('INPUT_CHANGED','project','input changed while exporting')
         for p in staging.rglob('*'):
             if p.is_file():
@@ -474,7 +466,7 @@ def export_revision(project,*,destination,candidate=None,calibration=None,requir
             raise ExportError('EXPORT_STATE_UNKNOWN',str(destination),'published package exists; directory durability was not confirmed; inspect this destination before retrying',effect='unknown') from error
         if not project.read_only:
             from .registration import register_export
-            register_export(project,destination,engine_config=engine_config,execution_mode=execution_mode)
+            register_export(project,destination)
         return package.identity
     finally:
         if lock is not None:lock.close();lock_path.unlink(missing_ok=True)

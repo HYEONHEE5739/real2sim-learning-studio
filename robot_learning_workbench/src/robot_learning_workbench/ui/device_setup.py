@@ -89,7 +89,7 @@ class DeviceSetup(QDialog):
         cameras=yaml.safe_load(Path(data['inputs']['camera_config']).read_text())['cameras']
         for name in('side','wrist'):
             combo=getattr(self,name);combo.blockSignals(True);combo.clear();p=cameras[name]['index_or_path'];combo.addItem(str(p),p);combo.blockSignals(False)
-        self.status.setText('저장 구성 복원 · '+('Precision/model rad 측정 가능 · 연결 후 Teleoperation 시작 버튼으로 구동'if data['stage']!='scene_capture'else'SDK native / Camera 관측 · model rad 및 제어 권한 없음'))
+        self.status.setText('저장 구성 복원 · '+('Precision/model rad 측정 가능 · 로봇 연결 · Teleop 버튼으로 연결 후 구동'if data['stage']!='scene_capture'else'SDK native / Camera 관측 · model rad 및 제어 권한 없음'))
         self.dirty=False;self.advanced.dirty=False;self.refresh_configurations()
     def save_advanced(self):
         try:self.request('session_device_save',workspace=str(self.workspace),name=self.name.text(),recipe=self.advanced.data())

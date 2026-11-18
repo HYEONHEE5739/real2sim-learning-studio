@@ -57,7 +57,7 @@ def test_capture_priority_blocks_a_new_live_request_until_the_next_frozen_reques
     from robot_learning_workbench.data.native import atomic_json
     from robot_learning_workbench.robot import render_worker,scene_render,pose_render
     identity={'source':'synthetic'}
-    monkeypatch.setattr(scene_render,'SceneView',lambda *_:SimpleNamespace(identity=identity,render_type='authored'))
+    monkeypatch.setattr(scene_render,'SceneView',lambda *_:SimpleNamespace(identity=identity,render_type='native',simulation_mode='pose'))
     atomic_json(tmp_path/'config.json',dict(engine='mujoco',scene='',settings='',mapping={},identity=identity))
     atomic_json(tmp_path/'capture.json',dict(id='pair1',q=[0.]*6,requested_ns=time.monotonic_ns()))
     atomic_json(tmp_path/'latest.json',dict(id='live1',q=[.1]*6,requested_ns=time.monotonic_ns()))

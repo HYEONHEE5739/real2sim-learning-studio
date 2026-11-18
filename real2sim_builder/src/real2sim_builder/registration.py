@@ -21,12 +21,19 @@ def native_profiles(package, options, image_records):
             if r['kind']=='encoder_mapping' and r['application'].get('phase')=='device_observation']
         if len(records)!=1:raise ValueError('One manifest-bound Follower measured-q Mapping is required')
         mapper=mapper_from_scene(package,records[0],role='follower',phase='device_observation')
+        from robot_learning_workbench.robot.calibration import execution_urdf
+        import xml.etree.ElementTree as ET
+        for link in ET.parse(execution_urdf(package)).findall('link'):
+            if link.find('visual')is not None and link.find('collision')is None:
+                raise ValueError('Robot Collision geometry required for link '+link.get('name','UNKNOWN'))
         canonical=read(package.root/'authored_scene.json')
         if 'robot_base'not in package.scene['frames']:raise ValueError('Robot Base frame is unresolved')
         cameras={c['id']:c for c in canonical['cameras']}
         if not {'side','wrist'}<=set(cameras):raise ValueError('Native adapters require declared Side/Wrist sensors')
         if cameras['side'].get('camera_type')!='side' or cameras['wrist'].get('camera_type')!='wrist':
             raise ValueError('Explicit Side/Wrist camera roles are required')
+        if any(cameras[n]['resolution']!=[640,480]for n in('side','wrist')):
+            raise ValueError('Native Side/Wrist adapters require an explicit 640x480 sensor grid')
         frame=cameras['wrist']['frame'];mounted=False
         while frame is not None:
             mounted|=frame.startswith('robot_link_');frame=canonical['frames'][frame]['parent']
@@ -81,7 +88,7 @@ def native_profiles(package, options, image_records):
     return profiles,readiness
 
 
-def register_export(project,package_path,*,engine_config=None,source_project_id=None,execution_mode='authored'):
+def register_export(project,package_path,*,source_project_id=None):
     project.require_writable();root=Path(package_path).resolve();package=verify_package(root)
     with exclusive(project):
         info=read(project.root/'project.yaml');rows=info.get('execution_packages',[])
@@ -89,31 +96,22 @@ def register_export(project,package_path,*,engine_config=None,source_project_id=
         settings={};created=[];profiles={}
         try:
             for engine in package.scene['engines']:
-                if engine_config is None and execution_mode=='native':
-                    declared=read(root/'execution_profiles.json').get(engine,{})
-                    profiles[engine]={}
-                    for mode,values in declared.items():
-                        path=project.root/'configuration'/('native-'+package.identity.manifest_sha256+'-'+engine+'-'+mode+'.json')
-                        from dataclasses import asdict
-                        payload={**values,'render_type':'native','simulation_mode':mode,'scene_identity':asdict(package.identity)}
-                        if path.exists():
-                            if read(path)!=payload:raise ValueError('Immutable native execution settings changed')
-                        else:write(path,payload);created.append(path)
-                        profiles[engine][mode]=path.relative_to(project.root).as_posix()
-                    if 'pose'in profiles[engine]:settings[engine]=profiles[engine]['pose']
-                elif engine_config is None:
-                    if not (root/'authored_scene.json').is_file():raise ValueError('Authored export scene required for default render settings')
-                    path=project.root/'configuration/export-authored-preview.json'
-                    if path.is_symlink()or path.parent.is_symlink():raise ValueError('Default preview settings symlink is forbidden')
+                declared=read(root/'execution_profiles.json').get(engine,{})
+                if set(declared)-{'pose','physics'}:raise ValueError('Only Native Pose/Physics profiles may be registered')
+                profiles[engine]={}
+                for mode,values in declared.items():
+                    path=project.root/'configuration'/('native-'+package.identity.manifest_sha256+'-'+engine+'-'+mode+'.json')
+                    from dataclasses import asdict
+                    payload={**values,'render_type':'native','simulation_mode':mode,'scene_identity':asdict(package.identity)}
+                    if path.is_symlink()or path.parent.is_symlink():raise ValueError('Native execution settings symlink is forbidden')
                     if path.exists():
-                        if read(path)!={'render_type':'authored'}:raise ValueError('Default preview settings changed; supply explicit engine settings')
-                    else:write(path,{'render_type':'authored'});created.append(path)
-                    settings[engine]=path.relative_to(project.root).as_posix()
-                elif engine in engine_config:settings[engine]=engine_config[engine]
+                        if read(path)!=payload:raise ValueError('Immutable native execution settings changed')
+                    else:write(path,payload);created.append(path)
+                    profiles[engine][mode]=path.relative_to(project.root).as_posix()
+                if 'pose'in profiles[engine]:settings[engine]=profiles[engine]['pose']
             row={'path':root.relative_to(project.root).as_posix()if root.is_relative_to(project.root)else str(root),'scene_id':package.identity.scene_id,'revision':package.identity.revision,
                  'manifest_sha256':package.identity.manifest_sha256,'source_project_id':source_project_id or project.info['id'],'engine_config':settings}
-            if execution_mode=='native':
-                row.update(engine_profiles=profiles,execution_readiness=read(root/'scene.json')['validation']['native_readiness'])
+            row.update(engine_profiles=profiles,execution_readiness=read(root/'scene.json')['validation']['native_readiness'])
             write(project.root/'project.yaml',{**info,'execution_packages':[*rows,row]})
         except BaseException:
             for path in created:path.unlink(missing_ok=True)

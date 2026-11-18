@@ -21,22 +21,18 @@ class SceneView:
         expected_identity=self.settings.pop('scene_identity',None)
         if expected_identity is not None and expected_identity!=self.scene_identity:raise ValueError('Engine settings belong to another Scene revision')
         self.render_type=self.settings.pop('render_type','native')
-        if self.render_type not in('native','authored'):raise ValueError('Unsupported Scene render settings')
-        self.simulation_mode=self.settings.pop('simulation_mode','physics'if self.render_type=='native'else'authored')
-        if self.simulation_mode not in(('pose','physics')if self.render_type=='native'else('authored',)):raise ValueError('Explicit native Pose/Physics or authored review mode required')
+        if self.render_type!='native':raise ValueError('Native execution settings required')
+        self.simulation_mode=self.settings.pop('simulation_mode',None)
+        if self.simulation_mode not in('pose','physics'):raise ValueError('Explicit Native Pose/Physics mode required')
         matches=[]
         for name,record in self.package.calibration['records'].items():
             if record['kind']!='encoder_mapping'or record['application'].get('phase')!='device_observation':continue
             parameters=json.loads((self.package.root/record['parameters_file']).read_text())if 'parameters_file'in record else record['parameters']
             profile=parameters.get('profile',parameters)
             if profile.get('role')=='follower':matches.append(name)
-        if self.render_type=='native'or matches:
-            if len(matches)!=1:raise ValueError('Scene requires one unambiguous Follower observation Calibration')
-            expected=mapper_from_scene(self.package,matches[0],role='follower',phase='device_observation').metadata()
-            if not mapping_coordinates_equal(expected,self.mapping):raise ValueError('Follower measured coordinates differ from selected Scene Calibration')
-        if self.render_type=='authored':
-            from .authored_render import validate_binding
-            validate_binding(self)
+        if len(matches)!=1:raise ValueError('Scene requires one unambiguous Follower observation Calibration')
+        expected=mapper_from_scene(self.package,matches[0],role='follower',phase='device_observation').metadata()
+        if not mapping_coordinates_equal(expected,self.mapping):raise ValueError('Follower measured coordinates differ from selected Scene Calibration')
         self.watched=[self.path,self.package.root/'manifest.json',self.settings_path,*[self.package.root/f.path for f in self.package.files]]
         self.stats=self._stats();self.identity={'scene':self.scene_identity,'settings_sha256':self.settings_sha256,'mapping_sha256':mapping['sha256'],'engine':engine}
     def _stats(self):
@@ -155,6 +151,5 @@ class NativeRenderer:
 
 
 def create_renderer(view,directory):
-    if view.render_type=='authored':
-        raise ValueError('Real/Sim physics requires native articulation and engine settings; this export only provides an authored pose view')
+    if view.simulation_mode!='physics':raise ValueError('Native Physics profile required for physics execution')
     return NativeRenderer(view,directory)

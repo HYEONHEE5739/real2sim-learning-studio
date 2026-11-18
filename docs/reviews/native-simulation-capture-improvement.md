@@ -1,5 +1,7 @@
 # Native Simulation·Scene 선택·Capture 개선
 
+> 2026-11-18 후속: 현재 실행은 Native Pose/Physics만 지원한다. 이 문서의 Authored 실행·설정은 당시 기록이며 [Native-only 전환](native-only-simulation.md)을 따른다.
+
 2026-11-18. `feat/simfoundry-style-reconstruction`, 시작 HEAD `25bb1cf083f2ce05a93c3bc2b9e290ba4f6cbf3b`의 기존 미커밋 작업 위에서 진행했다. 사용자 첨부의 Phase 1–6 범위다. 새 Reconstruction은 Native 실행 준비 여부를 Loader로 판정하고, Capture는 원본 저장과 후처리를 분리한다. 기존 Scene과 Package를 변경하거나 Authored를 Native로 재명명하지 않았다.
 
 **구현 및 관련 집중 검증을 완료했다. 실물에서 관측한 13초가 해소됐다는 실측 결과는 아직 없다.** 실제 작은 합성 MuJoCo 실행, 파일 저장, 프로세스 간 전달을 검사했고, 실물 장치·사용자 Scene E2E·Isaac Kit는 실행하지 않았다. 전체 회귀·모델 추론·설치·다운로드·Commit/Push도 수행하지 않았다.

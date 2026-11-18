@@ -466,6 +466,246 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
     return objects
 
 
+def parse_visual_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_records=None,robot_links=()):
+    """Retain validated visual evidence while deferring unapplied geometry/layouts.
+
+    The strict parser remains the modeling contract. A visual preview may omit
+    all numeric/layout claims after strict failure, but may not repair identity,
+    image bounds, reference roles, Memo SHA or Robot attachment declarations.
+    """
+    from copy import deepcopy
+    from .codex_cli import validate_answer
+    validate_answer(answer,scene_analysis_schema())
+    image_ids=tuple(image_ids)
+    options={'existing_objects':tuple(existing_objects),'image_records':image_records,
+             'robot_links':tuple(robot_links)}
+    try:
+        objects=parse_scene_analysis(answer,memo,image_ids,**options)
+    except ValueError as error:
+        visual=deepcopy(answer)
+        deferred={'geometry':{row['id']:deepcopy(row['geometry'])for row in answer['objects']if row['geometry']is not None},
+                  'capture_layouts':deepcopy(answer['capture_layouts'])}
+        visual['capture_layouts']=[]
+        for row in visual['objects']:row['geometry']=None
+        objects=parse_scene_analysis(visual,memo,image_ids,**options)
+        return {'objects':objects,'validation':{'status':'VISUAL_ONLY','strict_error':str(error)},
+                'deferred':deferred}
+    return {'objects':objects,'validation':{'status':'FULL','strict_error':None},'deferred':{}}
+
+
+def scene_constraint_schema():
+    """A correction of explicit Memo declarations, separate from visual identity.
+
+    This extends the legacy per-scalar contract; it does not reinterpret prose
+    or turn a shared measurement group into an Asset sharing permission.
+    """
+    from .scene import ROLES
+    def record(fields):
+        return {'type':'object','properties':fields,'required':list(fields),'additionalProperties':False}
+    string={'type':'string'};strings={'type':'array','items':string}
+    quantity=record({'quantity':{'type':'string','enum':['cube_edge_length','upper_rim_diameter','height',
+        'upper_rim_edge_gap','upper_rim_center_distance','outer_x','outer_y','inner_x','inner_y','border_width','tilt']},
+        'value':string,'unit':{'type':'string','enum':['mm','cm','m','deg']},'value_quote':string})
+    group=record({'id':string,'members':strings,'count':{'type':'integer','minimum':1},
+        'role':{'type':'string','enum':sorted(ROLES)},'source_quote':string,'ambiguous':{'type':'boolean'},
+        'evidence':{'type':'array','items':record({'object_id':string,'image_id':string,'evidence':string})}})
+    constraint=record({'id':string,'kind':{'type':'string','enum':['shared_dimension','pair_spacing','rectangle_border',
+        'axis_relation','orientation','reuse_existing']},'group_id':{'type':['string','null']},'objects':strings,
+        'reference_objects':strings,'axis':{'type':['string','null'],'enum':['x','y','z',None]},'source_quote':string,
+        'quantities':{'type':'array','items':quantity},'assumptions':{'type':'array','items':{'type':'string','enum':[
+            'PARALLEL_AXES','EQUAL_RIM_HEIGHT','CIRCULAR_UPPER_RIMS']}},'evidence':string})
+    assembly=record({'id':string,'members':strings,'parent_object_id':string,'source_quote':string,
+        'physical_sensor_count':{'type':'integer','enum':[1]},'link':{'type':['string','null']},
+        'T_link_assembly':{'type':['array','null'],'items':{'type':'array','items':{'type':'number'},'minItems':4,'maxItems':4},'minItems':4,'maxItems':4},
+        'evidence':string})
+    layout=scene_analysis_schema()['properties']['capture_layouts']
+    return record({'scene_memo_sha256':string,'source_plan_sha256':string,'replaces_geometry_ids':strings,
+        'capture_layouts':layout,'groups':{'type':'array','items':group},
+        'constraints':{'type':'array','items':constraint},'assemblies':{'type':'array','items':assembly},'needs':strings})
+
+
+def semantic_namespaces(records,object_ids=(),robot_links=()):
+    """Only actual Capture manifests authorize Capture layout identifiers."""
+    return {'object_ids':sorted(object_ids),'scene_photo_ids':[r['id']for r in records if r.get('role')=='scene_photo'],
+        'scene_video_frame_ids':[r['id']for r in records if r.get('role')=='scene_video_frame'],
+        'model_reference_ids':[r['id']for r in records if r.get('role')=='model_reference'],
+        'capture_image_ids':[r['id']for r in records if r.get('capture_manifest')],
+        'capture_layout_ids':sorted({r['scene_state_id']for r in records if r.get('capture_manifest')and r.get('scene_state_id')}),
+        'robot_links':list(robot_links)}
+
+
+def validate_scene_constraints(packet,plan,memo,*,image_records,robot_links=()):
+    """Authenticate a Codex-selected typed binding and its elementary algebra.
+
+    Literal quotes/numbers are checked, not natural language meaning. Group
+    membership remains a recorded Codex interpretation of the RGB and Memo.
+    Upper-rim measurements never become bottom/internal diameters, and pair
+    constraints never issue two independent Object pose commands.
+    """
+    import copy,re,math
+    from decimal import Decimal,InvalidOperation
+    from .codex_cli import validate_answer
+    from .scene import identifier
+    from .stage_artifacts import digest
+    validate_answer(packet,scene_constraint_schema())
+    validate_answer(plan,scene_analysis_schema())
+    if packet['scene_memo_sha256']!=memo['sha256']or packet['source_plan_sha256']!=digest(plan):
+        raise ValueError('Constraint binding used stale Memo/semantic plan')
+    ids=[r['id']for r in plan['objects']];by_id={r['id']:r for r in plan['objects']}
+    replaced=packet['replaces_geometry_ids']
+    if len(set(replaced))!=len(replaced)or set(replaced)!={r['id']for r in plan['objects']if r['geometry']is not None}:
+        raise ValueError('Every superseded geometry claim needs explicit correction coverage')
+    visual=copy.deepcopy(plan);visual['capture_layouts']=copy.deepcopy(packet['capture_layouts'])
+    for row in visual['objects']:row['geometry']=None
+    # The old parser still enforces ID, role, quote, attachment and image bounds.
+    objects=parse_scene_analysis(visual,memo,{r['id']for r in image_records},image_records=image_records,robot_links=robot_links)
+    scene_ids={r['id']for r in image_records if r.get('role')in('scene_photo','scene_video_frame')}
+    if any(set(s.get('images',{}))-scene_ids for s in objects.values()):
+        raise ValueError('Model Reference/Capture cannot become a static Scene observation')
+    def members(values):
+        if not values or len(set(values))!=len(values)or not set(values)<=objects.keys():
+            raise ValueError('Constraint has unknown/duplicate Object IDs')
+        return set(values)
+    def quote(text):
+        if not text.strip()or memo['text'].count(text)!=1:
+            raise ValueError('Constraint source quote must occur exactly once in this Memo')
+    groups={}
+    for row in packet['groups']:
+        name=identifier(row['id']);names=members(row['members']);quote(row['source_quote'])
+        if name in groups or row['count']!=len(names)or row['ambiguous']:
+            raise ValueError('Incomplete/ambiguous shared measurement group')
+        if any(objects[n]['role']!=row['role']for n in names):raise ValueError('Shared group Object role mismatch')
+        seen=set()
+        for evidence in row['evidence']:
+            n=evidence['object_id'];image=evidence['image_id']
+            if n not in names or image not in scene_ids or image not in objects[n].get('images',{})or not evidence['evidence'].strip():
+                raise ValueError('Shared group needs bound Scene Photo observations')
+            seen.add(n)
+        if seen!=names:raise ValueError('Shared group lacks member evidence')
+        groups[name]=copy.deepcopy(row)
+    constraints=[];seen=set();scalars={n:{}for n in ids};constraint_ids={n:[]for n in ids};unresolved=[]
+    def put(n,k,v):
+        if k in scalars[n]and scalars[n][k]!=v:raise ValueError('Contradictory Object measurement bindings')
+        scalars[n][k]=v
+    for row in packet['constraints']:
+        name=identifier(row['id']);names=members(row['objects']);quote(row['source_quote'])
+        if name in seen or not row['evidence'].strip():raise ValueError('Duplicate/unevidenced Memo constraint')
+        seen.add(name);kind=row['kind'];group=row['group_id']
+        if group is not None and(group not in groups or names!=set(groups[group]['members'])):
+            raise ValueError('Shared constraint must bind the entire declared group')
+        if row['reference_objects']:members(row['reference_objects'])
+        values={}
+        for q in row['quantities']:
+            key=q['quantity'];token=q['value_quote'];unit=q['unit']
+            if key in values or not token or token not in row['source_quote']:raise ValueError('Invalid/repeated quantity witness')
+            # Lexical numeric validation only. No Memo subject/role/quantity NLP.
+            match=re.fullmatch(r'\s*([+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mm|cm|m|deg)?\s*',token)
+            try:value=Decimal(q['value'])
+            except InvalidOperation:raise ValueError('Invalid numeric measurement')from None
+            if not match or not value.is_finite()or value<0 or value!=Decimal(match[1]):raise ValueError('Quantity number is not the quoted measurement')
+            if match[2]!=unit and not(key=='tilt'and unit=='deg'and value==0 and match[2]is None):
+                raise ValueError('Quantity unit differs from the Memo witness')
+            if (key=='tilt')!=(unit=='deg')or(key!='tilt'and value<=0):raise ValueError('Wrong dimension/unit for quantity')
+            converted=value*{'mm':Decimal('.001'),'cm':Decimal('.01'),'m':Decimal(1),'deg':Decimal(1)}[unit]
+            if not math.isfinite(float(converted))or(value>0 and float(converted)<=0):raise ValueError('Measurement is outside finite SI representation')
+            values[key]=converted
+        record=copy.deepcopy(row);record.update(provenance='user_declared',status='VALIDATED',
+            values_si={k:math.radians(float(v))if k=='tilt'else float(v)for k,v in values.items()},memo_sha256=memo['sha256'],pose_application='NONE')
+        if kind=='shared_dimension':
+            if len(names)>1 and group is None:raise ValueError('Shared dimensions require an explicit member group')
+            if not values or not set(values)<={'cube_edge_length','upper_rim_diameter','height'}:raise ValueError('Unsupported shared quantity')
+            for n in names:
+                shape=(by_id[n].get('geometry')or{}).get('kind')
+                if 'cube_edge_length'in values and(objects[n]['role']!='manipulable_object'or shape not in(None,'box')):
+                    raise ValueError('Cube dimension applied to the wrong Object kind/role')
+                if 'upper_rim_diameter'in values and(objects[n]['role']!='receptacle'or shape not in(None,'container')):
+                    raise ValueError('Upper rim diameter requires receptacle geometry')
+                for k,v in values.items():put(n,k,v)
+        elif kind=='pair_spacing':
+            if len(names)!=2 or set(values)!={'upper_rim_edge_gap','upper_rim_center_distance'}:
+                raise ValueError('Pair spacing needs exactly two Objects and gap/center measurements')
+            if any(objects[n]['role']!='receptacle'for n in names):raise ValueError('Rim spacing needs two receptacles')
+            if set(row['assumptions'])!={'PARALLEL_AXES','EQUAL_RIM_HEIGHT','CIRCULAR_UPPER_RIMS'}:
+                raise ValueError('Rim spacing algebra requires explicit geometric assumptions')
+            record['status']='CONDITIONAL';record['assumptions_verified']=False
+            unresolved.append({'constraint_id':name,'scope':'scene','reason':'Pair rim geometry assumptions need independent confirmation'})
+        elif kind=='rectangle_border':
+            if len(names)!=1 or set(values)!={'outer_x','outer_y','inner_x','inner_y','border_width'}:
+                raise ValueError('Rectangle border needs outer/inner XY and inward border width')
+            if any(values['inner_'+a]!=values['outer_'+a]-2*values['border_width']for a in 'xy'):
+                raise ValueError('Contradictory rectangle outer/inner/border dimensions')
+            n=next(iter(names))
+            if objects[n]['role']not in('workspace','support_surface'):raise ValueError('Rectangle bound to wrong Object role')
+            for k,v in values.items():put(n,k,v)
+        elif kind=='axis_relation':
+            if len(names)!=1 or len(row['reference_objects'])!=2 or row['axis']not in('x','y')or values:
+                raise ValueError('Axis relation needs a planar axis and a distinct reference pair')
+            record.update(axis_sign='UNRESOLVED',world_origin='UNRESOLVED',status='UNRESOLVED')
+            unresolved.append({'constraint_id':name,'scope':'scene','reason':'Axis sign, origin and Robot World registration unresolved'})
+        elif kind=='orientation':
+            if len(names)!=1 or set(values)!={'tilt'}or objects[next(iter(names))]['role']!='support_surface':
+                raise ValueError('Orientation needs a support-surface tilt declaration')
+            record['pose_application']='DECLARED_SCENE_CONSTRAINT_ONLY'
+        elif kind=='reuse_existing':
+            if values or any(objects[n]['role']!='reference_robot'for n in names):raise ValueError('Reuse requires existing Robot reference, no invented dimensions')
+            record.update(status='UNRESOLVED',asset_action='REUSE_EXISTING_URDF')
+            unresolved.append({'constraint_id':name,'scope':'scene','reason':'Resolve the existing Robot URDF/link mapping without changing it'})
+        height_axis=kind=='shared_dimension'and set(values)=={'height'}and row['axis']=='z'
+        if kind!='axis_relation'and((row['axis']is not None and not height_axis)or row['reference_objects']):
+            raise ValueError('Unexpected axis/reference fields')
+        if kind!='pair_spacing'and row['assumptions']:raise ValueError('Unexpected geometric assumptions')
+        for n in names:constraint_ids[n].append(name)
+        constraints.append(record)
+    # Resolve pair math after all shared dimensions, independent of row order.
+    for row in constraints:
+        if row['kind']!='pair_spacing':continue
+        diameters=[scalars[n].get('upper_rim_diameter')for n in row['objects']]
+        if None in diameters:raise ValueError('Pair relation has no validated upper-rim measurements')
+        v={q['quantity']:Decimal(q['value'])*{'mm':Decimal('.001'),'cm':Decimal('.01'),'m':Decimal(1)}[q['unit']]for q in row['quantities']}
+        if v['upper_rim_center_distance']!=v['upper_rim_edge_gap']+sum(diameters)/2:
+            raise ValueError('Contradictory rim gap and center distance')
+        row['numeric_consistency']='PASS_UNDER_RECORDED_ASSUMPTIONS'
+    assembly_members=set();assembly_ids=set();assemblies=[]
+    for row in packet['assemblies']:
+        name=identifier(row['id']);names=members(row['members']);quote(row['source_quote'])
+        if name in assembly_ids:raise ValueError('Duplicate Assembly identifier')
+        assembly_ids.add(name)
+        if assembly_members&names or any(objects[n]['role']!='fixture'for n in names):raise ValueError('Duplicate sensor assembly or wrong component role')
+        if row['parent_object_id']not in objects or objects[row['parent_object_id']]['role']!='reference_robot':raise ValueError('Camera Assembly needs its existing Robot parent')
+        if row['link']is not None and row['link']not in robot_links:raise ValueError('Unknown Assembly Robot link')
+        if row['T_link_assembly']is not None:raise ValueError('Memo binding cannot certify an unmeasured Camera Mount')
+        assembly_members|=names
+        assemblies.append({**copy.deepcopy(row),'status':'UNRESOLVED','sensor_registration':'NOT_REGISTERED','calibration':'NOT_VERIFIED'})
+        unresolved.append({'constraint_id':row['id'],'scope':'scene','reason':'One Camera Assembly; Wrist link/Mount/calibration unresolved'})
+    for n,spec in objects.items():
+        values=scalars[n];dims=[None,None,None];kind=(by_id[n].get('geometry')or{}).get('kind','mesh')
+        if 'cube_edge_length'in values and 'height'in values and values['cube_edge_length']!=values['height']:
+            raise ValueError('Contradictory cube edge and height measurement bindings: '+n)
+        if 'cube_edge_length'in values:dims=[float(values['cube_edge_length'])]*3;kind='box'
+        if 'height'in values:dims[2]=float(values['height'])
+        if 'outer_x'in values:dims[:2]=[float(values['outer_x']),float(values['outer_y'])]
+        if 'upper_rim_diameter'in values:kind='container'  # XY/bottom/internal diameter stay unknown.
+        declaration={'status':'VALIDATED','memo_sha256':memo['sha256'],'source_plan_sha256':packet['source_plan_sha256'],
+            'constraint_ids':constraint_ids[n],'quantities_m':{k:float(v)for k,v in values.items()},
+            'independent_identity_verified':False,'source':'user_memo/Codex typed binding',
+            'assembly_id':next((a['id']for a in assemblies if n in a['members']),None)}
+        spec.setdefault('shape_constraints',{})['memo_binding']=declaration
+        if any(v is not None for v in dims):
+            witnesses=[c for c in constraints if c['id']in constraint_ids[n]and c['kind']in('shared_dimension','rectangle_border')]
+            spec['geometry']={'kind':kind,'dimensions_m':dims,'provenance':'measured','memo_sha256':memo['sha256'],
+                'evidence':['Scene Memo SHA '+memo['sha256']+' quote: '+c['source_quote']for c in witnesses],
+                'numeric_evidence_verified':True,'semantics_verified':False,'wall_m':None}
+        pending_declaration=((by_id[n].get('geometry')or{}).get('source')=='user_memo'
+            and spec['role']in('manipulable_object','receptacle','workspace')and not values)
+        spec['modeling_readiness']='READY_FOR_MODELING'if spec.get('images')and not pending_declaration else'REVIEW'
+        if spec['role']=='reference_robot':spec['modeling_readiness']='REUSE_EXISTING_URDF'
+        if pending_declaration:unresolved.append({'constraint_id':n,'scope':'object','reason':'Existing Memo geometry declaration has no validated dimension binding'})
+    return {'schema':'scene-memo-constraints/1','status':'VALIDATED','memo_sha256':memo['sha256'],
+        'source_plan_sha256':packet['source_plan_sha256'],'groups':list(groups.values()),'constraints':constraints,
+        'assemblies':assemblies,'objects':objects,'unresolved':unresolved,'needs':packet['needs'],
+        'scene_registration':'UNRESOLVED','physical_identity_verified':False}
+
+
 def geometry_specs(config,scene):
     """One numeric input for geometry, calibration and modeling; no text parsing.
 

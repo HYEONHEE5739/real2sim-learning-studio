@@ -14,9 +14,19 @@ def observation_recipe(tmp_path,engine='mujoco'):
     inputs={k:v for k,v in config['inputs'].items()if not k.startswith('leader')}
     owned=R/'workbench_runs/scenes/pickplace-colorblock'
     shutil.copytree(owned/'exports/scene-v8-native',project.root/'exports/scene-v8-native',copy_function=os.link)
-    for key in('isaac','mujoco'):write(project.root/'configuration'/(key+'.json'),read(owned/'configuration'/(key+'.json')))
-    info=read(project.root/'project.yaml');info['execution_packages']=copy.deepcopy(read(owned/'project.yaml')['execution_packages']);write(project.root/'project.yaml',info)
-    inputs.update(project=str(project.root),scene=str(project.root/'exports/scene-v8-native/scene.json'),engine_config=str(project.root/'configuration'/('isaac.json'if engine=='isaaclab'else'mujoco.json')))
+    profiles={}
+    for key in('isaac','mujoco'):
+        physics={**read(owned/'configuration'/(key+'.json')),'render_type':'native','simulation_mode':'physics'}
+        pose={**physics,'simulation_mode':'pose'}
+        write(project.root/'configuration'/(key+'.json'),physics)
+        write(project.root/'configuration'/(key+'-pose.json'),pose)
+        profiles[key]={'pose':'configuration/'+key+'-pose.json','physics':'configuration/'+key+'.json'}
+    info=read(project.root/'project.yaml');info['execution_packages']=copy.deepcopy(read(owned/'project.yaml')['execution_packages'])
+    for row in info['execution_packages']:
+        if Path(row['path']).name=='scene-v8-native':
+            row['engine_profiles']=profiles;row['engine_config']={k:v['pose']for k,v in profiles.items()}
+    write(project.root/'project.yaml',info)
+    inputs.update(project=str(project.root),scene=str(project.root/'exports/scene-v8-native/scene.json'),engine_config=str(project.root/'configuration'/('isaac-pose.json'if engine=='isaaclab'else'mujoco-pose.json')))
     data={'schema_version':1,'stage':'paired_session','engine':engine,'inputs':inputs,'execution':{'device_source':'memory'},'output':{'directory':str(tmp_path/'observation')}}
     path=tmp_path/'observation.yaml';path.write_text(yaml.safe_dump(data));return path,project,data
 
@@ -55,14 +65,14 @@ def test_interactive_renderer_advances_physics_and_does_not_teleport_joints(tmp_
     from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
     from robot_learning_workbench.robot.session_devices import construct
     path,project,_=observation_recipe(tmp_path);plan=prepare_recipe(read_recipe(path));devices,_,_=construct(plan)
-    view=SceneView(plan.scene.root/'scene.json',plan.engine,plan.resolved_inputs['engine_config']['path'],devices['follower'].precision_mapper.metadata())
+    view=SceneView(plan.scene.root/'scene.json',plan.engine,Path(plan.resolved_inputs['engine_config']['path']).with_name('mujoco.json'),devices['follower'].precision_mapper.metadata())
     with create_renderer(view,tmp_path/'physics') as renderer:
         q=np.array(renderer.binding.initial_joint_rad)
         qi,_=renderer.binding.object_indices['cube_red']
         renderer.data.qpos[qi+2]+=.03
         raised=float(renderer.data.qpos[qi+2]);initial_time=float(renderer.data.time)
         first=renderer.render(q)
-        assert first['physics_steps']>0,'Real/Sim still mirrors q without advancing collision physics'
+        assert first['physics_steps']>0,'Native Physics did not advance collision physics'
         for _ in range(11):last=renderer.render(q)
         assert float(renderer.data.time)>initial_time+.3
         assert float(renderer.data.qpos[qi+2])<raised-.02,'The block fell through neither time nor gravity: dynamics were skipped'
@@ -75,7 +85,7 @@ def test_interactive_renderer_advances_physics_and_does_not_teleport_joints(tmp_
         assert np.isfinite(response['sim_joint_delta_rad']).all()
 
 
-def test_real_sim_worker_keeps_physics_running_between_previews(tmp_path):
+def test_real_sim_worker_keeps_native_pose_without_physics_between_previews(tmp_path):
     import time
     from robot_learning_workbench.robot.render_transport import RenderProcess
     from robot_learning_workbench.robot.session_devices import construct
@@ -96,8 +106,9 @@ def test_real_sim_worker_keeps_physics_running_between_previews(tmp_path):
         result=None;deadline=time.monotonic()+20
         while result is None:
             result=renderer.poll();time.sleep(.01);assert time.monotonic()<deadline
-        assert result['total_physics_steps']>=first['total_physics_steps']+3*first['physics_steps']
-        assert result['simulation_time_s']>first['simulation_time_s']+.05
+        assert result['total_physics_steps']==first['total_physics_steps']==0
+        assert result['simulation_time_s']==first['simulation_time_s']==0
+        assert result['state_application']=='native_measured_joint_state'
     finally:renderer.close()
 
 
@@ -145,11 +156,12 @@ def test_follower_motion_updates_native_scene_and_pair_uses_four_images_without_
         saved=s.snapshots[0];assert set(saved['images'])=={'side','wrist','sim_side','sim_wrist'}
         manifest,rows,_=load_session(saved['path']);assert manifest['command_source']=='measured_observation_no_training_action'
         shot=Path(saved['path']);pair=json.loads((shot/'pair.json').read_text());state=json.loads((shot/'state.json').read_text())
-        assert state['q_command']is None and pair['physics_steps']>0
+        assert state['q_command']is None and pair['physics_steps']==0
+        assert pair['state_application']=='native_measured_joint_state'
         np.testing.assert_array_equal(pair['measured_q_rad'],saved['q_measured'])
         np.testing.assert_allclose(pair['sim_target_joint_rad'],saved['q_measured'],rtol=0,atol=1e-6)
         np.testing.assert_allclose(np.array(pair['applied_sim_joint_rad'])-pair['measured_q_rad'],pair['sim_joint_delta_rad'])
-        assert pair['sim_object_poses_world'] and pair['simulation_time_s']>0
+        assert pair['sim_object_poses_world'] and pair['simulation_time_s']==0
         assert 'scene_identity'in pair and 'candidate_identity'not in pair
         assert s.teleoperation is None
         s.dispatch([{'kind':'session_snapshot','command_id':'late','payload':{}},{'kind':'cancel','command_id':'stop','payload':{}}])

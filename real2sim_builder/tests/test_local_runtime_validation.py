@@ -10,7 +10,7 @@ from real2sim_builder.files import write
 
 def test_workspace_runtimes_only_fill_missing_installation_keys(tmp_path, monkeypatch):
     from real2sim_builder import stage_runtime, automation
-    workspace=tmp_path/'workspace';project=SimpleNamespace(root=workspace/'scenes/example')
+    workspace=tmp_path/'workspace';project=SimpleNamespace(root=workspace/'scenes/example',info={})
     settings=workspace/'runtime/reconstruction.yaml'
     write(settings,{'runtimes':{'sam3':{'python':'/installed/sam31','model':'/installed/sam.pt'},'pose':{'python':'/installed/cpd'}}})
     config={'runtimes':{'sam3':{'python':'/custom/sam'}},'scene_state_id':'preserve','objects':{'cup':{'measured':.1}}}

@@ -53,7 +53,7 @@ def _observed(tmp_path):
         low_confidence=np.zeros(mask.shape,np.uint8),depth=np.ones(mask.shape),K=np.eye(3))
     obj={'id':'block','prompt':'red block','role':'manipulable_object','source_frame_id':frame['id'],
         'observed_rgb':str(rgb_path),'mask':str(mask_path),'observed':str(observed),'provenance':'observed RGB and model-estimated depth'}
-    return candidate,{1:prepared,5:{'objects':[obj],'selected_frame_id':frame['id']}},obj
+    return candidate,{1:prepared,3:{},5:{'objects':[obj],'selected_frame_id':frame['id']}},obj
 
 
 def _handoff(candidate,config,previous,folder):

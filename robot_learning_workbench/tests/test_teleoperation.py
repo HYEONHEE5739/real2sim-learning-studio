@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from test_robot_lifecycle import make
+from test_precision_calibration import device_profile_fixture
 from robot_learning_workbench.robot import teleoperation
 from robot_learning_workbench.robot.devices import DeviceError
 
@@ -31,7 +32,7 @@ def test_native_fake_teleoperation_roundtrip_never_constructs_serial_port(tmp_pa
     from lerobot.motors.feetech.feetech import FeetechMotorsBus
     monkeypatch.setattr(FeetechMotorsBus,'__init__',lambda *a,**kw:pytest.fail('Fake must not construct a serial bus'))
     root=Path(__file__).resolve().parents[2];e=root/'docs/evidence/hardware-read-gripper'
-    p=tmp_path/'teleop.yaml';p.write_text(yaml.safe_dump(dict(schema_version=1,stage='teleoperation',inputs={'device_profile':str(e/'follower-device.json'),'calibration_profile':INV['roles']['follower']['profile_path'],'leader_device_profile':str(e/'leader-device.json'),'leader_calibration_profile':INV['roles']['leader']['profile_path']},execution={'mode':'fake_all','max_frames':3},output={'directory':str(tmp_path/'native')})))
+    p=tmp_path/'teleop.yaml';p.write_text(yaml.safe_dump(dict(schema_version=1,stage='teleoperation',inputs={'device_profile':device_profile_fixture(tmp_path,'follower'),'calibration_profile':INV['roles']['follower']['profile_path'],'leader_device_profile':device_profile_fixture(tmp_path,'leader'),'leader_calibration_profile':INV['roles']['leader']['profile_path']},execution={'mode':'fake_all','max_frames':3},output={'directory':str(tmp_path/'native')})))
     result=teleoperation.run(prepare_recipe(read_recipe(p)),events=lambda _:None,commands=lambda:())
     assert result.status=='completed'
     catalog=load_catalog(tmp_path/'native');assert len(catalog.episodes)==1 and catalog.execution['engine']=='fake'
@@ -45,7 +46,7 @@ def test_cancelled_fake_recording_never_publishes_partial_episode(tmp_path,monke
     from robot_learning_workbench.recipe import prepare_recipe,read_recipe
     from robot_learning_workbench.data.native import load_catalog,history
     root=Path(__file__).resolve().parents[2];e=root/'docs/evidence/hardware-read-gripper'
-    p=tmp_path/'cancel.yaml';p.write_text(yaml.safe_dump(dict(schema_version=1,stage='teleoperation',inputs={'device_profile':str(e/'follower-device.json'),'calibration_profile':INV['roles']['follower']['profile_path'],'leader_device_profile':str(e/'leader-device.json'),'leader_calibration_profile':INV['roles']['leader']['profile_path']},execution={'mode':'fake_all','max_frames':3},output={'directory':str(tmp_path/'native')})))
+    p=tmp_path/'cancel.yaml';p.write_text(yaml.safe_dump(dict(schema_version=1,stage='teleoperation',inputs={'device_profile':device_profile_fixture(tmp_path,'follower'),'calibration_profile':INV['roles']['follower']['profile_path'],'leader_device_profile':device_profile_fixture(tmp_path,'leader'),'leader_calibration_profile':INV['roles']['leader']['profile_path']},execution={'mode':'fake_all','max_frames':3},output={'directory':str(tmp_path/'native')})))
     calls=[]
     def commands():
         calls.append(1)

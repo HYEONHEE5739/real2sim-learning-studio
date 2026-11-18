@@ -73,7 +73,7 @@ def test_two_actual_capture_transactions_keep_authorized_control_and_join_writer
     class FrozenRender:
         def __init__(self,*_):
             self.last_live={'applied_sim_joint_rad':[0.]*6,'sim_target_joint_rad':[0.]*6,'sim_joint_delta_rad':[0.]*6,
-                'physics_steps':0,'simulation_time_s':0.,'state_application':'authored_measured_fk',
+                'physics_steps':0,'simulation_time_s':0.,'state_application':'native_measured_joint_state',
                 'render_ms':0.,'sim_timestamp':{'monotonic_ns':time.monotonic_ns()}}
             self.capture_id=None;self.closed=False
         def observe(self,q):pass

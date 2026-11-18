@@ -14,7 +14,7 @@ def test_robot_compiler_keeps_calibrated_model_and_installs_finger_parts():
     from scipy.spatial.transform import Rotation
     import mujoco
     from xml.etree import ElementTree as ET
-    old=Path('/home/hyeonhee/soarm_isaaclab/soarm101_lab')
+    old=ROOT/'docs/evidence/b01/runspace/soarm101_lab'
     urdf=old/'outputs/real2sim/environments/scene2_builder/v8/assets/SO101/urdf/so101_sim.urdf'
     convex=json.loads((old/'assets/SO101/mujoco/finger_convex_parts.json').read_text())
     pads=json.loads((old/'assets/SO101/mujoco/usd_contact_pads.json').read_text())

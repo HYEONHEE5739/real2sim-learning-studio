@@ -20,14 +20,13 @@ class FullModels(PoseModels):
 
 def full_config():
     return {'scene_state_id':'layout','execute_modeling':True,
-        'simulator':{'mode':'authored'},  # Explicit review-only coverage; no robot/sensors in this fixture.
         'support':{'frame_selection':{'mode':'heuristic','min_component_px':4}},
         'image_preparation':{'size':32},
         'physics':{'properties':{'block':{'mass_kg':{'value':.03,'provenance':'estimated','evidence':['synthetic fixture']},
                                           'friction':{'value':.5,'provenance':'estimated','evidence':['synthetic fixture']}}}}}
 
 
-def test_real_all14_orchestrator_package_and_mock_provenance(tmp_path,monkeypatch):
+def test_orchestrator_preserves_review_but_blocks_stage14_without_native_inputs(tmp_path,monkeypatch):
     from real2sim_builder.automation import _run_stage_pipeline
     from real2sim_builder.export import verify_package
     from real2sim_builder.cameras import camera_roles
@@ -35,16 +34,17 @@ def test_real_all14_orchestrator_package_and_mock_provenance(tmp_path,monkeypatc
     monkeypatch.setattr('real2sim_builder.authoring.run_codex_modeling',fake_codex_mesh)
     before=sha(p.root/'input/evidence.yaml')
     r=_run_stage_pipeline(p,candidate='test',config=full_config(),worker=worker)
-    assert r['status']=='DRAFT_READY'and len(r['stages'])==14
+    assert r['status']=='NEEDS_MORE_DATA'and r['failed_stage']==14
     data={int(k):read(v['artifact'])['output_manifest']['data']for k,v in r['stages'].items()}
     c=Candidate(p,'test');assert all(v=='reference'for v in camera_roles(c.scene,p.evidence['images']).values())
     assert len(c.scene['cameras'])==4 and c.info['status']=='OPEN'
     verify_package(data[13]['package'])
     assert data[12]['actual_physics_steps']==0 and data[12]['execution']=='mock'
-    assert data[14]['sensor_status']=='NOT_VERIFIED'
+    assert data[13]['native_readiness']['mujoco']['pose']=='BLOCKED'
+    assert 'simulator'not in worker.calls
     assert sha(p.root/'input/evidence.yaml')==before
     again=_run_stage_pipeline(p,candidate='test',config=full_config(),worker=worker)
-    assert all(v['reused']for v in again['stages'].values())
+    assert all(v['reused']for k,v in again['stages'].items()if int(k)<14)
     assert worker.calls.count('physics')==1
 
 
@@ -52,7 +52,7 @@ def test_native_initial_q_change_rebuilds_stage13_without_repeating_completed_mo
     from real2sim_builder.automation import _run_stage_pipeline
     project=synthetic_project(tmp_path);worker=FullModels()
     monkeypatch.setattr('real2sim_builder.authoring.run_codex_modeling',fake_codex_mesh)
-    config=full_config();config['simulator']={'mode':'native','native_options':{'initial_joint_rad':[0.]*6}}
+    config=full_config();config['simulator']={'native_options':{'initial_joint_rad':[0.]*6}}
     first=_run_stage_pipeline(project,candidate='native_cache',config=config,worker=worker,through_stage=13)
     assert first['status']=='STAGES_COMPLETE'
     calls=list(worker.calls)
@@ -100,7 +100,8 @@ def test_every_stage_failure_stop_and_resume_retains_predecessors(tmp_path,monke
     StageArtifact(**failure_artifact).validate(__import__('pathlib').Path(r['failure_artifact']).parent)
     predecessors={k:sha(v['artifact'])for k,v in r['stages'].items()}
     final=_run_stage_pipeline(p,candidate='test',config=full_config(),worker=worker)
-    assert final['status']=='DRAFT_READY'
+    assert final['status']=='NEEDS_MORE_DATA'and final['failed_stage']==14
+    assert any('Native' in n for n in final['needs'])
     assert all(sha(final['stages'][k]['artifact'])==v and final['stages'][k]['reused']for k,v in predecessors.items())
     assert worker.calls.count('physics')==1
 

@@ -353,6 +353,177 @@ def import_robot(project, urdf, joints=None, base=None, recorded_links=None):
     project.save_scene(scene)
 
 
+def create_robot_rig(source_urdf, assembly_manifest_path, destination, *, mount_link,
+                     T_link_mount, T_mount_optical, evidence):
+    """Freeze a native URDF variant with one fixed accessory; preserve kinematics.
+
+    Object Library remains the assembly owner. This portable variant snapshots
+    that version and the original robot closure without changing their bytes.
+    Neither an inferred mount nor its optical frame is a Calibration result.
+    """
+    import copy,os,shutil,xml.etree.ElementTree as ET
+    from scipy.spatial.transform import Rotation
+    from .scene import transform,local_path
+    from .export import copy_native_asset,verify_native_closure
+    from .calibration.geometry import link_transforms
+    source=Path(source_urdf).resolve();manifest=Path(assembly_manifest_path).resolve();target=Path(destination).resolve()
+    if source.suffix.lower()!='.urdf':raise ValueError('Rig source must be an explicit expanded URDF')
+    if not isinstance(evidence,list)or not evidence or any(not isinstance(v,str)or not v.strip()for v in evidence):
+        raise ValueError('Estimated mounting evidence required')
+    mount=transform(T_link_mount);optical=transform(T_mount_optical)
+    root=ET.parse(source).getroot();links={l.get('name')for l in root.findall('link')}
+    if root.tag!='robot'or mount_link not in links:raise ValueError('Unknown existing Robot mounting link')
+    if links&{'wrist_camera_mount_link','camera_optical_frame'}:raise ValueError('Robot already has this Camera Rig')
+    joints=[j.get('name')for j in root.findall('joint')if j.get('type')!='fixed']
+    link_transforms(source,dict.fromkeys(joints,0.))
+    asset=read(manifest)
+    if asset.get('schema')!='real2sim.object-asset/1'or not asset.get('visual')or not asset.get('collision'):
+        raise ValueError('Rig requires a registered Visual/Collision Object Asset')
+    for file,expected in asset['files'].items():
+        if sha(local_path(manifest.parent,file))!=expected:raise ValueError('Assembly Asset SHA changed')
+    target.mkdir(parents=True,exist_ok=False)
+    copied=copy_native_asset(source,target/'source')
+    if sha(copied)!=sha(source):raise ValueError('Source Robot snapshot must preserve exact URDF bytes')
+    assembly=target/'assembly';shutil.copytree(manifest.parent,assembly)
+    variant=copy.deepcopy(root);variant.set('name',root.get('name','robot')+'_wrist_camera')
+    # MuJoCo defaults for URDF strip mesh directories, discard visual meshes
+    # and fuse fixed links. Preserve this portable closure and optical frame
+    # explicitly in the derived variant, without editing the source URDF.
+    mujoco=variant.find('mujoco')
+    if mujoco is None:mujoco=ET.SubElement(variant,'mujoco')
+    compiler=mujoco.find('compiler')
+    if compiler is None:compiler=ET.SubElement(mujoco,'compiler')
+    compiler.set('strippath','false');compiler.set('discardvisual','false');compiler.set('fusestatic','false')
+    # The copied original keeps its mesh layout, while the new URDF can refer to
+    # that snapshot with portable relative paths. No original Joint is edited.
+    for node in variant.findall('.//mesh'):
+        name=node.get('filename')
+        if not name or name.startswith(('package://','/')):raise ValueError('Resolve Robot mesh paths before creating a Rig')
+        node.set('filename',os.path.relpath((copied.parent/name).resolve(),target))
+    link=ET.SubElement(variant,'link',name='wrist_camera_mount_link')
+    def origin_node(parent,T):
+        matrix=transform(T);rpy=Rotation.from_matrix(matrix[:3,:3]).as_euler('xyz')
+        ET.SubElement(parent,'origin',xyz=' '.join(format(v,'.17g')for v in matrix[:3,3]),rpy=' '.join(format(v,'.17g')for v in rpy))
+    for kind in('visual','collision'):
+        for index,part in enumerate(asset[kind]):
+            if part.get('type')!='mesh':raise ValueError('Rig assembly must use registered native Mesh parts')
+            row=ET.SubElement(link,kind,name='camera_'+kind+'_'+str(index));origin_node(row,part['pose'])
+            mesh=ET.SubElement(ET.SubElement(row,'geometry'),'mesh',filename='assembly/'+part['file'])
+            if part.get('scale'):mesh.set('scale',' '.join(map(str,part['scale'])))
+            if kind=='visual':
+                material=ET.SubElement(row,'material',name='camera_material_'+str(index))
+                ET.SubElement(material,'color',rgba=' '.join(map(str,part.get('color',[.03,.03,.03])+[1.])))
+                if part.get('texture'):
+                    # Existing native closure follows OBJ->MTL->texture refs.
+                    # Keep the registered assembly bytes intact; derive only
+                    # the URDF-facing OBJ/MTL in a separate owned directory.
+                    native=target/'urdf_meshes';native.mkdir(exist_ok=True)
+                    obj=native/('visual_'+str(index)+'.obj');mtl=obj.with_suffix('.mtl')
+                    obj.write_text('mtllib '+mtl.name+'\nusemtl camera_surface\n'+(assembly/part['file']).read_text())
+                    texture=os.path.relpath(assembly/part['texture'],native)
+                    mtl.write_text('newmtl camera_surface\nKd 1 1 1\nmap_Kd '+texture+'\n')
+                    mesh.set('filename',obj.relative_to(target).as_posix())
+    ET.SubElement(variant,'link',name='camera_optical_frame')
+    for name,parent,child,T in [('wrist_camera_mount_joint',mount_link,'wrist_camera_mount_link',mount),
+        ('camera_optical_joint','wrist_camera_mount_link','camera_optical_frame',optical)]:
+        if name in {j.get('name')for j in root.findall('joint')}:raise ValueError('Accessory Joint identifier already exists')
+        joint=ET.SubElement(variant,'joint',name=name,type='fixed');ET.SubElement(joint,'parent',link=parent);ET.SubElement(joint,'child',link=child);origin_node(joint,T)
+    model=target/'so101_wrist_camera.urdf';ET.indent(variant);ET.ElementTree(variant).write(model,encoding='utf-8',xml_declaration=True)
+    verify_native_closure(target,model)
+    # A retained source tree lets every load verify exactly which fixed-only
+    # extension was created, including original Joint attributes and limits.
+    record={'schema':'real2sim.robot-rig/1','name':'SO-ARM101 + Wrist Camera','model':{'path':model.name,'sha256':sha(model)},
+        'source_robot':copied.relative_to(target).as_posix(),'source_robot_sha256':sha(source),
+        'assembly':{'asset_id':asset['asset_id'],'version':asset['version'],'manifest':'assembly/manifest.json',
+            'content_sha256':asset['content_sha256']},'joint_names':joints,'mount_link':mount_link,
+        'mount_frame':'wrist_camera_mount_link','optical_frame':'camera_optical_frame',
+        'T_link_mount':mount.tolist(),'T_mount_optical':optical.tolist(),'mount_status':'estimated',
+        'calibration_status':'uncalibrated','intrinsics':None,'distortion':None,'physical_verified':False,
+        'evidence':evidence,'units':'m/rad','optical_axes':'X right / Y down / Z forward',
+        'files':{p.relative_to(target).as_posix():sha(p)for p in target.rglob('*')if p.is_file()}}
+    write(target/'rig.yaml',record)
+    return load_robot_rig(target/'rig.yaml')
+
+
+def load_robot_rig(path):
+    """Read-only verification of the immutable native Robot/Assembly closure."""
+    import xml.etree.ElementTree as ET
+    from .scene import local_path,transform
+    from .export import verify_native_closure
+    from .calibration.geometry import link_transforms
+    path=Path(path).resolve();root=path.parent;record=read(path)
+    if record.get('schema')!='real2sim.robot-rig/1'or record.get('mount_status')!='estimated'or record.get('calibration_status')!='uncalibrated':
+        raise ValueError('Unsupported Robot Rig state; calibrated mounts require the existing Calibration workflow')
+    if record.get('intrinsics')is not None or record.get('distortion')is not None or record.get('physical_verified')is not False:
+        raise ValueError('Uncalibrated Rig cannot manufacture sensor Calibration')
+    if not record.get('files'):raise ValueError('Robot Rig must have a frozen file manifest')
+    for name,expected in record['files'].items():
+        if sha(local_path(root,name))!=expected:raise ValueError('Robot Rig file SHA/integrity changed: '+name)
+    model=local_path(root,record['model']['path']);source=local_path(root,record['source_robot'])
+    if sha(model)!=record['model']['sha256']or sha(source)!=record['source_robot_sha256']:raise ValueError('Robot identity changed')
+    verify_native_closure(root,model)
+    old=ET.parse(source).getroot();new=ET.parse(model).getroot()
+    def structural(node):return(node.tag,dict(node.attrib),(node.text or'').strip(),[structural(c)for c in node])
+    original={j.get('name'):j for j in old.findall('joint')};updated={j.get('name'):j for j in new.findall('joint')}
+    if len(updated)!=len(new.findall('joint'))or set(updated)-original.keys()!={'wrist_camera_mount_joint','camera_optical_joint'}:
+        raise ValueError('Rig must add only the two declared fixed Camera Joints')
+    if any(n not in updated or structural(j)!=structural(updated[n])for n,j in original.items()):raise ValueError('Rig changed original Robot Joint kinematics')
+    if any(updated[n].get('type')!='fixed'for n in set(updated)-original.keys()):raise ValueError('Camera accessory cannot introduce an actuated Joint')
+    names=[j.get('name')for j in new.findall('joint')if j.get('type')!='fixed']
+    if names!=record['joint_names']:raise ValueError('Rig Robot Joint mapping/order changed')
+    poses=link_transforms(model,dict.fromkeys(names,0.));base=link_transforms(source,dict.fromkeys(names,0.))
+    if any(not np.allclose(poses[n],T,atol=1e-12,rtol=0)for n,T in base.items()):raise ValueError('Rig changed original Robot FK')
+    mount=transform(record['T_link_mount']);optical=transform(record['T_mount_optical'])
+    if not np.allclose(poses[record['mount_frame']],poses[record['mount_link']]@mount,atol=1e-10,rtol=0):raise ValueError('Rig mount Transform mismatch')
+    if not np.allclose(poses[record['optical_frame']],poses[record['mount_frame']]@optical,atol=1e-10,rtol=0):raise ValueError('Rig Optical Transform mismatch')
+    return {**record,'path':str(path)}
+
+
+def import_robot_rig(candidate,path,*,joints=None):
+    """Import an explicitly selected Rig into one Candidate, never Current Scene.
+
+    A variant has a distinct model SHA. Existing measured-q/Calibration records
+    are not relabelled to that new identity or implicitly re-approved.
+    """
+    from .export import copy_native_asset
+    from .calibration.geometry import reference_geometry
+    import copy
+    rig=load_robot_rig(path);scene=candidate.scene;existing=scene.get('robot_model')
+    if existing:
+        if existing.get('model_sha256')!=rig['model']['sha256']:raise ValueError('Cannot replace a different existing Candidate Robot; explicitly use a new Candidate')
+        if scene.get('robot_rig',{}).get('rig_sha256')!=sha(rig['path']):raise ValueError('Existing Robot Rig identity differs')
+        return {'status':'REUSED','physical_verified':False,'rig':scene['robot_rig']}
+    candidate.project.checkpoint();candidate.require_open()
+    source=Path(rig['path']).parent/rig['model']['path'];model=copy_native_asset(source,candidate.project.root/'input/robot')
+    states=dict.fromkeys(rig['joint_names'],0.)if joints is None else joints
+    scene['frames']['robot_base']={'parent':'world','transform':value(np.eye(4).tolist(),'estimated',['Unregistered Robot Base gauge; not calibrated World pose'])}
+    imported={}
+    def import_native_mesh(path):
+        # A Rig's OBJ may reference MTL/PNG files. Snapshot its native closure
+        # through the existing exporter instead of copying one bare mesh file.
+        snapshot=copy_native_asset(path,candidate.project.root/'input/assets',copied=imported)
+        digest=sha(snapshot);key='asset_'+digest[:16]
+        scene['assets'][key]={'path':snapshot.relative_to(candidate.project.root).as_posix(),
+            'sha256':digest,'source':str(Path(path).resolve())}
+        return key
+    objects,poses=reference_geometry(model,states,import_native_mesh)
+    assembly=Path(rig['path']).parent/rig['assembly']['manifest']
+    parts=read(assembly)['visual'];camera_objects=[o for o in objects if o['link']==rig['mount_frame']]
+    if len(camera_objects)!=len(parts):raise ValueError('Robot Rig Visual/Assembly part count differs')
+    for obj,part in zip(camera_objects,parts):
+        if part.get('texture'):obj['visual']['texture']=import_native_mesh(assembly.parent/part['texture'])
+    scene['objects'].extend(objects)
+    for name,T in poses.items():scene['frames']['robot_link_'+name]={'parent':'robot_base','transform':value(T.tolist(),'derived',['URDF FK at explicit input q; no new measurement'])}
+    scene['robot_model']={'format':'urdf','path':model.relative_to(candidate.project.root).as_posix(),
+        'model_sha256':sha(model),'source_robot_sha256':rig['source_robot_sha256'],'joint_names':rig['joint_names'],
+        'mapping_verified':False,'joint_coordinate_status':'URDF_RAD; existing Capture identity not rebound'}
+    scene['robot_rig']={k:copy.deepcopy(rig[k])for k in('schema','name','assembly','mount_link','mount_frame','optical_frame',
+        'T_link_mount','T_mount_optical','mount_status','calibration_status','intrinsics','distortion','source_robot_sha256','evidence')}
+    scene['robot_rig'].update(rig_sha256=sha(rig['path']),model_sha256=sha(model),physical_verified=False)
+    candidate.save(scene)
+    return {'status':'IMPORTED','physical_verified':False,'rig':scene['robot_rig']}
+
+
 def import_reference(project, workspace, capture):
     project.require_writable()
     'Optional generic profile/URDF migration; intentionally reads no task/policy files.'

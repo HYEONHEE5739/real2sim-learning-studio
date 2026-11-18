@@ -115,11 +115,11 @@ for combo in (d.model,d.effort):
  view=combo.view();palette=view.palette()
  base=palette.color(QPalette.ColorRole.Base)
  text=palette.color(QPalette.ColorRole.Text)
- assert base.lightness()>200 and text.lightness()<80,(base.name(),text.name())
+ assert base.lightness()<70 and text.lightness()>170,(base.name(),text.name())
  # Check the actual unselected row background, not only the declared stylesheet.
  image=view.viewport().grab().toImage()
  rect=view.visualRect(combo.model().index(1,0))
- assert image.pixelColor(min(rect.right(),image.width()-1)-12,min(rect.center().y(),image.height()-1)).lightness()>200
+ assert image.pixelColor(min(rect.right(),image.width()-1)-12,min(rect.center().y(),image.height()-1)).lightness()<70
  combo.hidePopup()
 d.close()
 ''')

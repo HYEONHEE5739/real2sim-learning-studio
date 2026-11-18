@@ -30,6 +30,15 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         selected.require_open()
         from .scene import validate
         validate(selected.scene,project.root)
+        if config.get('robot_rig'):
+            from .evidence import import_robot_rig
+            choice=config['robot_rig'];rig_path=Path(choice['path']if isinstance(choice,dict)else choice)
+            if not rig_path.is_absolute():rig_path=(project.root/rig_path).resolve()
+            if isinstance(choice,dict)and sha(rig_path)!=choice.get('sha256'):raise ValueError('Selected Robot Rig SHA changed; review selection')
+            saved=selected.root/'reconstruction/simfoundry/cache.json'
+            if saved.is_file()and not selected.scene.get('robot_rig'):
+                raise ValueError('Robot Rig selection requires a new Candidate; existing Reconstruction artifacts are preserved')
+            import_robot_rig(selected,rig_path)
         if not(selected.root/'reconstruction-config.yaml').exists():write(selected.root/'reconstruction-config.yaml',config)
         root=selected.root/'reconstruction/simfoundry';root.mkdir(parents=True,exist_ok=True)
         initial=root/'initial_scene.yaml'
@@ -58,10 +67,10 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 'not_tested':['real model accuracy','real physics stability','hardware/Task success']}
         if previous_report.get('pipeline')=='simfoundry/1'and previous_report.get('status')=='STOPPED':project.control('resume')
         data={};active=1;folder=None;identity={'kind':'mock'if worker is not None else'real'};subset={}
-        keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far'),4:('metric_anchors','world_registration'),
+        keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far','objects'),4:('metric_anchors','world_registration'),
               5:('objects','decomposition','scene_memo'),6:('image_preparation','pose'),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
               8:('pose',),9:('articulation',),10:('world_registration','support_asset','sensor_registration','metric_anchors','capture_layouts'),11:('physics',),12:('physics',),13:('export','simulator'),14:('simulator',)}
-        operations={1:('video',),2:('da3',),3:('support','vlm'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
+        operations={1:('video',),2:('da3',),3:('support','vlm','segments'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
                     6:('image_edit_objects','background_remove','vlm'),7:('blender',),8:('cpd','canonicalize','foundationpose'),9:('articulation',),10:(),11:('vlm',),12:('physics',),13:(),14:('simulator',)}
         handlers={1:processing.prepare,2:processing.depth,3:processing.support,4:processing.world,
                   5:processing.decompose,6:processing.prepare_objects,7:processing.meshes,8:processing.poses,9:processing.articulate,10:processing.compile_scene,
@@ -119,8 +128,10 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
             for stage in range(1,through_stage+1):
                 active=stage;folder=None
                 subset={k:config[k]for k in keys[stage]if k in config}
-                if stage in(5,7):subset['scene_memo_sha256']=memo['sha256']
-                if stage in(5,7):
+                if stage in(3,5,7):subset['scene_memo_sha256']=memo['sha256']
+                if stage in(3,5,7,10,14)and selected.scene.get('robot_rig'):
+                    subset['robot_rig_identity']=copy.deepcopy(selected.scene['robot_rig'])
+                if stage in(3,5,7):
                     from .authoring import _codex_guidance
                     subset['guidance_sha256']=_codex_guidance()[1]['sha256']
                     subset['model_references']=[r for r in project.evidence['images']if r.get('role')=='model_reference']
@@ -145,7 +156,7 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 identity=copy.deepcopy(getattr(worker,'runtime_identity',None))if worker is not None else{'kind':'real','operations':{op:stage_runtime.identity(config,op)for op in operations[stage]}}
                 if not identity:raise ValueError('Synthetic worker must declare explicit mock runtime identity')
                 identity['stage_implementation_sha256']={str(p.relative_to(Path(__file__).parent)):sha(p)for p in Path(__file__).parent.rglob('*.py')}
-                if stage in(13,14)and config.get('simulator',{}).get('mode','native')=='native':
+                if stage in(13,14):
                     import importlib.util
                     native_spec=importlib.util.find_spec('robot_learning_workbench')
                     native_root=Path(native_spec.origin).parent if native_spec and native_spec.origin else None
@@ -153,13 +164,21 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 subset['schema']='simfoundry-stage/1'
                 signature=cache_key(stage,upstream,subset,identity)
                 cached=index.get(str(stage),{})
-                if cached.get('key')==signature and cached.get('artifact'):
+                reusable=cached.get('key')==signature;compatibility=None
+                if cached.get('artifact')and (reusable or stage in(1,2)):
                     path=Path(cached['artifact'])
                     if not path.resolve().is_relative_to(root.resolve()):raise ValueError('Stage artifact outside Candidate')
                     raw=read(path);artifact=StageArtifact(**{f.name:raw[f.name]for f in fields(StageArtifact)})
                     artifact.validate(path.parent)
                     if artifact.status!='COMPLETE':raise ValueError('Only complete stages may be reused')
-                    report['stages'][str(stage)]={'status':'COMPLETE','artifact':str(path),'reused':True}
+                    if not reusable:
+                        from .stage_artifacts import audited_stage12_compatibility
+                        compatibility=audited_stage12_compatibility(stage,artifact,inputs=upstream,config=subset,
+                            current_runtime=identity,saved_key=cached.get('key'))
+                        reusable=compatibility is not None
+                if reusable and cached.get('artifact'):
+                    report['stages'][str(stage)]={'status':'COMPLETE','artifact':str(path),'reused':True,
+                        **({'compatibility':compatibility}if compatibility else{})}
                 else:
                     project.checkpoint()
                     project.update(status='RUNNING',stage='STAGE_'+str(stage),candidate=candidate,task=STAGE_NAMES[stage-1])
@@ -174,6 +193,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                     output=handler(selected,config,data,folder,call)
                     project.checkpoint()
                     write(folder/'payload.json',output)
+                    if output.get('status')=='PARTIAL'and output.get('mode')=='observed_only':
+                        raise StageNeeds('NEEDS_REVIEW','Observed Object modeling inputs retained; full decomposition and Scene registration are incomplete',
+                            code='OBSERVED_INPUTS_READY',classification='OBJECT_REVIEW')
                     files=sorted(p for p in folder.rglob('*')if p.is_file())
                     artifact=StageArtifact.create(stage,'COMPLETE',upstream,manifest(files,output),
                         runtime_identity=identity,config=subset,coordinate_frame=output.get('coordinate_frame','not_applicable'),
@@ -314,6 +336,8 @@ def reconstruct(project,*,candidate,config=None,scene_state=None,run_modeling=Fa
             run_modeling=run_modeling,max_modeling_calls=max_modeling_calls,modeling_timeout_s=modeling_timeout_s,
             max_review_calls=max_review_calls,refit_only=True)
     configured=copy.deepcopy(config if config is not None else read(project.root/'input/reconstruction.yaml')if(project.root/'input/reconstruction.yaml').is_file()else{})
+    if 'robot_rig'not in configured and project.info.get('robot_rig'):
+        configured['robot_rig']=copy.deepcopy(project.info['robot_rig'])
     from .stage_runtime import workspace_configuration,runtime_environment
     configured=workspace_configuration(project,configured)
     if scene_state is not None:configured['scene_state_id']=scene_state

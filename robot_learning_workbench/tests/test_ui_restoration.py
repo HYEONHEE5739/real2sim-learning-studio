@@ -35,9 +35,9 @@ def test_theme_and_camera_widget_preserve_original_code(tmp_path):
 import ast
 from pathlib import Path
 from robot_learning_workbench.ui import theme,view
-old=Path('/home/hyeonhee/soarm_isaaclab/soarm101_lab/source/soarm101_lab/soarm101_lab/workflow')
+old=Path(view.__file__).resolve().parents[4]/'docs/evidence/b01/runspace/soarm101_lab/source/soarm101_lab/soarm101_lab/workflow'
 namespace={};exec(compile((old/'theme.py').read_text(),'original-theme','exec'),namespace)
-assert theme.STYLE==namespace['STYLE']
+assert theme.STYLE!=namespace['STYLE']  # User requested new chrome; camera RGB code stays original.
 def camera(path):
     tree=ast.parse(path.read_text());return ast.dump(next(n for n in tree.body if isinstance(n,ast.ClassDef)and n.name=='CameraView'),include_attributes=False)
 assert camera(old/'view.py')==camera(Path(view.__file__))
@@ -174,7 +174,7 @@ app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.
 c=w.sessions['capture'];r=w.sessions['real_sim'];p=w.sessions['precision']
 assert hasattr(c,'snapshot_table')and hasattr(c,'client')
 assert set(r.previews)=={'side','wrist','sim_side','sim_wrist'}
-assert not c.start_teleop_button.isEnabled()and not hasattr(r,'start_teleop_button')
+assert not c.connect_button.isEnabled()and not hasattr(c,'start_teleop_button')and not hasattr(r,'start_teleop_button')
 assert p.references.columnCount()==6 and not p.record.isEnabled()and not p.save_as_button.isEnabled()
 for page in (w.workflows['real_evaluation'],):
     assert not any(b.isEnabled() and any(word in b.text()for word in ('힘 풀기','Home','Start Teleop','Torque Enable'))for b in page.findChildren(QPushButton))

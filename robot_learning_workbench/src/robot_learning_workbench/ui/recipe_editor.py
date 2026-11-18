@@ -9,7 +9,7 @@ class RecipeEditor(QWidget):
     changed=pyqtSignal()
     def __init__(self,parent=None):
         super().__init__(parent);self.path=None;self.dirty=False;self.state='편집 중'
-        layout=QVBoxLayout(self);self.label=QLabel('저장 Recipe를 선택하세요');self.text=QPlainTextEdit();layout.addWidget(self.label);layout.addWidget(self.text)
+        layout=QVBoxLayout(self);self.label=QLabel('저장 Recipe를 선택하세요');self.text=QPlainTextEdit();self.text.setObjectName('codeEditor');layout.addWidget(self.label);layout.addWidget(self.text)
         self.text.textChanged.connect(self.edited)
     def edited(self):
         self.dirty=True;self.state='편집 중';self.label.setText('편집 중 — 저장한 뒤 검사하세요');self.changed.emit()

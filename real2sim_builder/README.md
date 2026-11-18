@@ -18,6 +18,8 @@ See [BU01–BU04 results](../docs/builder-bundle.md) for commands, fixed install
 
 Use `python -m real2sim_builder.cli --help`. Existing unmarked projects open read-only. `clone SOURCE NEW_DESTINATION` creates a separate editable project. `export PROJECT --destination NEW_PACKAGE` requires a fresh successful review; explicit `--allow-unvalidated` creates an unvalidated review package. `verify NEW_PACKAGE` verifies the Scene and native file closure.
 
+Every export, including direct `export_revision()`, builds Native execution profiles. Real/Sim selects Pose; Source/DataGen/physical evaluation select Physics. Supply a Scene-bound Follower Mapping and six initial model radians (`--initial-joint-rad Q1 Q2 Q3 Q4 Q5 Q6`) or a matching measured Capture. `--mapping FILE` can supply explicit Mapping metadata. An incomplete review retains concrete `native_readiness` blockers and has no executable settings. Authored preview execution, `execution_mode`, arbitrary `engine_config` registration and `simulator.mode` are removed. The manifest-covered `authored_scene.json` remains required Scene source data. See [Native-only execution](../docs/reviews/native-only-simulation.md).
+
 MuJoCo and the installed Isaac Sim USD bindings are required for native Export parsing. They are not imported when opening the package or inspecting a project. Use the existing process-local USD path configuration documented in the bundle report. The optional UI uses the existing Qt interpreter and a separately selected calculation worker. No package installation or environment upgrade was performed during implementation.
 
 Run the repository's recorded verification command:

@@ -16,7 +16,7 @@ def test_worker_capture_timing_survives_transport_and_pair(tmp_path, monkeypatch
     from robot_learning_workbench.robot.pairs import write_pair
 
     identity = {'manifest_sha256': 'a' * 64}
-    view = SimpleNamespace(identity=identity, render_type='authored')
+    view = SimpleNamespace(identity=identity, render_type='native',simulation_mode='pose')
     monkeypatch.setattr(scene_render, 'SceneView', lambda *args: view)
     atomic_json(tmp_path / 'config.json', dict(engine='mujoco', scene='unused',
         settings='unused', mapping={}, identity=identity))
@@ -88,30 +88,3 @@ def test_legacy_renderer_result_keeps_unknown_worker_timings_unknown(tmp_path):
     assert 'render_started' not in times and 'request_read' not in times
     assert times['parent_read_started'] <= times['parent_verified']
     assert result['files']['side']['sha256'] == file_sha256(path)
-
-
-def test_authored_timing_separates_observation_scene_update_and_each_camera(monkeypatch):
-    from real2sim_builder import capture
-    from robot_learning_workbench.robot import authored_render
-    from robot_learning_workbench.robot.calibration import JOINTS
-
-    cameras = [dict(id=n,resolution=[64,48],K=dict(value=np.eye(3).tolist()),
-        distortion=dict(value=[])) for n in ('side','wrist')]
-    scene = dict(cameras=cameras)
-    monkeypatch.setattr(capture,'observation_scene',lambda *args,**kwargs: scene)
-    monkeypatch.setattr(authored_render,'select_render_cameras',lambda value: value)
-    monkeypatch.setattr(authored_render,'world_pose',lambda *args: np.eye(4))
-    renderer = authored_render.AuthoredRenderer.__new__(authored_render.AuthoredRenderer)
-    renderer.view = SimpleNamespace(verify=lambda:None,authored_scene=scene,
-        package=SimpleNamespace(root=Path('/unused')),scene_identity={},source_scene={},engine='mujoco',mapping={})
-    renderer.bounds = {n:dict(limits=[-10,10]) for n in JOINTS}
-    renderer.sensor_ids = {n:n for n in ('side','wrist')}
-    renderer.static = SimpleNamespace(update_scene=lambda value:None,
-        rgb=lambda name:np.zeros((48,64,3),np.uint8))
-    result = renderer.render([0.] * 6)
-    times = result['render_phase_times_ns']
-    keys = ['verify_started','verified','observation_started','observation_completed',
-        'scene_updated','rgb_completed','camera_metadata_completed']
-    assert all(times[a] <= times[b] for a,b in zip(keys,keys[1:]))
-    assert times['observation_completed'] <= times['rgb']['side']['started'] <= times['rgb']['side']['completed'] <= times['rgb']['wrist']['started'] <= times['rgb']['wrist']['completed'] <= times['rgb_completed']
-    assert set(result['images']) == {'side','wrist'} and result['render_ms'] >= 0

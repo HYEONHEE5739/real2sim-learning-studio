@@ -12,12 +12,14 @@ def run(root):
     root=Path(root);config=json.loads((root/'config.json').read_text());launcher=None;seen={};generation=0
     try:
         if config['engine']=='isaac':
+            from ..engines.isaac.env_cfg import prepare_camera_schema
+            prepare_camera_schema();startup['camera_schema_registered']=time.monotonic_ns()
             from isaaclab.app import AppLauncher
             launcher=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',fast_shutdown=False)
         view=SceneView(config['scene'],config['engine'],config['settings'],config['mapping'])
         startup['scene_loaded']=time.monotonic_ns()
         if view.identity!=config['identity']:raise ValueError('Scene changed before render child startup')
-        comparison=view.render_type=='authored'or view.simulation_mode=='pose'
+        comparison=view.simulation_mode=='pose'
         if comparison:
             from .pose_render import create_pose_renderer
         factory=create_pose_renderer if comparison else create_renderer

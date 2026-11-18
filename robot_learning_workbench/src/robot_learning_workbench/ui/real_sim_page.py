@@ -18,7 +18,7 @@ class RealSimPage(QWidget):
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         self.session_layout=LiveSessionLayout(self);box=self.session_layout.content_layout;title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');self.session_layout.header.insertWidget(0,title)
-        hint=QLabel('Native Pose: 측정 q 시각 비교 · Native Physics: 관절 구동·중력·접촉 · Authored: Scene 검토. 중단하면 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
+        hint=QLabel('Native Pose: 같은 측정 q로 Real/Sim 비교 · Source/DataGen/물리 평가는 Native Physics를 사용합니다. 중단하면 모터 목표 전송을 멈춥니다.');hint.setWordWrap(True);box.addWidget(hint)
         selection=QHBoxLayout();box.addLayout(selection);selection.addWidget(QLabel('Scene'));self.scene_combo=QComboBox();selection.addWidget(self.scene_combo,1)
         selection.addWidget(QLabel('Simulation'));self.engine=QComboBox();self.engine.addItem('MuJoCo','mujoco');self.engine.addItem('Isaac Lab','isaaclab');selection.addWidget(self.engine)
         self.view_mode=QComboBox();self.view_mode.addItems(['Side 크게','Wrist 크게','4분할']);selection.addWidget(self.view_mode)
@@ -116,7 +116,8 @@ class RealSimPage(QWidget):
             self.engine.blockSignals(True)
             for i in range(self.engine.count()):self.engine.model().item(i).setEnabled(('isaac'if self.engine.itemData(i)=='isaaclab'else self.engine.itemData(i))in allowed)
             if ('isaac'if self.engine.currentData()=='isaaclab'else self.engine.currentData())not in allowed:
-                self.engine.setCurrentIndex(next((i for i in range(self.engine.count())if self.engine.model().item(i).isEnabled()),-1))
+                self.template=None;self.project=None;self.engine.blockSignals(False);self.buttons()
+                self.capture_hint.setText(row.get('reason')or'선택 엔진의 Native Pose를 사용할 수 없습니다. 준비된 엔진을 직접 선택하세요.');return
             self.engine.blockSignals(False)
             if self.engine.currentIndex()<0:
                 self.template=None;self.project=None;self.buttons();self.capture_hint.setText(row.get('reason')or'등록된 엔진 설정이 없습니다.');return
@@ -182,7 +183,7 @@ class RealSimPage(QWidget):
         if p.get('q_measured'):self.measured.setText('Follower 측정값 (rad) · '+', '.join(f'{q:.4f}'for q in p['q_measured']))
         if p.get('simulation'):
             simulation=p['simulation'];delta=max(abs(q)for q in simulation['sim_joint_delta_rad'])
-            mode={'authored_measured_fk':'Authored 검토 · 물리 실행 없음 · ','native_measured_joint_state':'Native Pose · 물리 실행 없음 · ',
+            mode={'native_measured_joint_state':'Native Pose · 물리 실행 없음 · ',
                 'native_physics_joint_target':'Native Physics · 실제 관절값 (rad) · '}.get(simulation.get('state_application'),'Sim 관절값 (rad) · ')
             self.simulated.setText(mode+', '.join(f'{q:.4f}'for q in simulation['applied_sim_joint_rad'])+f' · 최대 추종 차이 {delta:.4f}rad')
         for n,timing in p.get('camera_timing',{}).items():

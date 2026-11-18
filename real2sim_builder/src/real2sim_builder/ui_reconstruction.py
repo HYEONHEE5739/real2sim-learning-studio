@@ -77,19 +77,19 @@ class ReconstructionDialog(QDialog):
         identifier(name);self.candidate=QLabel(name)
         self.setWindowTitle('Auto Reconstruction');self.resize(800,830)
         self.setStyleSheet('''
-QDialog { background:#f7f9fa; color:#18212b; }
-QLabel,QGroupBox { color:#18212b; }
-QGroupBox { background:white; border:1px solid #dce2e7; border-radius:12px; margin-top:16px; padding:16px 12px 12px; font-weight:600; }
+QDialog { background:#0c1420; color:#e7eff8; }
+QLabel,QGroupBox { color:#e7eff8; background:transparent; }
+QGroupBox { background:#121f2e; border:1px solid #2d4259; border-radius:10px; margin-top:16px; padding:16px 12px 12px; font-weight:500; }
 QGroupBox::title { subcontrol-origin:margin; left:14px; padding:0 5px; }
-QComboBox,QPlainTextEdit { background:white; color:#18212b; border:1px solid #dce2e7; border-radius:6px; padding:6px; }
-QComboBox QAbstractItemView { background:white; color:#18212b; selection-background-color:#237b65; selection-color:white; border:1px solid #cdd6dd; outline:0; }
-QComboBox QAbstractItemView::item { background:white; color:#18212b; min-height:26px; }
-QComboBox QAbstractItemView::item:selected { background:#237b65; color:white; }
-QPushButton { background:white; color:#18212b; border:1px solid #cdd6dd; border-radius:12px; padding:9px 14px; }
-QPushButton:hover { background:#e7f5f0; }
-QPushButton:disabled { color:#87929b; background:#eff2f4; }
-QProgressBar { background:#edf0f2; border:0; border-radius:4px; }
-QProgressBar::chunk { background:#16a085; border-radius:4px; }
+QComboBox,QPlainTextEdit { background:#0d1825; color:#e7eff8; border:1px solid #31465d; border-radius:7px; padding:7px; }
+QComboBox QAbstractItemView { background:#142334; color:#e7eff8; selection-background-color:#164c4d; selection-color:#63f4de; border:1px solid #39556d; outline:0; }
+QComboBox QAbstractItemView::item { background:#142334; color:#e7eff8; min-height:28px; }
+QComboBox QAbstractItemView::item:selected { background:#164c4d; color:#63f4de; }
+QPushButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1d2c3d,stop:1 #14202e); color:#dce8f5; border:1px solid #344a62; border-radius:8px; padding:9px 14px; }
+QPushButton:hover { background:#243a4e; border-color:#00cbb6; }
+QPushButton:disabled { color:#7b91a7; background:#12202d; }
+QProgressBar { background:#102131; color:#c8dfef; border:1px solid #2b4257; border-radius:4px; }
+QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
 ''')
         layout=QVBoxLayout(self);layout.setSpacing(14)
         title=QLabel('Auto Reconstruction');title.setStyleSheet('font-size:22px;font-weight:600');layout.addWidget(title)

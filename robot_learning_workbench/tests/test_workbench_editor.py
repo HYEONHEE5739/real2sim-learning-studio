@@ -1,6 +1,6 @@
 import os,subprocess
 from pathlib import Path
-UI=Path('/home/hyeonhee/soarm_isaaclab/soarm101_lab/.venv-real2sim-ui/bin/python3.11')
+UI=Path(__file__).resolve().parents[2]/'workbench_runs/runtime/qt/bin/python3.11'
 
 
 def test_real_qt_recipe_edit_save_reload_and_inert_import(tmp_path):

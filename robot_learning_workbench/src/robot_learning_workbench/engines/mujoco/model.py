@@ -78,6 +78,8 @@ def robot_xml(urdf, base_pose, finger_convex, contact_pads):
             limit = joint.find('limit')
             ET.SubElement(body, 'joint', name=joint.get('name'), type='hinge', axis=joint.find('axis').get('xyz'), range=f"{limit.get('lower')} {limit.get('upper')}", damping='0', armature='.001')
         inertial = links[name].find('inertial')
+        if inertial is None or inertial.find('mass')is None or inertial.find('inertia')is None:
+            raise ValueError('URDF link '+name+': explicit inertial mass and inertia tensor required for Native MuJoCo')
         tensor = inertial.find('inertia').attrib
         inertia = np.array([[float(tensor['ixx']), float(tensor['ixy']), float(tensor['ixz'])], [float(tensor['ixy']), float(tensor['iyy']), float(tensor['iyz'])], [float(tensor['ixz']), float(tensor['iyz']), float(tensor['izz'])]])
         inertial_pose = origin(inertial.find('origin'))

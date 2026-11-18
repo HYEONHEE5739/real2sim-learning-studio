@@ -35,16 +35,21 @@ def test_optional_urdf_import_copies_mesh_closure_and_missing_mesh_is_explicit(t
     assert (saved.parent/ET.parse(saved).find('.//mesh').get('filename')).is_file()
 
 
-def test_registered_package_keeps_identity_bytes_and_closure_without_source(tmp_path):
+def test_old_package_registration_requires_native_profiles_and_preserves_original(tmp_path):
     from robot_learning_workbench.scene_migration import register_package
-    from scene_contract.package import load_scene
-    root=Path(__file__).resolve().parents[2];source=root/'docs/evidence/e01-v8-collision/runspace/relocated/scene-v8-native'
-    project=Project.create(tmp_path/'scenes','package');result=register_package(project,source,tmp_path)
-    package=load_scene(Path(result['path'])/'scene.json');old=load_scene(source/'scene.json')
-    assert package.identity==old.identity
-    assert (package.root/'scene.json').read_bytes()==(source/'scene.json').read_bytes()
-    assert package.root.is_relative_to(tmp_path)and not package.root.is_relative_to(source)
-    assert project.info['execution_packages'][0]['manifest_sha256']==old.identity.manifest_sha256
+    from real2sim_builder.export import export_revision
+    from test_export_registration import export_project
+    _,old=export_project(tmp_path/'old');source=old.root/'exports/review'
+    export_revision(old,destination=source,allow_unvalidated=True)
+    # Model an archived package explicitly, without changing any user package.
+    # The manifest declaration is what the import checks before copying.
+    manifest=read(source/'manifest.json');manifest['files']=[row for row in manifest['files']if row['path']!='execution_profiles.json'];write(source/'manifest.json',manifest)
+    before={str(p):sha(p)for p in source.rglob('*')if p.is_file()}
+    project=Project.create(tmp_path/'scenes','package')
+    with pytest.raises(ValueError,match='Native execution profiles'):
+        register_package(project,source,tmp_path)
+    assert before=={str(p):sha(p)for p in source.rglob('*')if p.is_file()}
+    assert not list((project.root/'exports').iterdir())
 
 
 def test_runtime_residual_is_removed_from_new_authoring_revisions(tmp_path):

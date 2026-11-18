@@ -24,7 +24,7 @@ def input_directory(workspace,stage,key):
 def protected_destination(path, *, backend_python=None, workspace=None):
     """Preserve original projects and installed runtimes for the current account."""
     target=Path(path).resolve()
-    roots=[Path.home()/name for name in ('soarm_isaaclab','miniconda3','IsaacLab')]
+    roots=[Path.home()/name for name in ('miniconda3','IsaacLab')]
     roots.extend((Path(sys.prefix),Path(sys.base_prefix)))
     for name in ('ISAACLAB_ROOT','CONDA_PREFIX'):
         if os.environ.get(name):roots.append(Path(os.environ[name]))
@@ -39,4 +39,8 @@ def protected_destination(path, *, backend_python=None, workspace=None):
             container=prefix.parent.parent if prefix.parent.name=='envs'else prefix
             roots.append(prefix if container==Path(container.anchor)else container)
     if workspace:roots.extend(Path(workspace)/name for name in ('scenes','devices','runtime','.assets'))
-    return any(target.is_relative_to(root.resolve()) for root in roots)
+    if any(target.is_relative_to(root.resolve()) for root in roots):return True
+    # Other checkouts are protected by their own Git boundary, without knowing
+    # any unrelated project's name or installation location.
+    project=Path(__file__).resolve().parents[4]
+    return any(parent!=project and (parent/'.git').exists() for parent in target.parents)

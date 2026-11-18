@@ -58,6 +58,7 @@ class CapturePage(QWidget):
         self.settings_button=QPushButton('장치 설정');self.settings_button.clicked.connect(self.edit_settings);project_row.addWidget(self.settings_button)
         self.device_state=QLabel('저장 구성 선택 · 자동 연결 없음');self.device_state.setWordWrap(True);left.insertWidget(0,self.device_state)
         self.materials=SceneInputs(workspace,self);right.addWidget(self.materials,1);self.materials.saveRequested.connect(self.store_materials)
+        self.materials.robotRigRequested.connect(self.select_robot_rig)
         self.materials.backend_python=python
         self.input_button=self.materials.add;self.notes=self.materials.notes;self.save_materials=self.materials.save
         right.addStretch(1);self.session_label=QLabel('세션 없음');self.session_label.setWordWrap(True);right.addWidget(self.session_label)
@@ -116,6 +117,9 @@ class CapturePage(QWidget):
         if not self.project:self.show_error('먼저 빈 Scene을 만들거나 선택하세요');return
         self.materials_saving=True
         self.job.start('session_materials',path=self.project['project'],files=files,notes=notes,workspace=str(self.workspace))
+    def select_robot_rig(self,path):
+        if self.active()or not self.project:return
+        self.job.start('session_robot_rig',path=self.project['project'],rig_path=path or None,workspace=str(self.workspace))
     def choose_project(self):
         if self.active():return
         path=QFileDialog.getExistingDirectory(self,'Builder Project 선택',str(self.workspace/'scenes'))

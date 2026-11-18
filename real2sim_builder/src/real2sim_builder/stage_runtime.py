@@ -19,6 +19,8 @@ RUNTIME_KEYS = {'blender':'blender', 'video': 'preparation', 'da3': 'da3', 'supp
 
 def validate_configuration(configuration):
     """Reject credentials before any Candidate/request/identity is persisted."""
+    if 'mode'in configuration.get('simulator',{}):
+        raise ValueError('simulator.mode was removed: Reconstruction exports Native Pose/Physics only')
     runtimes=configuration.get('runtimes',{})
     if not isinstance(runtimes,dict):raise ValueError('Runtime settings mapping required')
     def contains_secret(node):

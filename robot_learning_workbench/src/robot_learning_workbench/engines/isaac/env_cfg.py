@@ -16,6 +16,30 @@ _PINHOLE_PREFIX='omni:lensdistortion:opencvPinhole:'
 _PINHOLE_COEFFICIENTS=('k1','k2','p1','p2','k3','k4','k5','k6','s1','s2','s3','s4')
 
 
+def prepare_camera_schema():
+    """Register installed lens/PhysX schemas before Kit/the first USD Stage.
+
+    SchemaRegistry is process-local and caches its initial schema definitions.
+    Registering after a Package parser or Kit has opened a Stage is too late.
+    This is Child bootstrap only: no Kit import, install or calibration edits.
+    https://docs.omniverse.nvidia.com/kit/docs/omni.usd.schema.omni_lens_distortion/latest/index.html
+    """
+    from importlib.metadata import distribution,PackageNotFoundError
+    try:root=Path(distribution('isaacsim').locate_file('isaacsim/extscache'))
+    except PackageNotFoundError as error:
+        raise RuntimeError('NEEDS_RUNTIME: installed Isaac Sim lens schema resources are required')from error
+    plugins=list(root.glob('omni.usd.schema.omni_lens_distortion-*/usd_plugins'))
+    if len(plugins)!=1 or not(plugins[0]/'plugInfo.json').is_file():
+        raise RuntimeError('NEEDS_RUNTIME: one installed omni.usd.schema.omni_lens_distortion USD resource plugin is required')
+    physics=list(root.glob('omni.usd.schema.physx-*/plugins/PhysxSchema/resources'))
+    if len(physics)!=1 or not(physics[0]/'plugInfo.json').is_file():
+        raise RuntimeError('NEEDS_RUNTIME: one installed omni.usd.schema.physx resource plugin is required')
+    from pxr import Plug
+    Plug.Registry().RegisterPlugins(str(plugins[0]))
+    for resource in physics[0].parent.parent.glob('*/resources'):
+        Plug.Registry().RegisterPlugins(str(resource))
+
+
 def _pinhole_properties(matrix, resolution, focal_length=24.):
     """Checked USD pinhole parameters; native lens schema owns RTX projection."""
     raw=np.asarray(matrix)

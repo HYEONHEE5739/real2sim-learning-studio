@@ -1,5 +1,7 @@
 # Scene Prepare / Real·Sim — 촬영 기록 펼침과 화면 높이
 
+> 2026-11-18 영상 표시 수정: 실시간 영상은 원본 비율을 유지하며 **전체 프레임**을 표시한다. 영역을 채우며 가장자리를 자르는 확대는 제거했다. 마지막 「전체 프레임 표시」 절을 따른다.
+
 > 2026-11-17 최신 외형·조작: Scene Prepare 연결과 Teleop 시작을 한 버튼으로 합치고 하단 세 버튼을 왼쪽 영상 영역에 맞췄다. 공통 남색·청록 스타일과 최신 검증은 [Studio UI 변경](studio-ui-refresh.md)을 따른다. 촬영 기록·진단 로그의 오른쪽 팝업은 유지한다.
 
 > 2026-11-17 후속 UI 요청: 촬영 기록과 진단 로그를 제목줄 오른쪽 버튼으로 열리는 별도 창으로 전환했다. 현재 동작은 마지막 「오른쪽 버튼과 팝업 전환」 절을 따른다. 아래 13%/22%는 이전 펼침 패널 구현·측정 기록이다.
@@ -98,3 +100,21 @@ Scene Prepare의 제목줄 오른쪽에 **촬영 기록 / 진단 로그**, Real/
 이번 수정은 UI의 `view.py/session_page.py/real_sim_page.py`, 관련 `test_capture_panel_layout.py/test_capture_session_ui.py`, 이 문서다. 이전 미커밋 구현은 보존한다. 근거는 Git 제외 `workbench_runs/diagnostics/capture_history_popups_20261117_001/`의 RED/GREEN·`focused.xml/log`, 최종 회귀, `gui-results.json`, `verification-summary.json`이다.
 
 두 페이지의 기존 생성자 외 메서드와 `CameraView/LiveCameraView`는 시작 복사와 AST 동일하며 Backend 제어·저장 소스는 SHA 동일하다. 이전 조사에서 선택한 사용자 원본34개도 SHA/크기 변화가 없었다. 이34개는 이번에 새로 만든 전수 원본 ledger가 아니다. HEAD·Git Index와 기존 변경을 보존했고 변경 Python5개 bytecode 없는 compile·`git diff --check`를 확인했다. Commit/Push·장치 구동은 하지 않았다.
+
+## 전체 프레임 표시 — 2026-11-18
+
+사용자 최신 요청은 640×480 영상의 위아래·좌우가 잘리지 않는 것이다. 두 화면의 공통 `LiveCameraView`는 `KeepAspectRatioByExpanding`으로 표시 영역을 채웠고, 원본4:3과 영역 비율이 다르면 화면 밖으로 나간 부분이 잘렸다. Real/Sim의 넓고 낮은4분할에서 위아래가 잘리는 직접 원인이다.
+
+공통 Widget의 별도 확대 `paintEvent`를 제거하고 기존 `CameraView`의 `KeepAspectRatio` 그리기를 재사용했다. 원본 전체를 영역 안에 들어가는 최대 크기로 표시하며 비율을 유지한다. 영역이4:3과 다르면 남는 공간은 배경으로 표시한다. 이는 화각을 보존하기 위한 변경이다. 원본 Pixmap과 저장 RGB는640×480 그대로이며 스트림·Capture·Teleop·레이아웃은 변경하지 않았다. 더블클릭 확대도 유지한다.
+
+기존의 「빈 공간 없이 채움」 시험은 최신 요구에 맞게 네 모서리에 서로 다른 색을 둔640×480 입력 검증으로 바꿨다. 수정 전 Scene Prepare의 실제 Qt Widget에서도 첫 모서리 누락으로 RED를 확인했다. 수정 후1650×920 / 1920×1080 / 1280×720에서 Scene Prepare2분할, Real/Sim4분할·Side 크게·Wrist 크게의 모든 표시 영상에서 네 모서리와 원본 Pixmap 불변을 검사했다. 해당 파일의 **집중6개 시험 통과 / 실패0 / exit0, 3.03초**다. 전체 회귀·관련 없는 Object Library 검사는 실행하지 않았다.
+
+아래는1650×920 실제 Qt(offscreen) 스크린샷이다. 저장된 `pickplace-colorblock` RGB를 읽기 전용으로 재생했으며 실시간 센서/엔진 실행 결과가 아니다. 경계 비교 이미지는 별도 합성 입력이다.
+
+| 비교 | 수정 전 | 수정 후 |
+|---|---|---|
+| Real/Sim 저장 RGB | [Before](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/before-real_sim.png) | [After](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/after-real_sim.png) |
+| Real/Sim 합성 상하좌우 경계 | [Before](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/before-real_sim-bounds.png) | [After](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/after-real_sim-bounds.png) |
+| Scene Prepare 저장 RGB | [Before](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/before-capture.png) | [After](../../workbench_runs/diagnostics/live_camera_full_frame_20261118_001/after-capture.png) |
+
+이번 변경은 `ui/view.py`, 기존 `tests/test_live_camera_layout.py`와 이 문서다. 기존 미커밋 변경과 브랜치·HEAD·index를 보존했고 사용자 원본은 수정하지 않았다. Commit/Push·설치·추론·로봇 연결을 실행하지 않았다. 진단은 Git 제외 `workbench_runs/diagnostics/live_camera_full_frame_20261118_001/`의 RED/GREEN·Before/After·원본 SHA 기록을 따른다. 앱 재시작 후 새 표시 방식이 적용된다.

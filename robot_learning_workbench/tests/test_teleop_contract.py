@@ -12,7 +12,7 @@ from robot_learning_workbench.ui.app import Window
 app=QApplication([]);w=Window('/no/worker',Path(sys.argv[1])/'modules',Path(sys.argv[1])/'workspace');w.show();app.processEvents();p=w.sessions['capture']
 assert not hasattr(p.settings,'motion_limits')
 p.client.running=True;p.client.stage='capture_session';p.last_progress={'session_state':'OBSERVING','teleoperation_available':True};sent=[];p.client.send=lambda kind,payload=None:sent.append((kind,payload));p.buttons(True)
-p.start_teleop_button.click();assert sent==[('teleop_start',None)]
+p.connect_button.click();assert sent==[('teleop_start',None)]
 p.client.running=False;w.close();app.processEvents()
 ''',tmp_path)
 

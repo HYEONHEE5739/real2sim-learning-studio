@@ -49,7 +49,7 @@ def native_project(tmp_path):
 def test_native_review_without_robot_reports_blocker_and_has_no_authored_fallback(tmp_path):
     _,project=export_project(tmp_path)
     package=project.root/'exports/native-review'
-    export_revision(project,destination=package,allow_unvalidated=True,execution_mode='native')
+    export_revision(project,destination=package,allow_unvalidated=True)
     record=read(project.root/'project.yaml')['execution_packages'][0]
     assert record['engine_config']=={}
     assert record['execution_readiness']['mujoco']['status']=='BLOCKED'
@@ -68,7 +68,7 @@ def test_new_native_pose_preserves_q_camera_identity_and_invalidates_changed_ass
         project.save_scene(scene)
         write(project.root/'working/validation/report.json',dict(passed=False,input_signature=project.signature()))
     destination=project.root/'exports/native-pose'
-    export_revision(project,destination=destination,allow_unvalidated=True,execution_mode='native',
+    export_revision(project,destination=destination,allow_unvalidated=True,
         native_options={'initial_joint_rad':[0.]*6})
     record=read(project.root/'project.yaml')['execution_packages'][0]
     assert record['execution_readiness']['mujoco']['pose']=='READY'
@@ -107,7 +107,7 @@ def test_new_native_physics_has_actual_steps_gravity_contacts_and_joint_error(tm
     from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
     _,project,mapping=native_project(tmp_path)
     destination=project.root/'exports/native-physics'
-    export_revision(project,destination=destination,allow_unvalidated=True,execution_mode='native',
+    export_revision(project,destination=destination,allow_unvalidated=True,
         native_options={'initial_joint_rad':[0.]*6})
     record=read(project.root/'project.yaml')['execution_packages'][0]
     assert record['execution_readiness']['mujoco']['physics']=='READY'
@@ -133,11 +133,11 @@ def test_native_stage14_uses_the_actual_owned_worker_entrypoint(tmp_path):
     from real2sim_builder import stage_workers
     _,project,_=native_project(tmp_path)
     destination=project.root/'exports/worker-native'
-    export_revision(project,destination=destination,allow_unvalidated=True,execution_mode='native',
+    export_revision(project,destination=destination,allow_unvalidated=True,
         native_options={'initial_joint_rad':[0.]*6})
     row=read(project.root/'project.yaml')['execution_packages'][0]
     output=tmp_path/'native-worker';request=tmp_path/'request.json'
-    write(request,dict(package=str(destination),engine='mujoco',execution_mode='native',camera_ids=['side','wrist'],
+    write(request,dict(package=str(destination),engine='mujoco',camera_ids=['side','wrist'],
         engine_config=str(project.root/row['engine_config']['mujoco']),output=str(output)))
     env=os.environ.copy()
     result=subprocess.run([sys.executable,'-B',stage_workers.__file__,'--worker','simulator',str(request)],
@@ -187,7 +187,7 @@ def test_exported_native_physics_settings_feed_existing_source_consumer(tmp_path
     from scene_contract.package import load_scene
     from robot_learning_workbench.engines.mujoco.source import resolved_model_config
     _,project,_=native_project(tmp_path);destination=project.root/'exports/source-native'
-    export_revision(project,destination=destination,allow_unvalidated=True,execution_mode='native',native_options={'initial_joint_rad':[0.]*6})
+    export_revision(project,destination=destination,allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     record=read(project.root/'project.yaml')['execution_packages'][0]
     plan=SimpleNamespace(engine='mujoco',stage='source',effective_settings={'execution':{}},object_order=('block',),
         scene=load_scene(destination/'scene.json'),input_documents={})
@@ -205,7 +205,7 @@ def test_workspace_physics_selectors_use_physics_profile_while_realsim_keeps_pos
     from robot_learning_workbench.robot.registration import bind_configuration
     from test_scene_selection_performance import _bind_synthetic_configuration
     workspace,project,_=native_project(tmp_path);destination=project.root/'exports/physics-selection'
-    export_revision(project,destination=destination,allow_unvalidated=True,execution_mode='native',native_options={'initial_joint_rad':[0.]*6})
+    export_revision(project,destination=destination,allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     record=read(project.root/'project.yaml')['execution_packages'][0]
     config=_bind_synthetic_configuration(workspace,project)
     write(config.parent/'leader.json',{'role':'leader'})
@@ -222,10 +222,10 @@ def test_missing_physics_properties_never_select_pose_or_an_older_physics_revisi
     from robot_learning_workbench.scene_preparation import source_inputs
     from robot_learning_workbench.ui.pipeline_inputs import scenes
     _,project,_=native_project(tmp_path)
-    export_revision(project,destination=project.root/'exports/ready',allow_unvalidated=True,execution_mode='native',native_options={'initial_joint_rad':[0.]*6})
+    export_revision(project,destination=project.root/'exports/ready',allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     scene=project.scene;scene['objects'][1]['physics']['mass_kg']['value']=None;project.save_scene(scene)
     write(project.root/'working/validation/report.json',dict(passed=False,input_signature=project.signature()))
-    export_revision(project,destination=project.root/'exports/missing-mass',allow_unvalidated=True,execution_mode='native',native_options={'initial_joint_rad':[0.]*6})
+    export_revision(project,destination=project.root/'exports/missing-mass',allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
     rows=scenes(project.root.parent.parent)['scenes']
     assert rows[-1]['engine_config']=={}
     with pytest.raises(ValueError,match='mass'):
