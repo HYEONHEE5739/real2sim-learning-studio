@@ -61,7 +61,7 @@ def inspect(dialog):
  assert dialog.configuration()['geometry']['backend']=='mast3r_colmap'
  assert dialog.configuration()==config
  assert not dialog.findChildren(QTabWidget)and not dialog.findChildren(QTableWidget)
- seen.append(dialog.candidate.text())
+ seen.append(dialog.candidate_name)
  return 0
 ui.ReconstructionDialog.exec=inspect
 panel=SceneInputs(p.root.parent)

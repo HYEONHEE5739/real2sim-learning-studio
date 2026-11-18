@@ -96,7 +96,7 @@ def test_sealed_raw_capture_can_be_recovered_after_its_session_owner_closed(tmp_
     assert result['status']=='SAVED'and result['paired']is False
     assert before=={str(p.relative_to(final)):sha(p)for p in final.rglob('*')if p.is_file()}
     assert load_session(final)[1][0]['q_measured']==q
-    with pytest.raises(ValueError,match='already registered'):SnapshotStore.recover(project,final)
+    assert SnapshotStore.recover(project,final)['registration']['status']=='ALREADY_REGISTERED'
 
 
 def test_frozen_render_paths_are_decoded_only_by_the_save_consumer(tmp_path,monkeypatch):

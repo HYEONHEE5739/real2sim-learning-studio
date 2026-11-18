@@ -114,6 +114,8 @@ class CaptureQueue:
         if self.render_error:raise ValueError('Sim renderer unavailable; raw observations already saved are retained')
         from .capture import freeze_capture
         state,images,sequences=freeze_capture(self.session,command,self.last_sequences)
+        identity=getattr(getattr(self.session,'plan',None),'scene_identity',None)
+        if self.paired and identity is not None:state['pair_scene_identity']=dict(identity)
         identifier=('pair_'if self.paired else'snapshot_')+command['command_id']
         job=dict(id=identifier,command=command,request=state['capture_request'],
             sample=dict(timestamp_ns=state['timestamps']['follower']['end']['monotonic_ns'],
@@ -213,14 +215,25 @@ class CaptureQueue:
         identifier=command['payload']['snapshot_id'];job=self.failed.get(identifier)
         if len(self.jobs)>=self.capacity+self.postprocessing_capacity or sum(self._postprocessing(j)for j in self.jobs.values())>=self.postprocessing_capacity:raise ValueError('Capture queue full')
         if job is None or not job.get('pending'):raise ValueError('No sealed original observation is available to retry')
-        if self.paired and self.render_error:raise ValueError('Reconnect the failed renderer before retrying this sealed observation')
         folder=Path(job['pending'].get('path')or job['pending']['staging'])
         if not(folder/'COMPLETE').is_file():
             raise ValueError('Original observation was not sealed; partial files retained, no registration retry possible')
+        paired=False
+        if self.paired:
+            from real2sim_builder.files import read
+            from real2sim_builder.scene import local_path
+            rows=read(folder/'capture_manifest.yaml')['snapshots']
+            if len(rows)!=1 or rows[0]['id']!=identifier:raise ValueError('Retry snapshot identity differs')
+            shot=local_path(folder,rows[0]['path'])
+            # The save worker verifies every hash before registration. Keep
+            # large RGB and model reads off the device event loop.
+            paired=(shot/'pair-manifest.json').is_file() or 'pair.json' in read(shot/'metadata.json')['files']
+            if not paired and self.render_error:
+                raise ValueError('Reconnect the failed renderer before retrying this sealed observation')
         self.failed.pop(identifier);job.update(command=command,error=None,postprocessing=True);self.jobs[identifier]=job
         self.session.ack(command,'accepted')
         try:
-            if self.paired and not(folder/'pair.json').is_file():self._publish(job,'RAW_SAVED')
+            if self.paired and not paired:self._publish(job,'RAW_SAVED')
             else:self._finish(job)
         except Exception as error:self._fail(job,error)
 
@@ -261,8 +274,6 @@ class SnapshotStore:
         with exclusive(project):
             manifest,_,_=load_session(folder)
             if manifest.get('project_id')!=project.info['id']or len(manifest.get('snapshots',[]))!=1:raise ValueError('Recovery requires one Snapshot from this Project')
-            if any(r.get('dataset_id')==manifest['source_dataset_id']for r in project.read_evidence(resolve=False).get('capture_sessions',[])):
-                raise ValueError('Capture already registered; original archive retained')
             row=manifest['snapshots'][0];shot=folder/row['path'];metadata=read(shot/'metadata.json');state=read(shot/'state.json')
             store=cls(project,session_id=manifest.get('session_identity',folder.parent.name),model=folder/manifest['robot']['path'],mapping=manifest['joint_mapping'])
             pending=dict(id=row['id'],staging=str(folder)if folder.name.startswith('pending_')else None,
@@ -293,13 +304,14 @@ class SnapshotStore:
             Image.fromarray(images['real_'+row['camera']]).save(shot/row['path'],compress_level=1);shot_files[row['path']]=file_sha256(shot/row['path'])
         layout_id='layout_'+self.project_id.replace('-','_')
         metadata=dict(id=identifier,scene_state_id=layout_id,files=shot_files,images=observed,quality_warnings=warnings)
-        atomic_json(shot/'metadata.json',metadata);(shot/'COMPLETE').write_text('complete\n')
+        atomic_json(shot/'metadata.json',metadata)
         manifest=dict(schema='real2sim.snapshot/1',dataset_id=identifier,session_id=identifier,clock={'domain':'host_monotonic_ns','hardware_synchronized':False,'timestamp_kind':'host_receipt_not_exposure'},
             joint_names=list(JOINTS),joint_units=['rad']*6,q_measured_source='physical_follower_feedback_converted_to_model',joint_mapping=self.mapping,
             source_robot_sha256=file_sha256(self.model),robot={'path':model_relative,'mapping_verified':False},cameras=[{'id':n,'camera_type':n,'resolution':[640,480]}for n in('side','wrist')],
             files=files,snapshots=[{'id':identifier,'scene_state_id':layout_id,'path':str(shot.relative_to(staging)),'metadata_sha256':file_sha256(shot/'metadata.json')}],
             project_id=self.project_id,session_identity=self.session_id,command_source='measured_observation_no_training_action',device_source=state.get('device_source','unspecified'),
             capture_policy=measured['capture_policy'],static_layout_verified=False,physical_verified=False)
+        if state.get('pair_scene_identity') is not None:manifest['pair_scene_identity']=state['pair_scene_identity']
         atomic_json(staging/'capture_manifest.yaml',manifest);(staging/'COMPLETE').write_text('complete\n');sealed=time.monotonic();load_session(staging)
         end=time.monotonic()
         self.last_sequences=sequences
@@ -317,7 +329,8 @@ class SnapshotStore:
         if identifier in self.completed:return self.completed[identifier]
         staging=Path(pending['staging'])if pending.get('staging')else None
         with exclusive(self.project):
-            if staging is not None and staging.exists():
+            newly_saved=staging is not None and staging.exists()
+            if newly_saved:
                 manifest=read(staging/'capture_manifest.yaml')
                 if rendered is not None:
                     from .pairs import write_pair
@@ -325,15 +338,28 @@ class SnapshotStore:
                     write_pair(staging,manifest,pending,rendered,diagnostics=False)
                     pair_ms=(time.monotonic()-pair_begin)*1000
                     processing['pair_completed_ns']=time.monotonic_ns()
-                    atomic_json(staging/'capture_manifest.yaml',manifest)
                 load_session(staging)
                 from scene_contract.naming import numbered_path
                 final=numbered_path(self.directory,'capture');os.rename(staging,final);pending['path']=str(final)
             else:final=Path(pending['path'])
-            manifest=read(final/'capture_manifest.yaml');metadata=read(final/manifest['snapshots'][0]['path']/'metadata.json')
+            from real2sim_builder.capture import snapshot_metadata
+            manifest=read(final/'capture_manifest.yaml');metadata=snapshot_metadata(final/manifest['snapshots'][0]['path'])
             paired='pair.json'in metadata['files']
             processing['registration_started_ns']=time.monotonic_ns()
-            report=import_snapshots(self.project,final,paired=paired)
+            sessions=[] if newly_saved else self.project.read_evidence(resolve=False).get('capture_sessions',[])
+            existing=[r for r in sessions if r.get('dataset_id')==manifest['dataset_id']]
+            if existing:
+                record=existing[0];original=final/'capture_manifest.yaml'
+                if (len(existing)!=1 or self.project.root/record['path']!=original
+                        or record['sha256']!=file_sha256(original)):
+                    raise ValueError('Registered Capture identity conflicts')
+                load_session(final)
+                for item in record['input_files']:
+                    if file_sha256(self.project.root/item['path'])!=item['sha256']:raise ValueError('Registered input changed')
+                self.project.invalidate()
+                report={'imported':0,'status':'ALREADY_REGISTERED'}
+            else:
+                report=import_snapshots(self.project,final,paired=paired)
             processing['registration_completed_ns']=time.monotonic_ns()
         shot=final/manifest['snapshots'][0]['path'];images={i['camera']:str(shot/i['path'])for i in metadata['images']}
         if paired:

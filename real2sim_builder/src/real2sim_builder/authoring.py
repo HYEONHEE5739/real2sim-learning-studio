@@ -126,8 +126,10 @@ def scene_analysis_schema():
         'dimensions_m':{'type':'array','items':{'type':['number','null']},'minItems':3,'maxItems':3},
         'source':{'type':'string','enum':['user_memo','visual_inference']},'evidence_quote':string,
         'evidence':{'type':'array','items':string},'wall_m':{'type':['number','null']},'support':{'type':['string','null']}}
+    geometry['plain_open_round_container']={'type':['boolean','null'],'description':'True only for an open circular handle-free vessel with a simple uninterrupted side profile supported by source views.'}
+    geometry['bottom_diameter_m']={'type':['number','null']}
     geometry['measurement_claims']={'type':'array','items':record({
-        'field':{'type':'string','enum':['x','y','z','wall']},'object_id':string,
+        'field':{'type':'string','enum':['x','y','z','wall','bottom_diameter']},'object_id':string,
         'subject_quote':string,'axis_quote':string,'statement_quote':string,
         'value_quote':string,'value':string,'unit':{'type':'string','enum':['mm','cm','m']}})}
     geometry['dimension_relations']={'type':'array','items':record({
@@ -254,7 +256,8 @@ def memo_dimension_claims(geometry, row, memo, used):
     if not isinstance(claims,list):raise ValueError('Invalid measurement witnesses')
     if not claims:return False
     labels={'x':{'x','width','너비','폭','가로'},'y':{'y','depth','깊이','세로'},
-            'z':{'z','height','높이'},'wall':{'wall','wall thickness','두께','벽 두께'}}
+            'z':{'z','height','높이'},'wall':{'wall','wall thickness','두께','벽 두께'},
+            'bottom_diameter':{'bottom diameter','base diameter','바닥 지름','하단 지름'}}
     def subject_in(text,label):
         return re.search(r'(?<!\w)'+re.escape(label)+r'(?!\w)',text,re.IGNORECASE)is not None
     def axis_in(text,label):
@@ -278,7 +281,8 @@ def memo_dimension_claims(geometry, row, memo, used):
             raw=Decimal(claim['value']);quoted=Decimal(number.group(1))
             converted=raw*{'mm':Decimal('.001'),'cm':Decimal('.01'),'m':Decimal(1)}[claim['unit']]
         except (InvalidOperation,KeyError):raise ValueError('Invalid numeric measurement witness')from None
-        proposed=geometry['wall_m']if field=='wall'else geometry['dimensions_m']['xyz'.index(field)]
+        proposed=(geometry['dimensions_m']['xyz'.index(field)] if field in ('x','y','z')
+                  else geometry.get(field+'_m'))
         if not raw.is_finite()or raw<=0 or raw!=quoted or proposed is None or abs(Decimal(str(proposed))-converted)>Decimal('1e-12'):
             raise ValueError('Measurement numeric/unit conversion contradicts returned dimension')
         witness=(statement,claim['value_quote'])
@@ -288,6 +292,7 @@ def memo_dimension_claims(geometry, row, memo, used):
         used[witness]=row['id'];used[subject_binding]=row['id'];seen.add(field)
     required={axis for axis,v in zip('xyz',geometry['dimensions_m'])if v is not None}
     if geometry['wall_m']is not None:required.add('wall')
+    if geometry.get('bottom_diameter_m') is not None:required.add('bottom_diameter')
     return required==seen
 
 
@@ -364,6 +369,8 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
         geometry=row['geometry']
         if geometry is not None:
             fields(geometry,('kind','dimensions_m','source','evidence_quote','evidence','wall_m','support',
+                *(['bottom_diameter_m'] if 'bottom_diameter_m' in geometry else []),
+                *(['plain_open_round_container']if 'plain_open_round_container'in geometry else[]),
                 *(['measurement_claims']if 'measurement_claims'in geometry else[]),
                 *(['dimension_relations']if 'dimension_relations'in geometry else[])))
             dims=geometry['dimensions_m'];quote=geometry['evidence_quote'];source=geometry['source']
@@ -373,16 +380,23 @@ def parse_scene_analysis(answer,memo,image_ids=(),*,existing_objects=(),image_re
             if not strings(geometry['evidence'])or not isinstance(quote,str)or(quote and quote not in memo['text'])or(source=='user_memo'and not quote):raise ValueError('Dimension quote missing from Scene memo')
             if source=='visual_inference'and not geometry['evidence']:raise ValueError('Estimated geometry needs observation evidence')
             if geometry['wall_m']is not None and not valid_number(geometry['wall_m']):raise ValueError('Invalid wall dimension')
+            if geometry.get('bottom_diameter_m') is not None and not valid_number(geometry['bottom_diameter_m']):
+                raise ValueError('Invalid bottom diameter')
+            if geometry.get('plain_open_round_container') is not None and type(geometry['plain_open_round_container']) is not bool:
+                raise ValueError('Invalid container shape claim')
             if geometry['support']is not None:identifier(geometry['support'])
             verified=source=='user_memo'and memo_dimension_claims(geometry,row,memo,used_measurements)
             if geometry.get('dimension_relations'):
                 required={k for k,v in zip('xyz',dims)if v is not None}
                 if geometry['wall_m']is not None:required.add('wall')
+                if geometry.get('bottom_diameter_m') is not None:required.add('bottom_diameter')
                 verified=verified or bool(required and required<=relation_dimensions.get(name,{}).keys())
             spec['geometry']={'kind':geometry['kind'],'dimensions_m':dims[:],
                 'provenance':'measured'if verified else'estimated',
                 'evidence':geometry['evidence']+(['Scene Memo SHA '+memo['sha256']+' quote: '+quote]if quote else[]),
                 'memo_sha256':memo['sha256'],'evidence_quote':quote,'semantics_verified':False}
+            if verified and geometry.get('bottom_diameter_m') is not None:spec['geometry']['bottom_diameter_m']=geometry['bottom_diameter_m']
+            if geometry.get('plain_open_round_container') is True:spec['geometry']['round']=True
             spec['geometry']['numeric_evidence_verified']=verified
             if source=='user_memo'and not verified:spec['geometry']['measurement_review']='UNVERIFIED_NUMERIC_EVIDENCE'
             if geometry.get('measurement_claims'):spec['geometry']['measurement_claims']=geometry['measurement_claims']
@@ -503,7 +517,7 @@ def scene_constraint_schema():
     def record(fields):
         return {'type':'object','properties':fields,'required':list(fields),'additionalProperties':False}
     string={'type':'string'};strings={'type':'array','items':string}
-    quantity=record({'quantity':{'type':'string','enum':['cube_edge_length','upper_rim_diameter','height',
+    quantity=record({'quantity':{'type':'string','enum':['cube_edge_length','upper_rim_diameter','bottom_diameter','wall_thickness','height',
         'upper_rim_edge_gap','upper_rim_center_distance','outer_x','outer_y','inner_x','inner_y','border_width','tilt']},
         'value':string,'unit':{'type':'string','enum':['mm','cm','m','deg']},'value_quote':string})
     group=record({'id':string,'members':strings,'count':{'type':'integer','minimum':1},
@@ -548,7 +562,14 @@ def validate_scene_constraints(packet,plan,memo,*,image_records,robot_links=()):
     from .scene import identifier
     from .stage_artifacts import digest
     validate_answer(packet,scene_constraint_schema())
-    validate_answer(plan,scene_analysis_schema())
+    # Earlier frozen plans predate the optional round-profile observations.
+    # Supply unknown values only to the validator, retaining the signed input.
+    checked_plan=copy.deepcopy(plan)
+    for row in checked_plan['objects']:
+        if isinstance(row.get('geometry'),dict):
+            row['geometry'].setdefault('plain_open_round_container',None)
+            row['geometry'].setdefault('bottom_diameter_m',None)
+    validate_answer(checked_plan,scene_analysis_schema())
     if packet['scene_memo_sha256']!=memo['sha256']or packet['source_plan_sha256']!=digest(plan):
         raise ValueError('Constraint binding used stale Memo/semantic plan')
     ids=[r['id']for r in plan['objects']];by_id={r['id']:r for r in plan['objects']}
@@ -613,12 +634,12 @@ def validate_scene_constraints(packet,plan,memo,*,image_records,robot_links=()):
             values_si={k:math.radians(float(v))if k=='tilt'else float(v)for k,v in values.items()},memo_sha256=memo['sha256'],pose_application='NONE')
         if kind=='shared_dimension':
             if len(names)>1 and group is None:raise ValueError('Shared dimensions require an explicit member group')
-            if not values or not set(values)<={'cube_edge_length','upper_rim_diameter','height'}:raise ValueError('Unsupported shared quantity')
+            if not values or not set(values)<={'cube_edge_length','upper_rim_diameter','height','bottom_diameter','wall_thickness'}:raise ValueError('Unsupported shared quantity')
             for n in names:
                 shape=(by_id[n].get('geometry')or{}).get('kind')
                 if 'cube_edge_length'in values and(objects[n]['role']!='manipulable_object'or shape not in(None,'box')):
                     raise ValueError('Cube dimension applied to the wrong Object kind/role')
-                if 'upper_rim_diameter'in values and(objects[n]['role']!='receptacle'or shape not in(None,'container')):
+                if set(values)&{'upper_rim_diameter','bottom_diameter','wall_thickness'} and(objects[n]['role']!='receptacle'or shape not in(None,'container')):
                     raise ValueError('Upper rim diameter requires receptacle geometry')
                 for k,v in values.items():put(n,k,v)
         elif kind=='pair_spacing':
@@ -690,11 +711,17 @@ def validate_scene_constraints(packet,plan,memo,*,image_records,robot_links=()):
             'independent_identity_verified':False,'source':'user_memo/Codex typed binding',
             'assembly_id':next((a['id']for a in assemblies if n in a['members']),None)}
         spec.setdefault('shape_constraints',{})['memo_binding']=declaration
+        round_shell=(by_id[n].get('geometry') or {}).get('plain_open_round_container') is True
+        container_sizes={'upper_rim_diameter','bottom_diameter','height','wall_thickness'}<=values.keys()
+        if round_shell and container_sizes and values['upper_rim_diameter']>=values['bottom_diameter']:
+            dims[:2]=[float(values['upper_rim_diameter'])]*2
         if any(v is not None for v in dims):
             witnesses=[c for c in constraints if c['id']in constraint_ids[n]and c['kind']in('shared_dimension','rectangle_border')]
             spec['geometry']={'kind':kind,'dimensions_m':dims,'provenance':'measured','memo_sha256':memo['sha256'],
                 'evidence':['Scene Memo SHA '+memo['sha256']+' quote: '+c['source_quote']for c in witnesses],
                 'numeric_evidence_verified':True,'semantics_verified':False,'wall_m':None}
+            if round_shell and container_sizes:
+                spec['geometry'].update(round=True,bottom_diameter_m=float(values['bottom_diameter']),wall_m=float(values['wall_thickness']))
         pending_declaration=((by_id[n].get('geometry')or{}).get('source')=='user_memo'
             and spec['role']in('manipulable_object','receptacle','workspace')and not values)
         spec['modeling_readiness']='READY_FOR_MODELING'if spec.get('images')and not pending_declaration else'REVIEW'

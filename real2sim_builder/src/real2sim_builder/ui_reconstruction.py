@@ -63,10 +63,15 @@ class ReconstructionDialog(QDialog):
         if Path(codex_cli.environment()['CODEX_HOME']).is_relative_to(self.project.root):raise ValueError('Codex 인증 폴더는 Project 밖에 있어야 합니다.')
         self.process=QProcess(self);self.auth_process=QProcess(self)
         self.query=None;self.account=None;self.pending_start=False;self.pending_close=False
+        self.started_at=None;self.stage_seen=None;self.stage_since=None
         self.auth_guard=None;self.temporary=None;self.generation=0;self.report_started=False
         self.preferences=QSettings('Real2Sim','BuilderCodex')
         saved=read(self.project.root/'input/reconstruction.yaml')if(self.project.root/'input/reconstruction.yaml').is_file()else{}
         name=saved.get('candidate')or self.project.state.get('candidate')or numbered_path(self.project.root/'scratch/agent','auto').name
+        self.fresh_run=False
+        active=self.project.state.get('candidate')
+        if not refit and active and (self.project.root/'scratch/agent'/active/'reconstruction/simfoundry/cache.json').is_file():
+            name=active
         if refit:
             name=self.project.state.get('candidate')or name
             root=self.project.root/'scratch/agent'/name
@@ -74,7 +79,13 @@ class ReconstructionDialog(QDialog):
             scene=read(root/'candidate_scene.yaml')if(root/'candidate_scene.yaml').is_file()else{}
             if info.get('status')!='OPEN'or not info.get('source_revision')or scene.get('reconstruction_state',{}).get('id')!=selection['scene_state_id']or info['source_revision']['identity']!=selection['source_identity']:name=numbered_path(self.project.root/'scratch/agent','refit').name
         from .scene import identifier
-        identifier(name);self.candidate=QLabel(name)
+        identifier(name)
+        if refit:
+            self.candidate=QLabel(name)
+        else:
+            self.candidate=QComboBox()
+            self.candidate.setAccessibleName('Scene 실행 기록')
+            self.load_run_history(active,name)
         self.setWindowTitle('Auto Reconstruction');self.resize(800,830)
         self.setStyleSheet('''
 QDialog { background:#0c1420; color:#e7eff8; }
@@ -125,22 +136,82 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
                 grid.addWidget(label,index//2,index%2);self.stage_labels[str(index+1)]=(label,str(index+1)+'. '+title)
         self.numeric=None;self.refit_engine=engine
         if refit:
-            self.numeric=QCheckBox('실측 q 기반 수치 공동 정합 (Codex 호출 없음)');self.numeric.setChecked(saved_configuration(self.project,self.candidate.text()).get('numeric_refinement',{}).get('enabled',True));layout.addWidget(self.numeric)
+            self.numeric=QCheckBox('실측 q 기반 수치 공동 정합 (Codex 호출 없음)');self.numeric.setChecked(saved_configuration(self.project,self.candidate_name).get('numeric_refinement',{}).get('enabled',True));layout.addWidget(self.numeric)
             self.rounds=QSpinBox();self.rounds.setRange(1,20);self.rounds.setValue(4);self.rounds.setPrefix('최대 반복 ');layout.addWidget(self.rounds)
         self.current=QLabel('저장된 작업 확인 중…');self.current.setWordWrap(True);steps.addWidget(self.current)
+        self.elapsed=QLabel();steps.addWidget(self.elapsed);self.elapsed.hide()
         row=QHBoxLayout();layout.addLayout(row)
-        self.start=QPushButton('생성 시작 / 이어서 실행');self.start.clicked.connect(self.run);row.addWidget(self.start)
+        self.start=QPushButton('재정합 시작 / 이어서 실행' if refit else '새로 생성')
+        self.start.clicked.connect(lambda: self.run(fresh=not self.refit));row.addWidget(self.start)
+        self.resume=None
+        if not refit:
+            self.start.setToolTip('같은 Scene 입력으로 새 Candidate를 만들고 Stage 1부터 실행합니다.')
+            self.resume=QPushButton('이어서 실행');self.resume.clicked.connect(lambda: self.run())
+            self.resume.setToolTip('표시된 Candidate에서 저장된 작업 다음부터 실행합니다.')
+            row.addWidget(self.resume)
         self.stop=QPushButton('중단');self.stop.clicked.connect(self.request_stop);self.stop.setEnabled(False);row.addWidget(self.stop)
         self.evidence_button=QPushButton('제작 기록 / 결과 이미지 보기');self.evidence_button.clicked.connect(self.open_evidence);layout.addWidget(self.evidence_button)
         self.summary=QPlainTextEdit();self.summary.setReadOnly(True);self.summary.setMaximumHeight(150);layout.addWidget(self.summary)
+        self.summary.hide()
+        self.summary.textChanged.connect(lambda:self.summary.setVisible(bool(self.summary.toPlainText().strip())))
         self.process.readyReadStandardOutput.connect(self.discard_output);self.process.readyReadStandardError.connect(self.discard_output)
         self.process.finished.connect(self.finished);self.process.errorOccurred.connect(self.process_error)
         self.process.stateChanged.connect(lambda _:self.controls())
         self.auth_process.readyReadStandardOutput.connect(self.auth_output);self.auth_process.readyReadStandardError.connect(self.auth_output)
         self.auth_process.finished.connect(self.auth_finished);self.auth_process.errorOccurred.connect(self.auth_error)
         self.timer=QTimer(self);self.timer.setInterval(1000);self.timer.timeout.connect(self.update_progress);self.timer.start()
-        self.usage_timer=QTimer(self);self.usage_timer.setInterval(60000);self.usage_timer.timeout.connect(self.refresh_account);self.usage_timer.start()
-        self.clear_account();self.update_progress();QTimer.singleShot(0,self.refresh_account)
+
+        if not refit:self.candidate.currentIndexChanged.connect(self.run_selected)
+        self.clear_account();self.update_progress();self.controls();QTimer.singleShot(0,self.refresh_account)
+
+    @property
+    def candidate_name(self):
+        return self.candidate.currentData() if isinstance(self.candidate,QComboBox) else self.candidate.text()
+
+    def load_run_history(self,active,fallback):
+        from .scene import identifier
+        history=[]
+        for metadata in (self.project.root/'scratch/agent').glob('*/candidate.json'):
+            folder=metadata.parent
+            if folder.is_symlink() or metadata.is_symlink():continue
+            report_path=folder/'reconstruction.json'
+            checkpoint=folder/'reconstruction/simfoundry/cache.json'
+            try:
+                name=identifier(folder.name)
+                info=read(metadata)
+                if info.get('source_revision') or info.get('id')!=name:continue
+                report=read(report_path) if report_path.is_file() else {}
+                if report.get('pipeline')!='simfoundry/1' and not checkpoint.is_file():continue
+                latest=max(p.stat().st_mtime_ns for p in (metadata,report_path,checkpoint) if p.exists())
+                history.append((latest,name,report))
+            except (OSError,ValueError):continue
+        for _,name,report in sorted(history,reverse=True):
+            self.candidate.addItem(self.run_caption(name,report),name)
+        if history:
+            self.candidate.setCurrentIndex(max(0,self.candidate.findData(active or '')))
+        else:
+            self.candidate.addItem(fallback+' · 실행 전',fallback)
+
+    @staticmethod
+    def run_caption(name,report,stage=None):
+        from .stage_artifacts import STAGE_NAMES
+        status=report.get('status','대기')
+        label={'STOPPED':'중단','RUNNING':'진행 중','FAILED':'실패','DRAFT_READY':'초안 생성 완료',
+               'NEEDS_RUNTIME':'실행 환경 필요','NEEDS_REVIEW':'검토 필요','NEEDS_MORE_DATA':'추가 자료 필요'}.get(status,status)
+        stage=stage or report.get('failed_stage')
+        if stage is None:
+            completed=[i for i in range(1,15) if report.get('stages',{}).get(str(i),{}).get('status')=='COMPLETE']
+            if completed: return f'{name} · {label} · Stage {max(completed)}까지 완료'
+        if type(stage) is int and 1<=stage<=14:
+            return f'{name} · {label} · Stage {stage} · {STAGE_NAMES[stage-1]}'
+        return f'{name} · {label}'
+
+    def run_selected(self):
+        self.report_started=False
+        self.elapsed.hide()
+        self.summary.clear()
+        self.update_progress()
+        self.controls()
 
     def _refit_selection(self):
         from .automation import select_refit_pairs
@@ -148,8 +219,8 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         if selected.get('code'):raise ValueError(selected['code']+': '+'; '.join(selected['needs']))
         return selected
 
-    def configuration(self):
-        result=saved_configuration(self.project,self.candidate.text())
+    def configuration(self,candidate=None):
+        result=saved_configuration(self.project,candidate or self.candidate_name)
         if self.refit:
             if self.numeric is not None:
                 result.setdefault('numeric_refinement',{})['enabled']=self.numeric.isChecked()
@@ -168,6 +239,11 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         query=self.query is not None
         locked=self.busy()or auth or self.pending_start
         self.start.setEnabled(not locked and not query)
+        if self.resume is not None:
+            self.candidate.setEnabled(not locked)
+            root=self.project.root/'scratch/agent'/self.candidate_name
+            self.resume.setEnabled(not locked and not query and (root/'reconstruction/simfoundry/cache.json').is_file()
+                                   and (root/'candidate.json').is_file() and read(root/'candidate.json').get('status')=='OPEN')
         self.model.setEnabled(not locked);self.effort.setEnabled(not locked)
         self.login.setEnabled(not locked and not query);self.refresh.setEnabled(not auth and not query)
         self.stop.setEnabled(self.busy())
@@ -205,8 +281,8 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
 
     def account_result(self,result,generation):
         if generation!=self.generation:return
-        self.clear_account()
         if 'error'in result:
+            self.clear_account()
             self.summary.setPlainText(result['error'])
             pending=self.pending_start;self.pending_start=False
             if pending and not self.refit:
@@ -280,8 +356,10 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
     def auth_error(self,*_):
         self.release_auth();self.clear_account();self.summary.setPlainText('Codex 인증 프로세스를 실행하지 못했습니다.');self.controls()
 
-    def run(self):
-        if self.busy()or self.query is not None:return
+    def run(self,*,fresh=False):
+        if self.busy()or self.query is not None or self.pending_start:return
+        if not self.refit and not fresh and not self.resume.isEnabled():return
+        self.fresh_run=fresh
         if self.numeric is not None and self.numeric.isChecked():
             try:self.launch()
             except Exception as error:self.summary.setPlainText(str(error))
@@ -289,16 +367,29 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         self.pending_start=True;self.refresh_account();self.controls()
 
     def launch(self):
-        config=self.configuration();numeric=self.refit and config.get('numeric_refinement',{}).get('enabled',False)
+        name=numbered_path(self.project.root/'scratch/agent','auto').name if self.fresh_run else self.candidate_name
+        config=self.configuration(name);numeric=self.refit and config.get('numeric_refinement',{}).get('enabled',False)
         needs=runtime_needs(config,refit=self.refit and not numeric)
         if needs:raise ValueError('\n'.join(needs)+'\n기존 설치 환경의 Reconstruction 설정을 복원하세요. 자동 설치하지 않습니다.')
         if not numeric and self.account and self.account.get('logged_in'):
             codex_cli.selection_args(self.model.currentText(),self.effort.currentData(),self.account['models'])
-        if (self.project.root/'working/run.lock').exists():raise ValueError('이 Project가 실행 중입니다. 기존 작업 종료 후 재개하세요.')
+        from real2sim_builder.candidate import project_busy
+        if project_busy(self.project):raise ValueError('이 Project가 실행 중입니다. 기존 작업 종료 후 재개하세요.')
+        if self.fresh_run:
+            from .candidate import Candidate,exclusive
+            with exclusive(self.project):
+                Candidate.create(self.project,name)
+                self.project.control('resume')
+            index=self.candidate.findData(name)
+            if index<0:
+                self.candidate.insertItem(0,name+' · 실행 전',name)
+                index=0
+            self.candidate.setCurrentIndex(index)
+            self.fresh_run=False
         if self.temporary:self.temporary.cleanup()
         self.temporary=tempfile.TemporaryDirectory(prefix='real2sim-reconstruct-')
         path=Path(self.temporary.name)/'configuration.yaml';write(path,config)
-        args=['refit-pairs'if self.refit else'reconstruct',str(self.project.root),'--candidate',self.candidate.text(),'--config',str(path)]
+        args=['refit-pairs'if self.refit else'reconstruct',str(self.project.root),'--candidate',self.candidate_name,'--config',str(path)]
         if not numeric:args+=['--run-modeling']
         if self.refit:args+=['--scene-state',config.get('scene_state_id','')]
         if not numeric:self.preferences.setValue('model',self.model.currentText());self.preferences.setValue('effort',self.effort.currentData()or'')
@@ -311,8 +402,9 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         env.insert('PYTHONPATH',os.pathsep.join(paths));env.remove('PYTHONHOME');env.insert('PYTHONNOUSERSITE','1');env.insert('PYTHONDONTWRITEBYTECODE','1')
         env.insert('REAL2SIM_CODEX_HOME',codex_cli.environment()['CODEX_HOME'])
         env.insert('REAL2SIM_CODEX_MODEL',self.model.currentText());env.insert('REAL2SIM_CODEX_EFFORT',self.effort.currentData()or'')
-        self.report_started=True;self.report_mtime=(self.project.root/'scratch/agent'/self.candidate.text()/'reconstruction.json').stat().st_mtime_ns if (self.project.root/'scratch/agent'/self.candidate.text()/'reconstruction.json').exists()else None
-        self.summary.setPlainText('저장된 입력으로 Scene 제작을 시작합니다.')
+        self.report_started=True;self.report_mtime=(self.project.root/'scratch/agent'/self.candidate_name/'reconstruction.json').stat().st_mtime_ns if (self.project.root/'scratch/agent'/self.candidate_name/'reconstruction.json').exists()else None
+        self.summary.clear();self.started_at=time.monotonic();self.stage_seen=None;self.stage_since=None
+        self.elapsed.setText('이번 실행 00:00 · 시작 중');self.elapsed.show()
         self.process.setProcessEnvironment(env);self.process.start(self.python,['-B','-m','real2sim_builder.cli',*args])
 
     def request_stop(self):
@@ -325,10 +417,19 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         self.summary.setPlainText('실행 실패 · '+self.process.errorString());self.controls()
 
     def update_progress(self):
-        root=self.project.root/'scratch/agent'/self.candidate.text()
+        root=self.project.root/'scratch/agent'/self.candidate_name
         try:
             state=self.project.state;report=json.loads((root/'reconstruction.json').read_text())if(root/'reconstruction.json').is_file()else{}
-            stages=report.get('stages',{});stage=state.get('stage')if self.busy() else None
+            stages=report.get('stages',{});stage=state.get('stage')if self.busy() and state.get('candidate') in (None,self.candidate_name) else None
+            if self.busy() and self.started_at is not None:
+                now=time.monotonic()
+                if stage!=self.stage_seen:self.stage_seen=stage;self.stage_since=now
+                total=int(now-self.started_at)
+                text=f'이번 실행 {total//60:02d}:{total%60:02d}'
+                if stage and self.stage_since is not None:
+                    seconds=int(now-self.stage_since)
+                    text+=f' · 현재 단계 {seconds//60:02d}:{seconds%60:02d}'
+                self.elapsed.setText(text+' · 실행 중')
             if self.refit and report.get('pipeline')=='numeric-pairs/1':
                 self.current.setText('수치 정합 반복 '+str(report.get('current_iteration',0))+' · 개선 채택 '+str(report.get('accepted_iterations',0))+' · Best/Current 별도 보존')
                 if not self.busy():self.show_report(report)
@@ -340,7 +441,13 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
                     if label.text()!=text:label.setText(text)
                 active=int(stage[6:])if stage and stage.startswith('STAGE_')else report.get('failed_stage')
                 title=STAGE_NAMES[active-1]if type(active)is int and 1<=active<=14 else report.get('status','대기')
-                self.current.setText('현재 작업: '+('Stage '+str(active)+' · 'if active else'')+title)
+                if report or stage:
+                    caption=self.run_caption(self.candidate_name,report,active)
+                    if caption!=self.candidate.currentText():
+                        self.candidate.setItemText(self.candidate.currentIndex(),caption)
+                operation=state.get('last_worker_operation') if self.busy() and stage else None
+                detail=f' · 최근 호출 {operation}' if operation else ''
+                self.current.setText('현재 작업: '+('Stage '+str(active)+' · 'if active else'')+title+detail)
                 if not self.busy()and report and not self.report_started:self.show_report(report)
                 return
 
@@ -365,7 +472,27 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
         except (OSError,ValueError,KeyError):pass  # Atomic writer may be replacing a record.
 
     def open_evidence(self):
-        path=self.project.root/'scratch/agent'/self.candidate.text()/'evidence/index.html'
+        path=self.project.root/'scratch/agent'/self.candidate_name/'evidence/index.html'
+        candidate=path.parent.parent
+        if not self.refit and (candidate/'reconstruction/simfoundry/cache.json').is_file() and candidate.resolve().is_relative_to(self.project.root.resolve()):
+            if getattr(self,'dashboard_job',None) and self.dashboard_job.state()!=QProcess.ProcessState.NotRunning:
+                return
+            destination=Path(tempfile.mkdtemp(prefix='real2sim-evidence-'))/'dashboard'
+            job=QProcess(self)
+            self.dashboard_job=job
+            env=QProcessEnvironment.systemEnvironment()
+            roots=[str(Path(__file__).resolve().parents[1]),str(Path(__file__).resolve().parents[3]/'scene_contract/src')]
+            env.insert('PYTHONPATH',os.pathsep.join(roots+[env.value('PYTHONPATH')]))
+            job.setProcessEnvironment(env)
+            def finished(code,*_):
+                if code==0 and (destination/'index.html').is_file():
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(destination/'index.html')))
+                else:
+                    self.summary.setPlainText('제작 기록 열기 실패 · '+bytes(job.readAllStandardError()).decode(errors='replace')[-500:])
+            job.finished.connect(finished)
+            job.errorOccurred.connect(lambda _: self.summary.setPlainText(job.errorString()))
+            job.start(self.python,['-B','-m','real2sim_builder.evidence_dashboard',str(candidate),str(destination)])
+            return
         if path.is_file()and not path.is_symlink()and path.resolve().is_relative_to(self.project.root.resolve()):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         else:self.summary.setPlainText('아직 생성된 제작 기록이 없습니다. 실행한 단계부터 실제 결과를 보존합니다.')
@@ -386,8 +513,10 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
                 self.summary.appendPlainText('반복 '+str(row['iteration']+1)+' · '+('Best 채택'if row['accepted']else'Best 유지')+' · '+'; '.join(values))
 
     def finished(self,code,*_):
+        if self.started_at is not None:
+            seconds=int(time.monotonic()-self.started_at);self.elapsed.setText(f'이번 실행 {seconds//60:02d}:{seconds%60:02d} · 종료');self.started_at=None
         self.discard_output();self.report_started=False
-        root=self.project.root/'scratch/agent'/self.candidate.text();path=root/'reconstruction.json'
+        root=self.project.root/'scratch/agent'/self.candidate_name;path=root/'reconstruction.json'
         if path.is_file() and path.stat().st_mtime_ns!=getattr(self,'report_mtime',None):self.show_report(read(path))
         elif code:self.summary.setPlainText('실행 실패 · 종료 코드 '+str(code))
         if self.temporary:self.temporary.cleanup();self.temporary=None
@@ -399,6 +528,6 @@ QProgressBar::chunk { background:#0b8f83; border-radius:4px; }
             self.pending_close=True;self.request_stop()
             if self.auth_process.state()!=QProcess.ProcessState.NotRunning:self.auth_process.terminate()
             event.ignore();return
-        self.timer.stop();self.usage_timer.stop()
+        self.timer.stop()
         if self.temporary:self.temporary.cleanup()
         event.accept()

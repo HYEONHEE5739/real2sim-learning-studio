@@ -9,8 +9,9 @@ from real2sim_builder.files import read
 from real2sim_builder.stage_artifacts import StageNeeds
 
 
-def prepared(tmp_path):
+def prepared(tmp_path,*,protected_size=True):
     c,config,previous,folder,_,_,_=selection_case(tmp_path)
+    if not protected_size:del config['objects']['block']['geometry']
     provider,calls=preview_provider(c,previous,folder)
     preview=stages.semantic_preview(c,config,previous,folder/'semantic',provider)
     previous[3]={'semantic_preview':preview,'selected_index':0,'selected_frame_id':previous[1]['frames'][0]['id']}
@@ -19,15 +20,23 @@ def prepared(tmp_path):
     return c,config,previous,folder,preview
 
 
-def test_stage5_freezes_real_observation_contract_without_repeating_preview_models(tmp_path):
-    c,config,previous,folder,preview=prepared(tmp_path);output=folder/'stage5';output.mkdir();calls=[]
+@pytest.mark.parametrize('protected_size',[False,True])
+def test_stage5_freezes_real_observation_contract_without_repeating_preview_models(tmp_path,protected_size):
+    c,config,previous,folder,preview=prepared(tmp_path,protected_size=protected_size);output=folder/'stage5';output.mkdir();calls=[]
     class StopBeforeGeneration(Exception):pass
     def provider(operation,request,path):
         calls.append(operation)
         assert operation=='removal','No extra VLM/SAM/FLUX/DA3 forward is allowed'
         raise StopBeforeGeneration()
-    with pytest.raises(StopBeforeGeneration):stages.decompose(c,config,previous,output,provider)
-    assert calls==['removal']
+    if protected_size:
+        with pytest.raises(StageNeeds,match='exceeds declared bounding diagonal'):
+            stages.decompose(c,config,previous,output,provider)
+        assert calls==[]
+    else:
+        # Exercise the original detailed-mesh handoff without a conflicting
+        # caliper measurement. Both cases retain the same input observations.
+        with pytest.raises(StopBeforeGeneration):stages.decompose(c,config,previous,output,provider)
+        assert calls==['removal']
     progress=read(output/'iteration_000/object_progress.json')
     assert set(progress['objects'])=={'block'}
     assert next(r for r in progress['semantic_coverage']if r['id']=='robot')['status']=='CONTEXT_ONLY'

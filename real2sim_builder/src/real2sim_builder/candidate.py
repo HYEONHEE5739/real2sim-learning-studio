@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import copy
 from .scene import empty, identifier, local_path, validate
+import fcntl
 import os
 from .files import read, sha, write
 import shutil
@@ -13,24 +14,65 @@ import shutil
 _held_projects=ContextVar('builder_held_projects',default=frozenset())
 
 
+def project_busy(project):
+    working = project.root / 'working'
+    fd = os.open(working, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return _legacy_owner_active(working / 'run.lock')
+    finally:
+        os.close(fd)
+
+
+def _legacy_owner_active(marker):
+    if not marker.exists():
+        return False
+    owner = marker.read_text().strip()
+    if owner.startswith('flock '):
+        return False  # Caller already holds the OS lock.
+    if not owner.isdecimal() or int(owner) <= 0:
+        return True
+    try:
+        os.kill(int(owner), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
 @contextmanager
 def exclusive(project):
     project.require_writable()
-    if project.root in _held_projects.get():
+    owner = (os.getpid(), project.root)
+    if owner in _held_projects.get():
         yield
         return
-    lock = project.root / 'working/run.lock'
+    working = project.root / 'working'
+    marker = working / 'run.lock'
+    fd = os.open(working, os.O_RDONLY)
     try:
-        with lock.open('x') as stream:
-            stream.write(str(os.getpid()))
-    except FileExistsError:
-        raise RuntimeError('Project is busy; stop the active worker before editing')
-    token=_held_projects.set(_held_projects.get()|{project.root})
-    try:
-        yield
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError('Project is busy; stop the active worker before editing') from error
+        if _legacy_owner_active(marker):
+            raise RuntimeError('Project is busy or has an unresolved legacy owner')
+        # Atomic replacement avoids an empty owner marker after abrupt exit.
+        tmp = working / '.writer-owner.tmp'
+        tmp.write_text('flock ' + str(os.getpid()))
+        os.replace(tmp, marker)
+        token = _held_projects.set(_held_projects.get() | {owner})
+        try:
+            yield
+        finally:
+            _held_projects.reset(token)
+            marker.unlink(missing_ok=True)
     finally:
-        _held_projects.reset(token)
-        lock.unlink(missing_ok=True)
+        os.close(fd)
 
 
 class Candidate:

@@ -6,6 +6,7 @@ and resumption stay in automation. Heavy dependencies cross stage_runtime only.
 from pathlib import Path
 import copy
 import json
+import time
 import numpy as np
 from .files import read, write, sha
 from .stage_artifacts import StageNeeds, digest as stage_digest
@@ -556,7 +557,7 @@ def bind_memo_constraints(candidate, config, analysis, folder, provider):
                 'Interpret the exact Memo, including group cardinality and shared dimensions. Bind each group to every existing member with actual '
                 'Scene Photo evidence. Do not substitute image/reference IDs for Object IDs, or merge/split instances. '
                 'Use exact unique source_quote spans and literal value_quote number+unit; zero tilt may quote a bare 0 in degrees. '
-                'shared_dimension quantities are cube_edge_length, upper_rim_diameter, height. Upper rim diameter is NEVER bottom/internal diameter or wall. '
+                'shared_dimension quantities are cube_edge_length, upper_rim_diameter, bottom_diameter, wall_thickness, height. Upper rim diameter is NEVER bottom/internal diameter or wall. '
                 'rectangle_border requires outer_x/outer_y/inner_x/inner_y/border_width together; inward border is not Z thickness. '
                 'pair_spacing requires exactly two receptacles with edge gap and center distance; explicitly list PARALLEL_AXES, EQUAL_RIM_HEIGHT, '
                 'CIRCULAR_UPPER_RIMS as assumptions, not verified facts. Do not issue pose moves. '
@@ -632,12 +633,15 @@ def decompose(candidate, config, previous, folder, provider):
         rgb=a['image'][index].copy();z=a['depth'][index].copy();K=a['intrinsics'][index]
     original_rgb=rgb.copy();rgb_source=np.zeros(z.shape,np.uint8);depth_source=np.zeros(z.shape,np.uint8)
     with np.load(previous[2]['prediction'])as a:confidence=a['conf'][index].copy()
-    h,w=z.shape;memo=scene_memo(candidate.project);objects=[];removed=[];history=[];gate_outcomes=[]
+    h,w=z.shape;memo=scene_memo(candidate.project);objects=[];removed=[];observed_direct=set();history=[];gate_outcomes=[]
     limits=config.get('decomposition',{});maximum=limits.get('max_objects',20)
     if type(maximum)is not int or not 1<=maximum<=100:raise ValueError('Invalid bounded decomposition budget')
     if any(type(limits.get(k,False))is not bool for k in('observed_only','repair_memo_constraints')):
         raise ValueError('Explicit boolean observation/correction policy required')
     current=folder/'initial.png';Image.fromarray(rgb).save(current)
+    from .adaptive_geometry import build_plan, DIRECT
+    semantic_specs={}
+    prediction_sha=sha(previous[2]['prediction'])
     retained=preview_instances(previous)
     if retained and retained['scene_analysis']['memo_sha256']!=memo['sha256']:
         raise ValueError('Retained semantic preview Scene Memo SHA changed')
@@ -679,11 +683,12 @@ def decompose(candidate, config, previous, folder, provider):
                 from .authoring import _codex_guidance,parse_visual_scene_analysis
                 checked=parse_visual_scene_analysis(answer['scene_analysis'],memo,{r['id']for r in records},
                     image_records=records,robot_links=context['robot_links'])
+                semantic_specs=checked['objects']
                 analysis_record={'path':str(path),'sha256':sha(path),'memo_sha256':memo['sha256'],
                     'guidance_sha256':_codex_guidance()[1]['sha256'],'source_images':records,
                     'validation':checked['validation'],'deferred_constraints':checked['deferred']}
             proposals_cache=answer['objects']
-        active=[o for o in proposals_cache if o['id']not in removed]
+        active=[o for o in proposals_cache if o['id']not in removed and o['id'] not in observed_direct]
         if not active:
             if detection_calls>=minimum:
                 if not objects:raise StageNeeds('NEEDS_MORE_DATA','VLM found no reconstruction objects')
@@ -779,6 +784,68 @@ def decompose(candidate, config, previous, folder, provider):
                 'unresolved':bound['unresolved']if bound else[],'generated_rgb_depth':False}
             write(folder/'observation-inputs.json',result)
             return result
+        specs=(bound or {}).get('objects') or (previous[3].get('semantic_preview') or {}).get('objects') or semantic_specs
+        from .authoring import geometry_specs
+        declared={r['id']:r for r in geometry_specs(config,candidate.scene)}
+        plans={}
+        for obj in proposals:
+            name=obj['id'];spec={**specs.get(name,{}),**config.get('objects',{}).get(name,{})}
+            if name in declared:spec['geometry']=declared[name]
+            sources={'frame_id':previous[3]['selected_frame_id'],'rgb_sha256':sha(current),
+                     'mask_sha256':snapshots[name]['mask_sha256'],'observed_sha256':snapshots[name]['sha256'],
+                     'memo_sha256':memo['sha256'],'analysis_sha256':(analysis_record or {}).get('sha256')}
+            frame=previous[2]['frames'][index]
+            sources.update(frame_sha256=frame['sha256'],original_source_sha256=frame.get('source_sha256'),
+                           prediction_sha256=prediction_sha)
+            start=time.monotonic()
+            plan=build_plan(candidate.project,obj,spec,snapshots[name]['observed'],sources)
+            observed_geometry=specs.get(name,{}).get('geometry') or {}
+            visual_kind=observed_geometry.get('kind')
+            if observed_geometry.get('provenance') in ('calibrated','measured') and name in declared:
+                pairs=zip(observed_geometry['dimensions_m'],declared[name]['dimensions_m'])
+                if any(a is not None and b is not None and not np.isclose(a,b,rtol=1e-9,atol=1e-12) for a,b in pairs):
+                    plan.update(route='needs_review',reason='Bound measurement contradicts protected dimensions',status='NEEDS_REVIEW')
+            if visual_kind and plan['route'] in ('primitive','parametric') and visual_kind!=plan['kind']:
+                plan.update(route='needs_review',reason='Observed and declared shape types conflict',status='NEEDS_REVIEW')
+            plan['planning_s']=time.monotonic()-start
+            plans[name]=plan
+        write(step/'geometry_build_plan.json',plans)
+        held=[name for name,plan in plans.items() if plan['route']=='needs_review']
+        if held:
+            raise StageNeeds('NEEDS_REVIEW','; '.join(n+': '+plans[n]['reason'] for n in held),
+                            code='GEOMETRY_BUILD_REVIEW',classification='OBJECT_REVIEW',scope='object',object_ids=held)
+        # Skip a removal only when every requested target has an observation,
+        # its image box is separated from the other targets, and no relationship
+        # requires exposing another surface. Unknown coverage retains removal.
+        required={n for n,spec in specs.items() if spec['role'] in ('manipulable_object','receptacle','workspace')}
+        required.update(n for n,spec in config.get('objects',{}).items()
+                        if spec.get('role') in ('manipulable_object','receptacle','workspace'))
+        if retained:
+            required.update(row['id'] for row in retained['coverage'] if row['applicable_to_decomposition'])
+        complete_coverage=bool(required) and required<=ids|set(removed)|observed_direct
+        independent={o['id'] for o in proposals if plans[o['id']]['route'] in DIRECT}
+        if not complete_coverage or iteration or any(o.get('relations') or o.get('support') in ids for o in proposals):
+            independent.clear()
+        for i,obj in enumerate(proposals):
+            box=obj['box_xyxy']
+            for other in proposals[i+1:]:
+                b=other['box_xyxy']
+                if box[0]<=b[2] and b[0]<=box[2] and box[1]<=b[3] and b[1]<=box[3]:
+                    independent.difference_update((obj['id'],other['id']))
+        remaining=[]
+        for obj in proposals:
+            name=obj['id'];plan=plans[name];obj['geometry_build_plan']=plan
+            if name not in independent:
+                plan['removal']='retain_occlusion_workflow';remaining.append(obj);continue
+            observed_direct.add(name)
+            plan['removal']='skipped_separate_observed_target'
+            objects.append({**obj,'mask':masks[name]['path'],'observed':snapshots[name]['observed'],
+                            'observed_rgb':str(current),'source_frame_id':previous[3]['selected_frame_id'],'iteration':iteration,
+                            'provenance':'original_rgb_model_estimated_depth','model_reference_ids':[],'original_pixel_agreement':1.})
+        write(step/'geometry_build_plan.json',plans)
+        if not remaining:break
+        proposals=remaining;ids={o['id'] for o in remaining}
+        clouds=[c for c in clouds if c['id'] in ids]
         result=provider('removal',{'objects':clouds,'camera_to_world':T.tolist()},step/'order')
         order=result['order']
         if not isinstance(order,list)or len(order)!=len(ids)or set(order)!=ids:raise ValueError('Invalid occlusion/support removal ordering')
@@ -798,6 +865,7 @@ def decompose(candidate, config, previous, folder, provider):
         from .calibration.decomposition import removal_annotation,removal_is_valid,removal_region
         region=removal_region(mask)
         edit_mask=step/'edit_region.png';Image.fromarray(region.astype('uint8')*255).save(edit_mask)
+        preserved=sorted((ids | observed_direct)-{name})
         attempts=[];edited=None
         modes=limits.get('removal_prompt_order',['mask','outline','bbox']);tries=limits.get('removal_attempts',3)
         if not isinstance(modes,list)or not modes or len(modes)>3 or any(m not in('mask','outline','bbox')for m in modes)or type(tries)is not int or not 1<=tries<=3:raise ValueError('Original bounded removal retry policy required')
@@ -810,7 +878,7 @@ def decompose(candidate, config, previous, folder, provider):
                 edit=provider('image_edit',{'image':str(annotation),'original_image':str(current),'mask':str(edit_mask),
                     'prompt':'Remove only '+obj['prompt']+' and its cast shadow. Reconstruct the surface and background that it occludes, preserving visible texture, lighting and perspective.',
                     'task':'removal','image_edit_role':'removal','annotation_mode':mode,
-                    'object_id':name,'scene_context':memo['text'],'preserve_objects':[o['id']for o in proposals if o['id']!=name],
+                    'object_id':name,'scene_context':memo['text'],'preserve_objects':preserved,
                     'object_prompt':obj['prompt'],'seed':seed},step/'rgb_inpaint'/mode/('seed_'+str(seed)))
                 image=np.asarray(Image.open(edit['path']).convert('RGB'))
                 if image.shape!=rgb.shape:image=cv2.resize(image,(w,h),interpolation=cv2.INTER_LINEAR)
@@ -824,7 +892,7 @@ def decompose(candidate, config, previous, folder, provider):
                             evidence=removal_evidence(edit,before=current,mask=edit_mask,object_mask=masks[name]['path'])
                             write(step/'removal_pixels.json',evidence)
                             review=provider('vlm',{'images':[str(current),str(edit_mask),edit['path']],'task':'removal_validity',
-                                'response_schema':removal_review_schema(),'context':{'memo_sha256':memo['sha256'],'object_id':name,'preserved_ids':[o['id']for o in proposals if o['id']!=name],'pixel_evidence':evidence},
+                                'response_schema':removal_review_schema(),'context':{'memo_sha256':memo['sha256'],'object_id':name,'preserved_ids':preserved,'pixel_evidence':evidence},
                                 'prompt':'Compare before and edited RGB. Confirm the target '+obj['prompt']+
                                 ' is actually absent, its shadow is removed and the exposed support is continuous. A vanished annotation alone is insufficient. '
                                 'Check object_remaining, other_objects_preserved, background_continuous, uncertainty and visible evidence. '
@@ -840,7 +908,7 @@ def decompose(candidate, config, previous, folder, provider):
                 if edited is not None:break
             if edited is not None:break
         if edited is None:
-            pending=[o['id']for o in proposals if o['id']!=name]
+            pending=[o['id'] for o in proposals if o['id']!=name]
             progress['objects'][name].update(status='OBJECT_REVIEW',reason='REMOVAL_RETRIES_EXHAUSTED')
             progress.update(dependency_blocked=pending,dependency_evidence='Ordered next RGB depends on this accepted removal; independent observation snapshots remain available')
             write(step/'object_progress.json',progress)
@@ -907,6 +975,7 @@ def prepare_objects(candidate, config, previous, folder, provider):
     result=[];setting=config.get('image_preparation',{});size=setting.get('size',1024)
     if type(size)is not int or not 32<=size<=2048:raise ValueError('Invalid bounded object image size')
     for obj in previous[5]['objects']:
+        start=time.monotonic()
         candidate.project.checkpoint();out=folder/obj['id'];out.mkdir(exist_ok=True)
         with np.load(obj['observed'])as a:
             rgb=a['image'];mask=a['mask'];points,point_provenance=pose_point_selection(a,config.get('pose',{}))
@@ -936,7 +1005,8 @@ def prepare_objects(candidate, config, previous, folder, provider):
             Image.fromarray(resized).save(path)
             crops[name]={'path':str(path),'crop_xyxy':[x0,y0,x1,y1],'padding_xy':[dx,dy],'size':size,'sha256':sha(path)}
         enhanced=None;provider_crop=None;infilled=None;validity={'status':'NOT_VERIFIED'};validity_gate=None
-        if setting.get('upsample',True) or setting.get('infill',False):
+        direct=obj.get('geometry_build_plan',{}).get('route') in ('primitive','parametric','existing_asset')
+        if not direct and (setting.get('upsample',True) or setting.get('infill',False)):
             description=provider('image_edit',{'task':'describe','image_edit_role':'objects'},out/'provider_metadata')
             if description.get('supported')is False:
                 raise StageNeeds('NOT_SUPPORTED','Image provider has no original Stage6 native ratio contract; preserve Stage5 results')
@@ -988,18 +1058,27 @@ def prepare_objects(candidate, config, previous, folder, provider):
         original_cloud=out/'original_points.npz';np.savez_compressed(original_cloud,camera_points=original_points,uv_processed=np.c_[xx_original,yy_original])
         final=enhanced or infilled or crops['focus']
         prepared_image={'path':final['path'],'sha256':sha(final['path']),'source':'enhanced'if enhanced else'infilled'if infilled else'observed_crop','depth_frame':'observed_original_only'}
-        result.append({**obj,'crops':crops,'prepared_image':prepared_image,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'validity_gate':validity_gate,'camera_points':str(cloud),
+        result.append({**obj,'image_preparation_s':time.monotonic()-start,'image_generation_skipped':direct,'crops':crops,'prepared_image':prepared_image,'provider_crop':provider_crop,'enhanced':enhanced,'infilled':infilled,'validity':validity,'validity_gate':validity_gate,'camera_points':str(cloud),
             'point_provenance':point_provenance,'original_points':str(original_cloud),'original_point_provenance':original_provenance})
         write(folder/'object_progress.json',{'objects':result,'status':'PARTIAL','physical_verified':False})
     return {'objects':result,'selected_frame_id':previous[5]['selected_frame_id'],
             'coordinate_frame':'object crop pixels / observed selected optical Camera XYZ',
-            'upsampling_executed':setting.get('upsample',True)}
+            'upsampling_executed':any(o.get('enhanced') for o in result)}
+
+
+def mesh_options(config):
+    keys=('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s','modeling','support_asset',
+          'measurements','scene_state_id','scene_analysis','task','fitting_feedback','reconstruction_memo','refit_mode')
+    return {key:copy.deepcopy(config[key]) for key in keys if key in config}
 
 
 def meshes(candidate, config, previous, folder, provider):
     """Use the existing Codex + Sandbox Blender boundary for Mesh only."""
     from . import authoring
     from .calibration.hybrid import surface_mesh
+    path=candidate.root/'reconstruction-config.yaml'
+    local=copy.deepcopy(config)
+    config=mesh_options(config)
     objects=previous[6]['objects'];expected={o['id']for o in objects}
     if len(expected)!=len(objects):raise ValueError('Duplicate Stage6 modeling Object ID')
     preview=previous[3].get('semantic_preview')
@@ -1029,10 +1108,6 @@ def meshes(candidate, config, previous, folder, provider):
         missing=required-expected
         if missing and not(bound and partial_inputs):raise StageNeeds('NEEDS_REVIEW','Scene Memo Objects have no modeling observations: '+', '.join(sorted(missing)),
             code='MEMO_OBJECT_MISSING',classification='OBJECT_REVIEW',scope='object',object_ids=sorted(missing))
-    path=candidate.root/'reconstruction-config.yaml'
-    local=read(path)if path.is_file()else copy.deepcopy(config)
-    for key in('codex','modeling','execute_modeling','max_modeling_calls'):
-        if key in config:local[key]=copy.deepcopy(config[key])
     local['authoring_mode']='codex'
     local['stage_source_views']=[{**frame,'path':Path(frame['path']).relative_to(candidate.project.root).as_posix(),
         'camera':frame['source_camera']or 'reference_'+frame['id'],'camera_type':'external','split':'train'}for frame in previous[1]['frames']]
@@ -1092,6 +1167,30 @@ def meshes(candidate, config, previous, folder, provider):
             local['composition_feedback']['deferred_instance_ids']=sorted(
                 set(local['composition_feedback']['deferred_instance_ids'])|deferred)
             local['objects']={n:s for n,s in local['objects'].items()if n in expected}
+    from .adaptive_geometry import create_asset
+    geometry_times={}
+    for obj in objects:
+        plan=obj.get('geometry_build_plan') or {}
+        if plan.get('route') in ('primitive','parametric'):
+            start=time.monotonic()
+            candidate.project.update(last_worker_operation='Geometry · '+obj['id']+' · '+plan['route'])
+            from .object_assets import verify_object_asset
+            from .scene import local_path
+            receipt=folder/obj['id']/'registered.json'
+            key=stage_digest({k:v for k,v in plan.items() if k!='planning_s'})
+            if receipt.is_file():
+                saved=read(receipt)
+                manifest=local_path(candidate.project.root,saved['manifest'])
+                if saved['plan']!=key or sha(manifest)!=saved['manifest_sha256']:
+                    raise ValueError('Completed geometry input or asset identity changed')
+                asset=verify_object_asset(candidate.project,read(manifest))
+            else:
+                asset=create_asset(candidate.project,plan,receipt.parent)
+                write(receipt,{'plan':key,'manifest':asset['manifest'],
+                               'manifest_sha256':sha(local_path(candidate.project.root,asset['manifest']))})
+            local['objects'][obj['id']]['asset_manifest']=asset['manifest']
+            geometry_times[obj['id']]=time.monotonic()-start
+            local['objects'][obj['id']].pop('modeling_action',None)
     maximum=config.get('max_modeling_calls',6)
     state_path=folder/'calls.json';calls=read(state_path)['calls']if state_path.is_file()else 0
     while True:
@@ -1101,6 +1200,7 @@ def meshes(candidate, config, previous, folder, provider):
         if not config.get('execute_modeling',False):raise StageNeeds('NEEDS_RUNTIME','Codex Mesh authoring requires explicit run-modeling execution')
         if calls>=maximum:raise StageNeeds('NEEDS_RUNTIME','Codex modeling call budget reached; completed assets retained')
         # Persist attempted-call accounting even when authentication/quota fails.
+        modeling_start=time.monotonic()
         try:
             response=authoring.run_codex_modeling(candidate,timeout_s=config.get('modeling_timeout_s',900))
         except Exception as error:
@@ -1108,6 +1208,11 @@ def meshes(candidate, config, previous, folder, provider):
             if isinstance(error,InterruptedError):raise
             if getattr(error,'code',None):raise StageNeeds('NEEDS_RUNTIME','Codex '+str(error.code)+'; assets and stage calls retained',code=error.code)from None
             raise
+        call_history=folder/'modeling_history.json'
+        records=read(call_history) if call_history.is_file() else []
+        records.append({'elapsed_s':time.monotonic()-modeling_start,'reused':bool(response.get('reused')),
+                        'status':response.get('status'),'groups':list(task.get('groups',{}))})
+        write(call_history,records)
         if not response.get('reused'):calls+=1
         write(state_path,{'calls':calls})
         if response['status']=='ANALYZED_OBJECT_PROPOSALS':
@@ -1130,15 +1235,16 @@ def meshes(candidate, config, previous, folder, provider):
         file=folder/(obj['id']+'.obj');mesh.export(file,file_type='obj')
         constraints=node['dimensions'].get('constraints',{})
         measured=node['dimensions']['provenance']in('measured','calibrated')or any(v is not None for v in constraints.get('value',constraints.get('dimensions_m',[])))
-        result.append({**obj,'mesh':str(file),'mesh_sha256':sha(file),'asset_reference':node.get('object_asset'),
+        result.append({**obj,'geometry_creation_s':geometry_times.get(obj['id']),'mesh':str(file),'mesh_sha256':sha(file),'asset_reference':node.get('object_asset'),
                        'scale_protected':measured,'pose_owner':'Stage8','source_dimensions':node['dimensions']})
-    return {'objects':result,'modeling_calls':calls,'coordinate_frame':'native Object-local mesh in m',
+    return {'objects':result,'modeling_history':read(folder/'modeling_history.json') if (folder/'modeling_history.json').exists() else [],'modeling_calls':calls,'coordinate_frame':'native Object-local mesh in m',
             'world_pose_authored_by_codex':False}
 
 
 def poses(candidate, config, previous, folder, provider):
     result=[];review=[]
     for obj in previous[7]['objects']:
+        start=time.monotonic()
         candidate.project.checkpoint()
         if obj.get('point_provenance',{}).get('selected_points',10)<10:
             review.append(obj['id']);continue
@@ -1179,9 +1285,11 @@ def poses(candidate, config, previous, folder, provider):
         from .calibration.canonicalization import native_tilt,native_yaw_snap
         import trimesh
         options=config.get('pose',{});candidates=fit.get('candidate_fits',[fit]);gravity=np.asarray(previous[4]['camera_to_support'])[:3,:3].T@np.array([0.,0,1.])
-        tilt,tilt_info=native_tilt([x['rotation']for x in candidates],gravity,enabled=options.get('bake_fitted_tilt','auto'),shape_model='codex_blender')
+        tilt,tilt_info=native_tilt([x['rotation']for x in candidates],gravity,enabled=options.get('bake_fitted_tilt','auto'),shape_model=('native' if obj.get('geometry_build_plan',{}).get('route') in ('primitive','parametric','existing_asset') else 'codex_blender'))
         canonical=tilt;orientation={'tilt':tilt_info,'front':{'status':'DISABLED'},'symmetry':'NOT_VERIFIED'}
-        if options.get('canonicalize_front',True):
+        symmetric=obj.get('geometry_build_plan',{}).get('route') in ('primitive','parametric')
+        if symmetric:orientation['symmetry']='Geometry-equivalent rotations unresolved without appearance anchors'
+        if not symmetric and options.get('canonicalize_front',True):
             front=provider('canonicalize',{'mesh':obj['mesh'],'tilt_rotation':tilt.tolist(),'photo':obj.get('observed_rgb'),
                 'category':obj.get('prompt'),'refine':bool(options.get('front_refine',True)and tilt_info['status']=='baked')},folder/obj['id']/'front')
             f=np.asarray(front['rotation']);canonical=f@tilt;orientation['front']=front['front']
@@ -1193,7 +1301,7 @@ def poses(candidate, config, previous, folder, provider):
             raise StageNeeds('NEEDS_REVIEW','Canonical rotation changes protected dimension axes; explicit measured-axis mapping required')
         fit={**fit,'rotation':(r@canonical.T).tolist()}
         orientation['rotation']=canonical.tolist();orientation['world_geometry_preserved']=True
-        result.append({**obj,'fit':fit,'canonicalization':orientation,'status':'UNVERIFIED','coordinate_frame':'selected optical Camera'})
+        result.append({**obj,'pose_matching_s':time.monotonic()-start,'fit':fit,'canonicalization':orientation,'status':'UNVERIFIED','coordinate_frame':'selected optical Camera'})
         write(folder/'object_progress.json',{'objects':result,'review':review,'accuracy':'NOT_VERIFIED'})
     if review:
         write(folder/'object_progress.json',{'objects':result,'review':review,'accuracy':'NOT_VERIFIED'})
@@ -1637,8 +1745,16 @@ def package_scene(candidate, config, previous, folder, provider):
     validate_configuration(config)
     # This is an explicitly UNVALIDATED review package, not automatic promotion.
     package=folder/'package'
+    revision='simfoundry-review-'+candidate.name+'-'+folder.name
     if package.exists():
         identity=verify_package(package).identity
+        provenance=read(package/'provenance.json')
+        if (identity.scene_id!=candidate.project.info['id'] or identity.revision!=revision
+                or provenance.get('candidate')!=candidate.name
+                or provenance.get('input_signature')!=candidate.project.signature(candidate.scene)):
+            raise ValueError('Published package does not match pending Candidate inputs')
+        from .registration import register_export
+        register_export(candidate.project,package)
     else:
         report={'passed':False,'input_signature':candidate.project.signature(candidate.scene),
                 'pipeline':'simfoundry/1','validation_scope':'NOT_VERIFIED',
@@ -1650,11 +1766,11 @@ def package_scene(candidate, config, previous, folder, provider):
         if metrics.exists()and not(folder/'prior_metrics.json').exists():write(folder/'prior_metrics.json',read(metrics))
         write(metrics,report)
         identity=export_revision(candidate.project,destination=package,candidate=candidate.name,
-                                 allow_unvalidated=True,revision='simfoundry-review-'+folder.name,
+                                 allow_unvalidated=True,revision=revision,
                                  native_options=config.get('simulator',{}).get('native_options'))
     spec=read(package/'scene.json')
     records=candidate.project.info.get('execution_packages',[])
-    registered=next((r for r in records if r['manifest_sha256']==identity.manifest_sha256),{})
+    registered=next(r for r in records if r['manifest_sha256']==identity.manifest_sha256 and (candidate.project.root/r['path']).resolve()==package.resolve())
     return {'package':str(package),'identity':asdict(identity),'approved':False,'candidate_promoted':False,
             'physical_verified':False,'coordinate_frame':previous[10]['coordinate_frame'],
             'execution_mode':'native',
@@ -1663,16 +1779,18 @@ def package_scene(candidate, config, previous, folder, provider):
 
 
 def simulator_integration(candidate, config, previous, folder, provider):
-    from .export import verify_package
+    from .registration import register_export
     from .cameras import camera_roles
     from .stage_runtime import validate_configuration
     validate_configuration(config)
-    verify_package(previous[13]['package'])
+    registered=register_export(candidate.project,previous[13]['package'])
+    if registered['manifest_sha256']!=previous[13]['identity']['manifest_sha256']:
+        raise ValueError('Stage 13 package identity changed')
     scene=candidate.scene;roles=camera_roles(scene,candidate.project.evidence['images'])
     sensors=[name for name,role in roles.items()if role in('side','wrist')]
     engine=config.get('simulator',{}).get('engine','mujoco')
     if engine not in('mujoco','isaac'):raise ValueError('Unsupported simulator')
-    settings=previous[13].get('engine_config',{}).get(engine)
+    settings=registered['engine_config'].get(engine)
     if not settings:
         readiness=previous[13].get('native_readiness',{}).get(engine,{})
         raise StageNeeds('NEEDS_MORE_DATA','Native '+engine+' is not ready: '+'; '.join(readiness.get('needs',['No loader-checked execution settings'])))

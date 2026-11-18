@@ -131,6 +131,10 @@ def datagen_settings(plan,catalog):
     elif plan.engine=='isaac':
         from ..engines.isaac.source import settings_for as resolve
     else:raise ValueError('Unsupported DataGen engine')
+    active=tuple(catalog.execution.get('active_objects',()))
+    if (tuple(recorded.get('active_object_ids',()))!=active or len(set(active))!=len(active)
+            or not set(plan.object_order)<=set(active) or not set(active)<=plan.scene.scene['objects'].keys()):
+        _fail('inputs.dataset.active_objects','Recorded active objects conflict with the model or requested objects',code='INPUT_CONFLICT')
     inherited=resolve(plan,recorded)
     if 'engine_config'not in plan.input_documents:return inherited
 

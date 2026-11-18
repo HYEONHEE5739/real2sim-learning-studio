@@ -92,7 +92,14 @@ def register_export(project,package_path,*,source_project_id=None):
     project.require_writable();root=Path(package_path).resolve();package=verify_package(root)
     with exclusive(project):
         info=read(project.root/'project.yaml');rows=info.get('execution_packages',[])
-        if any((project.root/r['path']).resolve()==root for r in rows):raise ValueError('Export already registered; revisions are immutable')
+        existing=None
+        for entry in rows:
+            same_path=(project.root/entry['path']).resolve()==root
+            same_revision=(entry['scene_id'],entry['revision'])==(package.identity.scene_id,package.identity.revision)
+            if same_path or same_revision:
+                if existing or not(same_path and same_revision and entry['manifest_sha256']==package.identity.manifest_sha256):
+                    raise ValueError('Conflicting immutable native revision')
+                existing=entry
         settings={};created=[];profiles={}
         try:
             for engine in package.scene['engines']:
@@ -112,7 +119,10 @@ def register_export(project,package_path,*,source_project_id=None):
             row={'path':root.relative_to(project.root).as_posix()if root.is_relative_to(project.root)else str(root),'scene_id':package.identity.scene_id,'revision':package.identity.revision,
                  'manifest_sha256':package.identity.manifest_sha256,'source_project_id':source_project_id or project.info['id'],'engine_config':settings}
             row.update(engine_profiles=profiles,execution_readiness=read(root/'scene.json')['validation']['native_readiness'])
-            write(project.root/'project.yaml',{**info,'execution_packages':[*rows,row]})
+            if existing is None:
+                write(project.root/'project.yaml',{**info,'execution_packages':[*rows,row]})
+            elif existing!=row:
+                raise ValueError('Registered native profile differs from verified package')
         except BaseException:
             for path in created:path.unlink(missing_ok=True)
             raise

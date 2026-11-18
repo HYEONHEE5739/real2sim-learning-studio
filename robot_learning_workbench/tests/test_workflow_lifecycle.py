@@ -157,3 +157,24 @@ assert p.handle is None and not p.active()and not p.start_button.isEnabled()
 assert '변경'in p.state.text()or 'identity'in p.state.text()
 p.close()
 ''',tmp_path)
+
+
+def test_real_observation_frame_count_in_running_and_terminal_ui(tmp_path):
+    qt('''
+import json,sys
+from pathlib import Path
+from PyQt6.QtWidgets import QApplication
+from robot_learning_workbench.ui.workflow import WorkflowPage
+app=QApplication([]);root=Path(sys.argv[1]);page=WorkflowPage('real_evaluation','/no/worker','modules');page.timer.stop();page.context={}
+page.handle={'run_id':'run','request_id':'request','run_dir':str(root),'output_path':str(root/'output')}
+record=dict(status='running',phase='running',request_id='request',run_id='run',completed_episodes=0,progress={'measured_frames':2})
+(root/'run.json').write_text(json.dumps(record))
+page.poll()
+assert page.progress_text.text()=='관측 2 프레임',(page.progress_text.text(),page.state.text())
+record.update(status='completed',phase='terminal',attempt_summary={'frames':3})
+(root/'run.json').write_text(json.dumps(record))
+page.poll()
+assert '관측 3 프레임' in page.state.text(),page.state.text()
+assert 'Episode' not in page.state.text()
+page.close()
+''',tmp_path)

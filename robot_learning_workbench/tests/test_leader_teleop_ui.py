@@ -12,7 +12,7 @@ p.client.running=True;p.client.stage='paired_session';sent=[];p.client.send=lamb
 p.update_progress({'session_state':'CONNECTING','teleoperation_available':True});app.processEvents();assert sent==[]
 p.update_progress({'session_state':'OBSERVING','teleoperation_available':True});app.processEvents()
 assert [row[0]for row in sent]==['teleop_start']
-p.update_progress({'session_state':'OBSERVING','teleoperation_available':True});app.processEvents();assert len(sent)==1
+p.update_progress({'session_state':'OBSERVING','teleoperation_available':True});app.processEvents();assert len(sent)==1 and not p.connect_button.isEnabled()
 p.update_progress({'session_state':'TELEOP_ACTIVE','teleop_active':True,'teleoperation_available':True});w.tabs.setCurrentIndex(0);app.processEvents()
 assert sent[-1][0]=='teleop_stop'
 p.client.running=False;w.close();app.processEvents()

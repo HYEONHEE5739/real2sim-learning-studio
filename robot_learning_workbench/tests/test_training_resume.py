@@ -16,3 +16,25 @@ def test_closed_official_resume_prepares_new_output_with_explicit_checkpoint(tmp
     assert '--resume=true' in argv and '--steps=4' in argv
     assert argv[argv.index('--resume=true')-1].endswith(str(checkpoint/'pretrained_model/train_config.json'))
     assert not (tmp_path/'new').exists()
+
+
+def test_cross_device_checkpoint_retry(tmp_path,monkeypatch):
+    import os,tempfile
+    from types import SimpleNamespace
+    from robot_learning_workbench.learning import train
+    from robot_learning_workbench.data.native import file_sha256
+    with tempfile.TemporaryDirectory(dir='/dev/shm') as source:
+        root=Path(source)
+        assert root.stat().st_dev!=tmp_path.stat().st_dev
+        cfg=root/'pretrained_model/train_config.json';cfg.parent.mkdir();cfg.write_text('{}')
+        weights=root/'weights';weights.write_bytes(b'measured fixture')
+        files={p.relative_to(root).as_posix():file_sha256(p) for p in (cfg,weights)}
+        monkeypatch.setattr(train,'checkpoint_record',lambda _:dict(files=files))
+        plan=SimpleNamespace(output_path=tmp_path/'train',effective_settings={'execution':{'mode':'resume'}},resolved_inputs={'checkpoint':{'path':root}})
+        files['weights']='invalid'
+        with pytest.raises(ValueError):train.freeze_inputs(plan,['--config_path=initial'],{})
+        assert not (tmp_path/'train.resume-input').exists()
+        files['weights']=file_sha256(weights)
+        args=train.freeze_inputs(plan,['--config_path=initial'],{})
+        assert Path(args[0].split('=',1)[1]).read_text()=='{}'
+        assert file_sha256(tmp_path/'train.resume-input/weights')==files['weights']

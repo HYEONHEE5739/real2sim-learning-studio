@@ -28,6 +28,9 @@ def test_raw_slots_return_before_sim_completion_without_growing_total_backlog(tm
         queue.request(dict(command_id='raw'+str(i),payload={}))
         job=queue.jobs['pair_raw'+str(i)]
         folder=tmp_path/job['id'];folder.mkdir();(folder/'COMPLETE').touch()
+        from real2sim_builder.files import write
+        write(folder/'capture_manifest.yaml',{'snapshots':[{'id':job['id'],'path':'.'}]})
+        write(folder/'metadata.json',{'files':{}})
         writer.futures[-1].set_result(dict(id=job['id'],staging=str(folder),sample=job['sample'],observed=[],quality=[]))
         queue.poll()
     progress=queue.progress()

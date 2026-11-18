@@ -90,3 +90,30 @@ def test_equivalent_angle_representation_does_not_drop_an_extra_joint(tmp_path,s
     plan,catalog=inputs(tmp_path,scene,engine,lambda cfg:cfg['initial_joint_rad'].append(0.))
     with pytest.raises(recipe.RecipeError,match='initial_joint_rad'):
         datagen_settings(plan,catalog)
+
+
+@pytest.mark.parametrize('engine',['mujoco','isaac'])
+def test_recorded_model_must_contain_each_selected_active_object(tmp_path,scene,engine):
+    from robot_learning_workbench.data.recording import datagen_settings
+    plan,catalog=inputs(tmp_path,scene,engine,None)
+    changed=recipe._plain(catalog.execution)
+    changed['model_config']['active_object_ids']=[]
+    with pytest.raises(ValueError,match='[Aa]ctive'):
+        datagen_settings(plan,replace(catalog,execution=changed))
+
+
+@pytest.mark.parametrize('engine',['isaac','mujoco'])
+def test_extra_dynamic_object_survives_annotation_to_generation(tmp_path,scene,engine):
+    from robot_learning_workbench.data.recording import datagen_settings,replay_settings
+    plan,catalog=inputs(tmp_path,scene,engine,None)
+    execution=recipe._plain(catalog.execution)
+    execution.update(stage='source',task_objects=['cube_red'],active_objects=['cube_red','cube_blue'])
+    execution['model_config']['active_object_ids']=list(execution['active_objects'])
+    with NativeRun(tmp_path/'source-extra',execution):pass
+    source=load_catalog(tmp_path/'source-extra')
+    cfg=replay_settings(replace(plan,stage='annotation'),source)
+    with NativeRun(tmp_path/'annotation-extra',{**source.execution,'stage':'annotation','model_config':cfg}):pass
+    annotation=load_catalog(tmp_path/'annotation-extra')
+    generated=recipe._plain(datagen_settings(plan,annotation))
+    assert annotation.execution['task_objects']==['cube_red']
+    assert generated['active_object_ids']==source.execution['active_objects']

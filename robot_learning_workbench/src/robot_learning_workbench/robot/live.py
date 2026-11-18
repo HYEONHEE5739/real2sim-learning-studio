@@ -61,6 +61,8 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
     if opts.get('enable_motion') or mode not in ('observe_only','live_capture'):
         raise DataError('ARM_MOTION_NOT_APPROVED','execution','ARM_MOTION_NOT_APPROVED: live workers collect observations only')
     if plan.stage not in('capture','real_evaluation'):raise ValueError('Live Real/Sim uses paired_session; real_sim is offline inspection only')
+    if plan.stage=='real_evaluation' and opts.get('episodes',1)!=1:
+        raise ValueError('Observation-only Real Eval requires episodes=1')
     verify_prepared_inputs(plan)
     frames=opts.get('max_frames',1)
     if type(frames)is not int or frames<1:raise ValueError('Positive observation max_frames required')
@@ -74,14 +76,19 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
     if policy is not None:
         from ..data.native import digest
         report['policy']={'identity':digest(record),'step':record.get('step'),'control_contract':contract}
+    started=time.monotonic()
+    limit=opts.get('timeout_s') if plan.stage=='real_evaluation' else None
     try:
         device.connect();report['hardware_connected']=True
         for camera in cameras.values():camera.start()
-        stability=Stability();started=time.monotonic();deadline=started+3
+        stability=Stability();deadline=time.monotonic()+3
         while cameras and any(camera.nearest() is None for camera in cameras.values()):
+            if limit is not None and time.monotonic()-started>=limit:raise TimeoutError('Observation timeout waiting for camera')
             if time.monotonic()>deadline:raise ValueError('Camera startup timeout')
             time.sleep(.01)
         for index in range(frames):
+            if limit is not None and time.monotonic()-started>=limit:
+                raise TimeoutError('Observation timeout before requested frame count')
             begin=time.monotonic()
             for command in commands():
                 kind=command['kind']
@@ -107,12 +114,14 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
                 rows[-1].update(policy_action_model_rad=action.tolist(),inference_s=time.perf_counter()-inference_start,
                     observation_latency_s=(time.monotonic_ns()-t)/1e9,policy_queue_depth=action_queue_depth(policy))
             if rgb:
-                images.append(rgb)
+                if mode=='live_capture':images.append(rgb)
                 from ..data import video
                 if video._preview_sink is not None:
                     for name,image in rgb.items():video._preview_sink(name,image,index,(t-rows[0]['timestamp_ns'])/1e9,0)
             events({'kind':'status','payload':{'progress':{'measured_frames':len(rows),'arm_commands':0}}})
-            time.sleep(max(0,1/30-(time.monotonic()-begin)))
+            if limit is not None and time.monotonic()-started>=limit:
+                raise TimeoutError('Observation exceeded requested timeout')
+            if index+1<frames:time.sleep(max(0,1/30-(time.monotonic()-begin)))
         report.update(frames=len(rows),observations=rows,identity=device.identity,mapping=device.precision_mapper.metadata(),
             camera_metadata={n:c.metadata for n,c in cameras.items()},elapsed_s=time.monotonic()-started,
             measured_hz=len(rows)/(time.monotonic()-started),status='cancelled'if cancelled else 'HARDWARE_READ_VERIFIED')
@@ -144,7 +153,7 @@ def run(plan: 'PreparedRun', *, events: Callable[[dict],None], commands: Callabl
         atomic_json(plan.output_path/'hardware-report.json',report)
         return StageResult('cancelled'if cancelled else 'completed',(str(plan.output_path),),0,{'frames':len(rows),'arm_commands':0,'command_sent':False})
     except Exception as error:
-        report.update(status='FAILED',frames=len(rows),observations=rows,error=str(error))
+        report.update(status='FAILED',frames=len(rows),elapsed_s=time.monotonic()-started,observations=rows,error=str(error))
         plan.output_path.mkdir(exist_ok=True)
         atomic_json(plan.output_path/'hardware-report.json',report)
         raise

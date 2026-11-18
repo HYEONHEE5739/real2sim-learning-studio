@@ -27,7 +27,8 @@ def own_file(source,target,workspace,records):
 def migrate_authoring(source,workspace,name):
     """Recreate lifecycle/identity; preserve valid source evidence and candidate inputs."""
     source=Project(source,read_only=True);workspace=Path(workspace).resolve();records=[]
-    if(source.root/'working/run.lock').exists():raise ValueError('Source has an unresolved active writer')
+    from real2sim_builder.candidate import project_busy
+    if project_busy(source):raise ValueError('Source has an unresolved active writer')
     project=Project.create(workspace/'scenes',name)
     # Input snapshots already have internal hashes; their bytes and relative closure stay intact.
     for file in sorted((source.root/'input').rglob('*')):

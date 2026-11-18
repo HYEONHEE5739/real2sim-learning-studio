@@ -63,3 +63,28 @@ def test_real_observe_policy_performs_official_path_but_never_sends(tmp_path,mon
     assert record['command_sent'] is False
     assert record['status']==('FAILED'if fail_second else'HARDWARE_READ_VERIFIED')
     if fail_second:assert 'second inference'in record['error']
+
+
+def test_observe_only_rejects_multiple_episodes_before_loading_policy(tmp_path,monkeypatch):
+    from robot_learning_workbench import recipe
+    monkeypatch.setattr(recipe,'verify_prepared_inputs',lambda _:None)
+    monkeypatch.setattr(live,'policy_bundle',lambda _:pytest.fail('unsupported episodes reached policy preparation'))
+    plan=NS(stage='real_evaluation',effective_settings={'execution':{'mode':'observe_only','episodes':2}})
+    with pytest.raises(ValueError,match='episodes'):live.run(plan,events=lambda _:None,commands=lambda:())
+
+
+def test_real_observation_reports_actual_count_on_timeout(tmp_path,monkeypatch):
+    from robot_learning_workbench import recipe
+    from robot_learning_workbench.learning import policy
+    device,_,trace=make(tmp_path);device.read_only=True
+    monkeypatch.setattr(recipe,'verify_prepared_inputs',lambda _:None)
+    monkeypatch.setattr(live,'open_inputs',lambda p:(device,{}))
+    monkeypatch.setattr(live,'policy_bundle',lambda p:(NS(reset=lambda:None),None,None,{},{}))
+    monkeypatch.setattr(policy,'observation_batch',lambda *a,**k:{})
+    monkeypatch.setattr(policy,'infer',lambda *a,**k:np.zeros((1,6)))
+    options={'mode':'observe_only','episodes':1,'max_frames':100,'timeout_s':0.05}
+    plan=NS(stage='real_evaluation',effective_settings={'execution':options},output_path=tmp_path/'out')
+    with pytest.raises(TimeoutError):live.run(plan,events=lambda _:None,commands=lambda:())
+    report=json.loads((plan.output_path/'hardware-report.json').read_text())
+    assert report['status']=='FAILED' and 0<report['frames']<100
+    assert 'send' not in trace

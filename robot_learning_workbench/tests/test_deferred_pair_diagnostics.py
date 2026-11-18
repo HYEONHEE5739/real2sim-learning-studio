@@ -69,3 +69,10 @@ dialog.close();app.processEvents()
 assert not folder.exists()
 ''',tmp_path)
     assert originals=={str(p.relative_to(root)):file_sha256(p)for p in root.rglob('*')if p.is_file()}
+
+
+def test_pair_is_separate_from_raw_metadata(tmp_path):
+    import json
+    root,_,_=pair_fixture(tmp_path)
+    assert set(json.loads((root/'metadata.json').read_text())['files'])=={'side.png','wrist.png'}
+    assert (root/'pair-manifest.json').is_file()

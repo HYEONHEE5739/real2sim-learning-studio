@@ -343,25 +343,16 @@ def freeze_capture(session,command,sequences):
 
 def share_model(root, model):
     """Share the existing portable model closure; never mutate source assets."""
-    import os,hashlib,xml.etree.ElementTree as ET
+    import os
+    from real2sim_builder.export import verify_native_closure
+    from ..data.native import link_or_copy_verified,file_sha256
     root=Path(root);model=Path(model).resolve()
-    dependencies=set()
-    def visit(path):
-        path=path.resolve()
-        if not path.is_file():raise ValueError('Missing model dependency: '+str(path))
-        if path in dependencies:return
-        dependencies.add(path)
-        if path==model or path.suffix.lower()=='.urdf':
-            for node in ET.parse(path).iter():
-                reference=node.get('filename') or node.get('file')
-                if reference:
-                    if Path(reference).is_absolute() or '://'in reference:raise ValueError('Portable relative model dependencies required')
-                    visit(path.parent/reference)
-    visit(model)
+    dependencies=verify_native_closure(Path(model.anchor),model)
     common=Path(os.path.commonpath([str(p.parent)for p in dependencies]));files={}
     for source in dependencies:
         relative=Path("model")/source.relative_to(common);target=root/relative;target.parent.mkdir(parents=True,exist_ok=True)
-        os.link(source,target);files[relative.as_posix()]=hashlib.sha256(target.read_bytes()).hexdigest()
+        expected=file_sha256(source)
+        link_or_copy_verified(source,target,expected);files[relative.as_posix()]=expected
     return (Path("model")/model.relative_to(common)).as_posix(),files
 
 

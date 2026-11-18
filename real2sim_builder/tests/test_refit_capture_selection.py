@@ -271,7 +271,6 @@ def gui_probe(tmp_path, mode):
         class ProbeDialog(original_dialog):
             def exec(self):
                 self.timer.stop()
-                self.usage_timer.stop()
                 self.start.click()  # actual Qt signal -> run -> launch -> config
                 assert seen, self.summary.toPlainText()
                 return 0

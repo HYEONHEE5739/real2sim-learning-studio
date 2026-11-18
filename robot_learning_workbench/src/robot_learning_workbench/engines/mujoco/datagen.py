@@ -21,7 +21,6 @@ def load_inputs(plan):
     validate_recording(catalog.execution.get('recording',{}))
     if 'partition' not in catalog.execution or catalog.execution['partition'] is None:raise ValueError('Explicit Annotation partition identity required')
     cfg=datagen_settings(plan,catalog)
-    if tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Explicit generation creation order must match annotated model')
     acceptance=plan.function_bindings['acceptance']
     from ...tasks.execution import mimic_objects
     obj,target=mimic_objects(plan);conf=mimic.configuration(obj,target,plan.effective_settings['execution']['seed'])

@@ -123,7 +123,9 @@ class Teleoperation:
                          measured_model_rad=q.tolist(),feedback_interval=feedback,leader_interval=leader_interval,send_begin_ns=begin)
             attempt['timing_ms'].update(identity=(checked-now)/1e6,feedback_age=(begin-feedback['end']['monotonic_ns'])/1e6,
                                         leader_age=(begin-leader_interval['end']['monotonic_ns'])/1e6,preflight=(begin-now)/1e6)
-            if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:raise ValueError('Stale feedback/Leader command')
+            if begin-feedback['end']['monotonic_ns']>100_000_000 or begin-leader_interval['end']['monotonic_ns']>100_000_000:
+                timing=attempt['timing_ms']
+                raise ValueError(f"Stale feedback/Leader command (Follower {timing['feedback_age']:.1f} ms, Leader {timing['leader_age']:.1f} ms; limit 100 ms)")
             if self.cancelled():raise ValueError('Teleoperation stopped before Goal transmission')
             if begin-now>200_000_000:raise ValueError('Control deadline exceeded before Goal transmission')
             if not duplicate:

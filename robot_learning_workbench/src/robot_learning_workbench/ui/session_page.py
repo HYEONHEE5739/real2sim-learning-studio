@@ -19,7 +19,7 @@ class CapturePage(QWidget):
         super().__init__(parent);self.setObjectName('sessionPage');self.workspace=Path(workspace);self.project=None;self.last_progress={};self.finishing=False;self.materials_saving=False;self.project_buttons=[]
         self.client=SessionClient(python,modules,self);self.settings=DeviceSetup(workspace,python,modules,self);self.job=BackendJob(python,self);self.job.finished.connect(self.project_result);self.job.process.stateChanged.connect(lambda _:self.buttons(self.client.running))
         self.client.progress.connect(self.update_progress);self.client.received.connect(self.event_received);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.terminal.connect(self.ended)
-        self.settings.calibration_client.terminal.connect(self.calibration_ended);self.request_control=False
+        self.settings.calibration_client.terminal.connect(self.calibration_ended);self.request_control=False;self.start_pending=False
         self.session_layout=LiveSessionLayout(self);layout=self.session_layout.content_layout
         title=QLabel('1. Scene Prepare');title.setObjectName('dashboardTitle');self.session_layout.header.insertWidget(0,title)
         subtitle=QLabel('새 프로젝트를 만들고 초기 입력·실측 이미지·Scene 메모를 모읍니다.');layout.addWidget(subtitle)
@@ -69,15 +69,16 @@ class CapturePage(QWidget):
         self.catalog_job=BackendJob(python,self);self.catalog_job.finished.connect(self.projects_loaded)
         self.catalog_job.start('source_scenes',workspace=str(self.workspace))
     def active(self):return self.client.active()or self.settings.calibration_client.active()
-    def cancel_run(self):self.request_control=False;self.client.cancel();self.settings.calibration_client.cancel()
+    def cancel_run(self):self.start_pending=False;self.request_control=False;self.client.cancel();self.settings.calibration_client.cancel()
     def buttons(self,connected):
         from PyQt6.QtCore import QProcess
         idle=not self.active()and not self.finishing and self.job.process.state()==QProcess.ProcessState.NotRunning
         connected=connected and not self.finishing and not self.client.cancel_requested
         progress=self.last_progress
-        restart=connected and progress.get('session_state')=='OBSERVING'and progress.get('teleoperation_available',False)and not progress.get('teleop_active',False)
+        starting=self.request_control or self.start_pending
+        restart=not starting and connected and progress.get('session_state')=='OBSERVING'and progress.get('teleoperation_available',False)and not progress.get('teleop_active',False)
         self.connect_button.setEnabled(idle and self.project is not None and self.settings.saved_recipe is not None or restart)
-        self.connect_button.setText('Teleop 활성'if connected and progress.get('teleop_active')else'Teleop 다시 시작'if restart else'연결됨'if connected else'연결 중…'if self.active()else'로봇 연결 · Teleop')
+        self.connect_button.setText('Teleop 활성'if connected and progress.get('teleop_active')else'Teleop 시작 중…'if connected and starting else'Teleop 다시 시작'if restart else'연결됨'if connected else'연결 중…'if self.active()else'로봇 연결 · Teleop')
         reason=''
         if self.finishing:reason='현재 연결 종료를 기다리세요.'
         elif self.active():reason='현재 Session이 연결 중이거나 실행 중입니다.'
@@ -163,6 +164,7 @@ class CapturePage(QWidget):
         self.project_combo.setCurrentIndex(self.project_combo.findData(data['project']));self.project_combo.blockSignals(False);self.project_path.setText(Path(data['project']).name);self.project_path.setToolTip(data['project'])
         self.buttons(False)
     def connect_session(self):
+        if not self.client.running:self.start_pending=False
         try:
             if self.client.running:
                 if self.isVisible()and self.last_progress.get('session_state')=='OBSERVING'and self.last_progress.get('teleoperation_available')and not self.finishing and not self.client.cancel_requested:self.send('teleop_start')
@@ -183,6 +185,9 @@ class CapturePage(QWidget):
     def send(self,kind,payload=None):
         try:
             if kind in('teleop_start','session_snapshot'):self.operation_message.clear();self.operation_message.hide()
+            if kind=='teleop_start':
+                if self.start_pending:return
+                self.start_pending=True;self.buttons(True)
             return self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
     def finish(self):
@@ -192,6 +197,7 @@ class CapturePage(QWidget):
         if self.finishing and not self.active():self.ended(status)
         else:self.buttons(self.client.running)
     def update_progress(self,progress):
+        if progress.get('teleop_active') or progress.get('error'):self.start_pending=False
         self.last_progress.update(progress);p=self.last_progress;state=p.get('session_state','CONNECTING');connected=state in('OBSERVING','TELEOP_ACTIVE','CAPTURING');self.buttons(connected);self.state.setText('종료 중…'if self.finishing else state)
         self.capture_hint.setVisible(connected and not self.finishing)
         from .view import capture_progress_text
@@ -229,9 +235,9 @@ class CapturePage(QWidget):
         if camera in self.previews:
             image=QImage.fromData(raw,b'PPM')
             if not image.isNull():self.previews[camera].setPixmap(QPixmap.fromImage(image))
-    def show_error(self,message):self.request_control=False;self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
+    def show_error(self,message):self.start_pending=False;self.request_control=False;self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
-        self.request_control=False
+        self.start_pending=False;self.request_control=False
         self.snapshot_table.finish_pending('연결 종료: 최종 저장·등록 완료를 확인하지 못했습니다. 원본 저장 경로를 확인하세요.')
         if self.finishing and self.settings.calibration_client.active():self.buttons(False);return
         if self.finishing:self.session_label.setText('종료 · 저장된 Snapshot '+str(len(self.rows))+'개 표시\n'+self.session_label.toolTip())
@@ -245,6 +251,6 @@ class CapturePage(QWidget):
     def rows(self):return self.snapshot_table.rows
     def stop_timers(self):self.client.timer.stop();self.settings.calibration_client.timer.stop()
     def hideEvent(self,event):
-        self.request_control=False
+        self.start_pending=False;self.request_control=False
         if self.client.running and self.client.stage=='capture_session':self.send('teleop_stop')
         super().hideEvent(event)

@@ -1,5 +1,6 @@
 """Native Isaac Source replay and post-step Task acceptance; no IK execution."""
 from pathlib import Path
+from ...recipe import workflow_sources
 import time
 import numpy as np
 from .source import record_frame,settings_for,model_identity
@@ -116,7 +117,7 @@ def run(plan,*,events,commands):
     from ...data.native import file_sha256
     urdf_sha=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf'])
     if catalog.execution.get('urdf_sha256',urdf_sha)!=urdf_sha:raise ValueError('Source robot model coordinates differ from replay URDF')
-    execution={**catalog.execution,'engine':'isaac','model_sha256':model_identity(plan.scene,settings),'urdf_sha256':urdf_sha,'model_config':settings,'replay_source_engine':catalog.execution.get('engine'),'physics_equivalence_verified':False,'stage':'annotation','source_dataset':_plain(catalog.identity),'annotation_mode':plan.effective_settings['execution']['mode'],'task_code':_plain(plan.effective_settings['task_modules_sha256']),'workflow_code':_plain(plan.effective_settings['code_files'])}
+    execution={**catalog.execution,'engine':'isaac','model_sha256':model_identity(plan.scene,settings),'urdf_sha256':urdf_sha,'model_config':settings,'replay_source_engine':catalog.execution.get('engine'),'physics_equivalence_verified':False,'stage':'annotation','source_dataset':_plain(catalog.identity),'annotation_mode':plan.effective_settings['execution']['mode'],'task_code':_plain(plan.effective_settings['task_modules_sha256']),'workflow_code':workflow_sources(plan.effective_settings['code_files'])}
     execution['recording']={**execution['recording'],'position_target_policy':'saturation_inward_v1','joint_targets_role':'applied'}
     env=None;saved=0;cancelled=False;reports=[]
     plan.output_path.parent.mkdir(parents=True,exist_ok=True)

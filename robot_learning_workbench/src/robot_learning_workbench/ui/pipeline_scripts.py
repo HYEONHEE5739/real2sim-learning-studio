@@ -44,6 +44,7 @@ def default_script(stage,workspace,engine):
         text+='# object / target에는 선택한 Scene의 물체 ID를 입력하세요. 다른 작업은 등록된 함수를 선언합니다.\n'
     if stage in ('datagen','simulation_evaluation'):
         text+='# objects에 사용할 선택형 작업 물체와 placement 함수를 선언하세요.\n'
+    if stage=='real_evaluation':text+='# 관측 세션 1회(episodes=1), max_frames는 관측 횟수, timeout_s는 선택한 관측 시간 제한(초)입니다.\n'
     if stage in ('simulation_evaluation','real_evaluation'):text+='# task_instruction에는 Policy가 수행할 실제 작업 문장을 입력하세요.\n'
     return text
 

@@ -33,7 +33,8 @@ p.connect_button.click();assert len(connections)==1 and sent==[]
 p.update_progress({'session_state':'CONNECTING','teleoperation_available':True});assert not sent
 p.update_progress({'session_state':'OBSERVING','teleoperation_available':True,'teleop_active':False});assert sent==['teleop_start']
 for _ in range(4):p.update_progress({'session_state':'OBSERVING','teleoperation_available':True,'teleop_active':False})
-assert sent==['teleop_start']
+assert sent==['teleop_start'] and not p.connect_button.isEnabled()
+assert '시작 중' in p.connect_button.text()
 p.update_progress({'session_state':'TELEOP_ACTIVE','teleop_active':True});assert not p.connect_button.isEnabled()
 p.update_progress({'session_state':'OBSERVING','teleop_active':False,'error':'Stale feedback/Leader command'})
 assert sent==['teleop_start'] and p.connect_button.isEnabled()

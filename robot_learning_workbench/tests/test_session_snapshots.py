@@ -81,7 +81,8 @@ def test_snapshot_store_repeats_without_reopening_devices_or_duplication(tmp_pat
     finally:f.close()
 
 
-def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_path):
+@pytest.mark.parametrize('interrupt',[None,'pair-manifest.json','registration'])
+def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_path,interrupt):
     from test_robot_lifecycle import make
     from test_precision_calibration import CURRENT
     from robot_learning_workbench.robot.snapshots import SnapshotStore
@@ -97,7 +98,34 @@ def test_pair_registration_keeps_prior_capture_bytes_and_original_identity(tmp_p
         rendered.update(applied_sim_joint_rad=[q+.05 for q in pending['sample']['q_measured']],sim_target_joint_rad=pending['sample']['q_measured'],
                         sim_joint_delta_rad=[.05]*6,physics_steps=10,total_physics_steps=50,simulation_time_s=.2,
                         state_application='native_physics_joint_target',sim_object_poses_world={'cube_red':np.eye(4).tolist()})
-        one=store.finish(pending,rendered=rendered);original=Path(one['path']);before={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
+        if interrupt:
+            import os
+            from robot_learning_workbench.robot import pairs
+            from real2sim_builder import capture
+            folder=Path(pending['staging'])
+            original={n:file_sha256(folder/n) for n in ('capture_manifest.yaml','metadata.json','state.json','side.png','wrist.png')}
+            child=os.fork()
+            if child==0:
+                try:
+                    if interrupt=='registration':
+                        capture.import_snapshots=lambda *a,**kw:os._exit(33)
+                    else:
+                        write=pairs.atomic_json
+                        def stop(path,*args):
+                            if path.name==interrupt:os._exit(33)
+                            return write(path,*args)
+                        pairs.atomic_json=stop
+                    store.finish(pending,rendered=rendered)
+                finally:os._exit(99)
+            assert os.waitstatus_to_exitcode(os.waitpid(child,0)[1])==33
+            if interrupt=='registration':
+                folder=next(store.directory.glob('capture*'))
+                pending.update(staging=None,path=str(folder))
+            loaded=load_session(folder)[1][0]
+            assert loaded['q_measured']==pending['sample']['q_measured']
+            assert all(file_sha256(folder/n)==v for n,v in original.items())
+            assert bool(loaded['images'][0].get('runtime_baseline'))==(interrupt=='registration')
+        one=store.finish(pending,rendered=None if interrupt=="registration" else rendered);original=Path(one['path']);before={str(p.relative_to(original)):file_sha256(p)for p in original.rglob('*')if p.is_file()}
         baseline=project.evidence['images'][0]['runtime_baseline'];assert(project.root/baseline['pair_path']).is_file()and(project.root/baseline['path']).is_file()
         assert baseline['sim_q_measured_rad']!=pending['sample']['q_measured']
         assert baseline['sim_target_joint_rad']==pending['sample']['q_measured']and baseline['physics_steps']==10
@@ -144,3 +172,18 @@ def test_snapshot_catalog_reads_each_saved_layout_without_merging_calibration(tm
     monkeypatch.setattr(capture,'load_snapshots',load)
     rows,errors=saved_snapshots(p)
     assert not errors and seen==['layout_a','layout_b']and [r['id']for r in rows]==seen
+
+
+def test_material_closure_survives_relocation(tmp_path):
+    from robot_learning_workbench.robot.capture import share_model
+    from real2sim_builder.export import verify_native_closure
+    src=tmp_path/'src';src.mkdir()
+    model=src/'rig.urdf'
+    model.write_text('<robot><mesh filename="body.obj"/><texture filename="label.png"/></robot>')
+    (src/'body.obj').write_text('mtllib body.mtl\n')
+    (src/'body.mtl').write_text('map_Kd body.png\n')
+    for name in ('label.png','body.png'):(src/name).write_bytes(name.encode())
+    entry,files=share_model(tmp_path/'package',model)
+    root=tmp_path/'moved';(tmp_path/'package').rename(root)
+    assert len(files)==5
+    verify_native_closure(root,root/entry)

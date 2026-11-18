@@ -224,7 +224,8 @@ class Project:
 def clone_project(source, destination):
     """Copy an existing authoring project to a new owned workspace, never edit it."""
     original=Project(source,read_only=True)
-    if (original.root/'working/run.lock').exists():
+    from real2sim_builder.candidate import project_busy
+    if project_busy(original):
         raise RuntimeError('Source project has an active or unresolved owner; cannot freeze a clone')
     destination=Path(destination).resolve()
     if destination.is_relative_to(original.root) or original.root.is_relative_to(destination):

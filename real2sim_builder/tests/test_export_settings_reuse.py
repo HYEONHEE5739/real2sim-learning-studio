@@ -63,3 +63,10 @@ def test_immutable_native_settings_are_never_overwritten_if_modified(tmp_path,mo
     info=read(project.root/'project.yaml');info['execution_packages']=[];write(project.root/'project.yaml',info)
     with pytest.raises(ValueError,match='settings'):registration.register_export(project,roots[0])
     assert path.read_bytes()==before
+
+
+def test_registered_revision_is_idempotent(tmp_path,monkeypatch):
+    project,roots=packages(tmp_path,monkeypatch)
+    expected=registration.register_export(project,roots[0])
+    assert registration.register_export(project,roots[0])==expected
+    assert project.info['execution_packages']==[expected]

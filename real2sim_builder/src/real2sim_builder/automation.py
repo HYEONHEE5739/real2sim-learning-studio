@@ -18,6 +18,8 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
     processing, control, signatures, publication and reuse are always real.
     """
     from pathlib import Path
+    import json, time
+    from .adaptive_geometry import POLICY
     from . import reconstruction_stages as processing
     from .stage_artifacts import StageArtifact, StageNeeds, STAGE_NAMES, manifest, verify_manifest, cache_key, digest
     from . import stage_runtime
@@ -28,6 +30,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
     with exclusive(project):
         selected=Candidate(project,candidate)if(project.root/'scratch/agent'/candidate/'candidate.json').is_file()else Candidate.create(project,candidate)
         selected.require_open()
+        cache_file=selected.root/'reconstruction/simfoundry/cache.json'
+        if cache_file.is_file() and read(cache_file).get('geometry_policy')!=POLICY:
+            raise ValueError('이 Candidate는 이전 제작 정책으로 시작했습니다. 기존 기록을 보존하고 새로 생성하세요.')
         from .scene import validate
         validate(selected.scene,project.root)
         if config.get('robot_rig'):
@@ -58,6 +63,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         inputs.extend(project.root/row['path']for row in selected_inputs)
         upstream=manifest(inputs,{'project':project.info['id'],'candidate':candidate,'scene_inputs':selected_inputs})
         index_path=root/'cache.json';index=read(index_path)if index_path.is_file()else{}
+        index['geometry_policy']=POLICY
+        from .stage_resume import checkpoint_identities, checkpoint_lineage
+        lineage=checkpoint_lineage(root,index)
         if index.get('candidate_scene_sha256')not in(None,digest(selected.scene)):
             raise ValueError('Candidate Scene changed outside the retained stage checkpoint; review before resuming')
         report_path=selected.root/'reconstruction.json'
@@ -68,14 +76,25 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
         if previous_report.get('pipeline')=='simfoundry/1'and previous_report.get('status')=='STOPPED':project.control('resume')
         data={};active=1;folder=None;identity={'kind':'mock'if worker is not None else'real'};subset={}
         keys={1:('scene_state_id','video_candidates'),2:('depth',),3:('support','z_far','objects'),4:('metric_anchors','world_registration'),
-              5:('objects','decomposition','scene_memo'),6:('image_preparation','pose'),7:('codex','objects','execute_modeling','max_modeling_calls','modeling_timeout_s'),
+              5:('objects','decomposition','scene_memo','measurements'),6:('image_preparation','pose'),7:(),
               8:('pose',),9:('articulation',),10:('world_registration','support_asset','sensor_registration','metric_anchors','capture_layouts'),11:('physics',),12:('physics',),13:('export','simulator'),14:('simulator',)}
         operations={1:('video',),2:('da3',),3:('support','vlm','segments'),4:(),5:('vlm','segments','removal','image_edit_removal','depth_inpaint','da3'),
                     6:('image_edit_objects','background_remove','vlm'),7:('blender',),8:('cpd','canonicalize','foundationpose'),9:('articulation',),10:(),11:('vlm',),12:('physics',),13:(),14:('simulator',)}
         handlers={1:processing.prepare,2:processing.depth,3:processing.support,4:processing.world,
                   5:processing.decompose,6:processing.prepare_objects,7:processing.meshes,8:processing.poses,9:processing.articulate,10:processing.compile_scene,
                   11:processing.simulation_ready,12:processing.stabilize,13:processing.package_scene,14:processing.simulator_integration}
+        def clock():
+            return time.time_ns(),time.monotonic_ns()
+
+        def event(operation,status,start,location,**extra):
+            row={'stage':active,'operation':operation,'status':status,'start_ns':start[0],
+                 'end_ns':time.time_ns(),'elapsed_s':(time.monotonic_ns()-start[1])/1e9,
+                 'location':str(location),'execution':identity.get('kind'),**extra}
+            with (root/'timing.jsonl').open('a',encoding='utf8') as stream:
+                stream.write(json.dumps(row,allow_nan=False)+'\n')
+
         def call(operation,request,folder):
+            started=clock()
             project.checkpoint()
             folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
             def normalized(node):
@@ -85,19 +104,30 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                     p=Path(node)
                     if p.is_file():return {'sha256':sha(p),'suffix':p.suffix}
                 return node
-            key=digest([operation,normalized(request),identity])
+            worker_input=normalized(request)
+            key=digest([operation,worker_input,cache_identities[0]])
             cache=folder/'worker-cache.json'
             if cache.is_file():
                 saved=read(cache)
-                if saved['key']!=key:raise ValueError('Incomplete worker input identity changed')
+                if not any(saved['key']==digest([operation,worker_input,i]) for i in cache_identities):raise ValueError('Incomplete worker input identity changed')
                 verify_manifest(saved['manifest'],output_root=folder)
                 response=folder/'response.json'
                 if (saved.get('execution')!=identity['kind']or not response.is_file()
                     or not any(Path(row['path'])==response.resolve()for row in saved['manifest']['files'])
                     or digest(saved['data'])!=digest(read(response))):
                     raise ValueError('Worker cache response integrity mismatch')
+                event(operation,'REUSED',started,folder)
                 return saved['data']
-            result=worker(operation,request,Path(folder))if worker is not None else stage_runtime.invoke(selected,config,operation,request,folder,provider=call)
+            detail=str(folder.relative_to(root)) if folder.is_relative_to(root) else folder.name
+            object_id=request.get('object_id') or (request.get('context') or {}).get('object_id')
+            description=[operation,object_id,request.get('task'),detail]
+            project.update(last_worker_operation=' · '.join(str(v) for v in description if v))
+            try:
+                result=worker(operation,request,Path(folder))if worker is not None else stage_runtime.invoke(selected,config,operation,request,folder,provider=call)
+            except Exception as exc:
+                event(operation,'STOPPED' if isinstance(exc,InterruptedError) else 'FAILED',started,folder)
+                raise
+            event(operation,'RETURNED',started,folder,task=request.get('task'))
             if not isinstance(result,dict):raise ValueError('Typed worker result mapping required')
             result={**result,'_execution':identity['kind']}
             write(folder/'response.json',result)
@@ -113,6 +143,13 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                               'completed_stages':[k for k,s in report['stages'].items()if s['status']=='COMPLETE']}
             index['candidate_scene_sha256']=digest(selected.scene);write(index_path,index)
             write(report_path,report)
+            if report['status']!='RUNNING':
+                from .evidence_dashboard import publish
+                try:
+                    publish(selected.root)
+                except Exception as exc:
+                    report['preview_error']=str(exc)
+                    write(report_path,report)
         def failure_record(status,error):
             import shutil
             failure=numbered_path(root/'failures'/('stage_'+str(active)),'attempt');failure.mkdir(parents=True)
@@ -126,8 +163,9 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
             artifact.validate(failure);write(failure/'artifact.json',artifact.to_dict());report['failure_artifact']=str(failure/'artifact.json')
         try:
             for stage in range(1,through_stage+1):
-                active=stage;folder=None
-                subset={k:config[k]for k in keys[stage]if k in config}
+                active=stage;folder=None;stage_started=clock()
+                subset=processing.mesh_options(config) if stage==7 else {k:config[k]for k in keys[stage]if k in config}
+                if stage in (5,6,7,8):subset['geometry_policy']=POLICY
                 if stage in(3,5,7):subset['scene_memo_sha256']=memo['sha256']
                 if stage in(3,5,7,10,14)and selected.scene.get('robot_rig'):
                     subset['robot_rig_identity']=copy.deepcopy(selected.scene['robot_rig'])
@@ -162,9 +200,16 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                     native_root=Path(native_spec.origin).parent if native_spec and native_spec.origin else None
                     identity['native_implementation_sha256']={str(p.relative_to(native_root)):sha(p)for p in native_root.rglob('*.py')}if native_root else{}
                 subset['schema']='simfoundry-stage/1'
-                signature=cache_key(stage,upstream,subset,identity)
+                cache_identities=list(checkpoint_identities(stage,identity))
+                signatures=[cache_key(stage,upstream,subset,i) for i in cache_identities]
+                signature=signatures[0]
                 cached=index.get(str(stage),{})
-                reusable=cached.get('key')==signature;compatibility=None
+                ancestor=lineage.get(stage)
+                if ancestor and str(ancestor)!=cached.get('artifact') and not (cached.get('pending') and cached.get('key') in signatures):
+                    raw=read(ancestor)
+                    if raw['input_manifest']==upstream and raw['config_identity']==digest(subset) and raw['runtime_identity'] in cache_identities:
+                        cached={'key':cache_key(stage,upstream,subset,raw['runtime_identity']),'artifact':str(ancestor)}
+                reusable=cached.get('key') in signatures;compatibility=None
                 if cached.get('artifact')and (reusable or stage in(1,2)):
                     path=Path(cached['artifact'])
                     if not path.resolve().is_relative_to(root.resolve()):raise ValueError('Stage artifact outside Candidate')
@@ -177,12 +222,13 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                             current_runtime=identity,saved_key=cached.get('key'))
                         reusable=compatibility is not None
                 if reusable and cached.get('artifact'):
+                    index[str(stage)]=cached
                     report['stages'][str(stage)]={'status':'COMPLETE','artifact':str(path),'reused':True,
                         **({'compatibility':compatibility}if compatibility else{})}
                 else:
                     project.checkpoint()
-                    project.update(status='RUNNING',stage='STAGE_'+str(stage),candidate=candidate,task=STAGE_NAMES[stage-1])
-                    if cached.get('key')==signature and cached.get('pending'):
+                    project.update(status='RUNNING',stage='STAGE_'+str(stage),candidate=candidate,task=STAGE_NAMES[stage-1],last_worker_operation=None)
+                    if cached.get('key') in signatures and cached.get('pending'):
                         folder=Path(cached['pending'])
                         if not folder.resolve().is_relative_to((root/f'stage_{stage:02d}').resolve()):raise ValueError('Pending stage outside Candidate')
                     else:
@@ -198,7 +244,7 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                             code='OBSERVED_INPUTS_READY',classification='OBJECT_REVIEW')
                     files=sorted(p for p in folder.rglob('*')if p.is_file())
                     artifact=StageArtifact.create(stage,'COMPLETE',upstream,manifest(files,output),
-                        runtime_identity=identity,config=subset,coordinate_frame=output.get('coordinate_frame','not_applicable'),
+                        runtime_identity=cache_identities[0],config=subset,coordinate_frame=output.get('coordinate_frame','not_applicable'),
                         warnings=output.get('warnings',[]))
                     artifact.validate(folder);path=folder/'artifact.json';write(path,artifact.to_dict())
                     index[str(stage)]={'key':signature,'artifact':str(path)};write(index_path,index)
@@ -206,9 +252,10 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                 index['candidate_scene_sha256']=digest(selected.scene);write(index_path,index)
                 if not report['stages'][str(stage)]['reused']:
                     from .visual_evidence import record
-                    images=sorted(p for p in path.parent.rglob('*.png'))[:12]
+                    images=[]  # The dashboard reads images from verified output manifests.
                     record(selected,'simfoundry_'+str(stage).zfill(2),'COMPLETE',images=images,files=[path],
                         summary=STAGE_NAMES[stage-1]+'; '+artifact.provenance['execution']+'; accuracy NOT_VERIFIED',details={'stage_id':stage,'execution':artifact.provenance['execution']})
+                event('stage','REUSED' if report['stages'][str(stage)]['reused'] else 'COMPLETE',stage_started,path)
                 data[stage]=artifact.output_manifest['data']
                 upstream=manifest([path],{'previous_output_sha256':artifact.output_sha256,'data':data[stage]})
                 publish_report()
@@ -219,12 +266,14 @@ def _run_stage_pipeline(project, *, candidate, config, worker=None, through_stag
                            candidate=candidate,task='Stage artifacts retained; accuracy remains separately verified')
             publish_report();return report
         except (StageNeeds,InterruptedError)as error:
+            event('stage','STOPPED' if isinstance(error,InterruptedError) else error.status,stage_started,folder)
             failure_record('STOPPED'if isinstance(error,InterruptedError)else error.status,error)
             report.update(status='STOPPED'if isinstance(error,InterruptedError)else error.status,failed_stage=active,needs=[str(error)],error_code=getattr(error,'code',None))
             report['gate']=getattr(error,'gate',None)
             project.update(status='STOPPED'if isinstance(error,InterruptedError)else'NEEDS_MORE_DATA',stage='STAGE_'+str(active),candidate=candidate,needs=report['needs'])
             publish_report();return report
         except Exception as error:
+            event('stage','FAILED',stage_started,folder)
             failure_record('FAILED',error)
             report.update(status='FAILED',failed_stage=active,error={'type':type(error).__name__,'message':str(error)})
             project.update(status='FAILED',stage='STAGE_'+str(active),candidate=candidate,error=str(error))

@@ -396,7 +396,7 @@ def create_robot_rig(source_urdf, assembly_manifest_path, destination, *, mount_
     compiler.set('strippath','false');compiler.set('discardvisual','false');compiler.set('fusestatic','false')
     # The copied original keeps its mesh layout, while the new URDF can refer to
     # that snapshot with portable relative paths. No original Joint is edited.
-    for node in variant.findall('.//mesh'):
+    for node in variant.findall('.//mesh')+variant.findall('.//texture[@filename]'):
         name=node.get('filename')
         if not name or name.startswith(('package://','/')):raise ValueError('Resolve Robot mesh paths before creating a Rig')
         node.set('filename',os.path.relpath((copied.parent/name).resolve(),target))

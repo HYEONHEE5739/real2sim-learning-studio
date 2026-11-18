@@ -105,7 +105,7 @@ def run(plan,*,events,commands):
     from ...robot.calibration import JOINTS,execution_urdf
     from .state import restore_episode
     verify_prepared_inputs(plan);cfg=resolved_model_config(plan)
-    if tuple(cfg.active_object_ids)!=tuple(plan.object_order):raise ValueError('Evaluation creation order differs from explicit engine configuration')
+    if not set(plan.object_order)<=set(cfg.active_object_ids):raise ValueError('Evaluation creation order differs from explicit engine configuration')
     model,b=build_model(plan.scene,cfg);data=mujoco.MjData(model);bundle=policy_inputs(plan,b.urdf_sha256)
     kin=bind_kinematics(execution_urdf(plan.scene),model_sha256=b.urdf_sha256,joint_order=JOINTS)
     execution=evaluation_execution(plan,execution_contract(plan,b,cfg),bundle[3]);previous=plan.resolved_inputs.get('resume_dataset')

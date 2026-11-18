@@ -17,13 +17,18 @@ class ResultsDialog(QDialog):
             shot=(root/selected[0]['path']).resolve()
             if not shot.is_relative_to(root)or not shot.is_dir():raise ValueError('Selected Snapshot path is missing or outside its Dataset')
             root=shot
-        self.files=sorted(p for p in root.rglob('*.png')if p.is_file());self.selection=QComboBox();layout.addWidget(self.selection)
+        from real2sim_builder.capture import snapshot_metadata
+        from real2sim_builder.scene import local_path
+        sealed=snapshot_metadata(root)['files'] if (root/'metadata.json').is_file() else None
+        self.files=(sorted(local_path(root,p) for p in sealed if p.endswith('.png')) if sealed is not None
+                    else sorted(p for p in root.rglob('*.png') if p.is_file()))
+        self.selection=QComboBox();layout.addWidget(self.selection)
         self.view=CameraView();layout.addWidget(self.view,3)
         for path in self.files:self.selection.addItem(str(path.relative_to(root)),str(path))
         self.selection.currentIndexChanged.connect(lambda _:self.view.show_image(self.selection.currentData())if self.selection.currentData()else None)
         if self.files:self.view.show_image(self.files[0])
         details=dict(row)
-        if (root/'pair.json').is_file():details['comparison']=json.loads((root/'pair.json').read_text())
+        if sealed is not None and 'pair.json' in sealed:details['comparison']=json.loads((root/'pair.json').read_text())
         if details.get('comparison',{}).get('comparison_images',{}).get('status')=='DEFERRED':
             button=QPushButton('비교 이미지 생성 · 원본 보존');layout.addWidget(button)
             self.comparison_temporary=QTemporaryDir()

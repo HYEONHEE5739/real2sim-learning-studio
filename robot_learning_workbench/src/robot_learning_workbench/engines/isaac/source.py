@@ -3,6 +3,8 @@
 https://isaac-sim.github.io/IsaacLab/v2.3.0/source/api/lab/isaaclab.envs.html
 """
 from pathlib import Path
+from ...recipe import workflow_sources
+from scene_contract.objects import present_objects
 import time
 import numpy as np
 from .state import initial_state,read_sample
@@ -104,10 +106,9 @@ def settings_for(plan,recorded=None):
     if raw is None:raise ValueError('Explicit Isaac engine_config required')
     settings=_plain(raw);settings.pop('package_root',None);validate_settings(settings)
     settings.setdefault('active_object_ids',list(plan.object_order));settings.setdefault('isaac',{'physics_timestep_s':1/300,'decimation':10})
-    if plan.stage in('source','datagen','simulation_evaluation')and not(plan.stage=='source'and recorded is not None):
+    if plan.stage in('source','datagen','simulation_evaluation')and recorded is None:
         from scene_contract.objects import active_objects
         settings['active_object_ids']=list(active_objects(plan.scene.scene,plan.object_order,settings['active_object_ids']))
-    if plan.stage=='datagen' and tuple(settings['active_object_ids'])!=tuple(plan.object_order):raise ValueError('Recipe object order differs from explicit engine configuration')
     if plan.stage=='source' and not set(plan.object_order)<=set(settings['active_object_ids']):raise ValueError('Source placement objects must be active in the Model')
     return settings
 
@@ -124,8 +125,8 @@ def execution_contract(plan,settings):
     from .env_cfg import execution_inputs
     from ...data.native import file_sha256
     return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),**({'source_functions':{k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}}if any(b.kind!='placement'for b in plan.function_bindings.values())else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='isaac',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),model_sha256=model_identity(plan.scene,settings),urdf_sha256=file_sha256(execution_inputs(plan.scene,settings)['robot_urdf']),
-        model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),partition='unpartitioned',
-        task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={k:v for k,v in plan.effective_settings['code_files'].items()},
+        model_config={k:v for k,v in settings.items() if k!='package_root'},active_objects=list(settings['active_object_ids']),static_environment=[name for name in present_objects(plan.scene.scene,settings['active_object_ids']) if name not in settings['active_object_ids']],partition='unpartitioned',
+        task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code=workflow_sources(plan.effective_settings['code_files']),
         rng_policy='entropy_placement_per_call_v1',recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(plan.scene.scene['robot']['joint_order']),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',task_phase='post_step',fps=30,resolution=[640,480],codec='libx264',crf=18))
 
 

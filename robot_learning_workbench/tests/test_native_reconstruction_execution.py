@@ -150,13 +150,25 @@ def test_native_stage14_uses_the_actual_owned_worker_entrypoint(tmp_path):
     assert all(Path(p).is_file()for p in response['data']['renders'])
 
 
-def test_actual_stage13_and14_keep_native_execution_separate_from_approval(tmp_path):
+@pytest.mark.parametrize('interrupt',[False,True])
+def test_actual_stage13_and14_keep_native_execution_separate_from_approval(tmp_path,interrupt):
     from real2sim_builder.candidate import Candidate
     from real2sim_builder import reconstruction_stages,stage_workers
     _,project,_=native_project(tmp_path)
     candidate=Candidate.create(project,'native_stage')
     folder=candidate.root/'stage13';folder.mkdir()
     config={'simulator':{'native_options':{'initial_joint_rad':[0.]*6}}}
+    if interrupt:
+        import os
+        from real2sim_builder import registration
+        child=os.fork()
+        if child==0:
+            try:
+                registration.register_export=lambda *a,**kw:os._exit(33)
+                reconstruction_stages.package_scene(candidate,config,{10:{'coordinate_frame':'synthetic explicit World'},12:{}},folder,None)
+            finally:os._exit(99)
+        assert os.waitstatus_to_exitcode(os.waitpid(child,0)[1])==33
+        assert (folder/'package/scene.json').exists() and not project.info.get('execution_packages')
     packaged=reconstruction_stages.package_scene(candidate,config,{10:{'coordinate_frame':'synthetic explicit World'},12:{}},folder,None)
     assert packaged['execution_mode']=='native' and packaged['native_readiness']['mujoco']['pose']=='READY'
     assert packaged['approved']is False and packaged['physical_verified']is False
@@ -230,3 +242,33 @@ def test_missing_physics_properties_never_select_pose_or_an_older_physics_revisi
     assert rows[-1]['engine_config']=={}
     with pytest.raises(ValueError,match='mass'):
         source_inputs(project.root,'mujoco')
+
+
+def test_adaptive_native_asset_in_pose_and_physics(tmp_path):
+    from real2sim_builder.adaptive_geometry import create_asset
+    from real2sim_builder.candidate import Candidate
+    from real2sim_builder.object_assets import instance_operation
+    from robot_learning_workbench.robot.scene_render import SceneView,create_renderer
+    from robot_learning_workbench.robot.pose_render import create_pose_renderer
+    _,project,mapping=native_project(tmp_path)
+    plan={'object_id':'adaptive','kind':'box','color_rgb':[.8,.1,.1],
+          'geometry':{'dimensions_m':[.024]*3,'provenance':'measured','evidence':['synthetic 24 mm']}}
+    asset=create_asset(project,plan,tmp_path/'native-geometry')
+    candidate=Candidate.create(project,'adaptive')
+    pose=np.eye(4);pose[:3,3]=[.12,0,.012]
+    candidate.edit([instance_operation(project,asset['manifest'],'adaptive',pose=pose)])
+    scene=candidate.scene
+    added=next(o for o in scene['objects'] if o['id']=='adaptive')
+    added['physics']=copy.deepcopy(scene['objects'][1]['physics'])
+    project.save_scene(scene)
+    write(project.root/'working/validation/report.json',dict(passed=False,input_signature=project.signature()))
+    package=project.root/'exports/native-adaptive'
+    export_revision(project,destination=package,allow_unvalidated=True,native_options={'initial_joint_rad':[0.]*6})
+    record=read(project.root/'project.yaml')['execution_packages'][0]
+    for mode,renderer_cls in [('pose',create_pose_renderer),('physics',create_renderer)]:
+        path=record['engine_profiles']['mujoco'][mode]
+        view=SceneView(package/'scene.json','mujoco',project.root/path,mapping)
+        with renderer_cls(view,tmp_path/mode) as renderer:
+            result=renderer.render([0.]*6)
+            assert set(result['images'])=={'side','wrist'}
+            assert (result['physics_steps']>0)==(mode=='physics')

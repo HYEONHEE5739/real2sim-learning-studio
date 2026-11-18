@@ -95,7 +95,7 @@ write(p.root/'input/reconstruction.yaml',config)
 d=ui.ReconstructionDialog(p.root,sys.executable)
 assert d.configuration()==config
 assert not d.findChildren(QTabWidget)and not d.findChildren(QTableWidget)
-assert d.candidate.text()=='existing' and not hasattr(d,'export_button')
+assert d.candidate_name=='existing' and not hasattr(d,'export_button')
 assert not any(n.split('.')[0]in('mujoco','torch','pxr','isaaclab')for n in sys.modules)
 d.close()
 ''')
@@ -150,7 +150,7 @@ d.account_result({'snapshot':{'version':'test','logged_in':True,'account':{},'mo
 ui.runtime_needs=lambda config,**kwargs:[]
 commands=[];d.start_cli=lambda args:commands.append(args)
 d.launch();assert '--run-modeling'in commands[0] and '--candidate'in commands[0]
-assert read(Path(commands[0][commands[0].index('--config')+1]))['candidate']==d.candidate.text()
+assert read(Path(commands[0][commands[0].index('--config')+1]))['candidate']==d.candidate_name
 identity={'scene_id':'source','revision':'rev','manifest_sha256':'a'*64}
 evidence=p.evidence;evidence['images']=[{'id':'pair_side','snapshot_id':'chosen','scene_state_id':'layout',
  'runtime_baseline':{'scene_identity':identity,'workspace_context':{'content_sha256':'a'*64}}}]
@@ -200,7 +200,7 @@ d.close()
 def test_failed_launch_never_reuses_previous_success_report(tmp_path):
     qt_check(tmp_path,'''
 d=ui.ReconstructionDialog(p.root,sys.executable)
-path=p.root/'scratch/agent'/d.candidate.text()/'reconstruction.json';write(path,{'status':'VISUAL_DRAFT_REVIEWED'})
+path=p.root/'scratch/agent'/d.candidate_name/'reconstruction.json';write(path,{'status':'VISUAL_DRAFT_REVIEWED'})
 d.report_mtime=path.stat().st_mtime_ns;d.finished(1)
 assert '실행 실패'in d.summary.toPlainText()and '완료'not in d.summary.toPlainText()
 d.close()
@@ -217,11 +217,11 @@ identity={'scene_id':'source','revision':'rev','manifest_sha256':'a'*64}
 evidence=p.evidence;evidence['images']=[{'id':'pair_side','snapshot_id':'latest','scene_state_id':'new',
  'runtime_baseline':{'scene_identity':identity,'workspace_context':{'content_sha256':'a'*64}}}];write(p.root/'input/evidence.yaml',evidence)
 d=ui.ReconstructionDialog(p.root,sys.executable,refit=True,capture_ids=['latest'])
-name=d.candidate.text();assert name!='earlier'and d.configuration()['scene_state_id']=='new'
+name=d.candidate_name;assert name!='earlier'and d.configuration()['scene_state_id']=='new'
 c=Candidate.create(p,name);info=c.info;info['source_revision']={'identity':identity};write(c.root/'candidate.json',info)
 scene=c.scene;scene['reconstruction_state']={'id':'new'};write(c.root/'candidate_scene.yaml',scene);p.update(candidate=name)
 d.close();again=ui.ReconstructionDialog(p.root,sys.executable,refit=True,capture_ids=['latest'])
-assert again.candidate.text()==name
+assert again.candidate_name==name
 again.close()
 ''')
 
@@ -231,11 +231,12 @@ def test_staged_ui_has_per_stage_preflight_and_opens_existing_visual_record(tmp_
 assert not any('SAM' in n or 'COLMAP' in n or 'MASt3R' in n for n in ui.runtime_needs({'sam':{},'geometry':{'backend':'not-installed'}}))
 d=ui.ReconstructionDialog(p.root,sys.executable)
 assert hasattr(d,'evidence_button')
-assert len(d.stage_labels)==14 and any('SAM3' in title for _,title in d.stage_labels.values())
+assert len(d.stage_labels)==14 and d.summary.isHidden()
+assert not hasattr(d,'usage_timer') and any('SAM3' in title for _,title in d.stage_labels.values())
 assert not any('COLMAP' in title for _,title in d.stage_labels.values())
 from real2sim_builder.candidate import Candidate
 from real2sim_builder.visual_evidence import record
-c=Candidate.create(p,d.candidate.text());record(c,'01_scene_analysis','STOPPED',summary='retained')
+c=Candidate.create(p,d.candidate_name);record(c,'01_scene_analysis','STOPPED',summary='retained')
 opened=[]
 ui.QDesktopServices.openUrl=lambda url:opened.append(url.toLocalFile())
 d.open_evidence()
@@ -247,16 +248,95 @@ d.close()
 def test_stage_progress_and_logout_allow_cpu_and_depth_work_before_codex(tmp_path):
     qt_check(tmp_path,'''
 d=ui.ReconstructionDialog(p.root,sys.executable)
-assert len(d.stage_labels)==14
+assert len(d.stage_labels)==14 and d.summary.isHidden()
+assert not hasattr(d,'usage_timer')
 commands=[];d.start_cli=lambda args:commands.append(args)
 d.pending_start=True
 d.account_result({'snapshot':{'version':'test','logged_in':False,'account':{},'models':[],'usage':[]}},0)
 assert commands and commands[0][0]=='reconstruct'
 d.busy=lambda:True
+d.started_at=100.0;clock=[130.0];ui.time.monotonic=lambda:clock[0]
 for stage in (1,2,3,7,10,14):
  p.update(status='RUNNING',stage='STAGE_'+str(stage))
  d.update_progress()
  assert d.stage_labels[str(stage)][0].text().startswith('●')
  assert str(stage) in d.current.text()
+ assert '현재 단계 00:00' in d.elapsed.text()
+ clock[0]+=2;d.update_progress();assert '현재 단계 00:02' in d.elapsed.text()
+assert '이번 실행 00:42' in d.elapsed.text()
+d.busy=lambda:False;d.close()
+''')
+
+
+def test_fresh_starts_with_empty_stage_cache_and_resume_keeps_checkpoint(tmp_path):
+    qt_check(tmp_path,'''
+from real2sim_builder.candidate import Candidate
+prior=Candidate.create(p,'auto_001')
+cache=prior.root/'reconstruction/simfoundry/cache.json'
+write(cache,{'5':{'pending':'retained'}})
+before=cache.read_bytes()
+p.update(candidate='auto_001')
+write(p.root/'input/reconstruction.yaml',{'candidate':'auto_001'})
+p.control('stop')
+d=ui.ReconstructionDialog(p.root,sys.executable)
+commands=[]
+d.start_cli=commands.append
+def click(button):
+ button.click()
+ d.account_result({'error':'offline fixture'},0)
+assert d.resume.isEnabled()
+click(d.resume)
+assert commands[-1][3]=='auto_001'
+click(d.start)
+assert commands[-1][3]=='auto_002'
+assert read(Path(commands[-1][5]))['candidate']=='auto_002'
+fresh=p.root/'scratch/agent/auto_002'
+assert (fresh/'candidate.json').is_file() and not (fresh/'reconstruction/simfoundry/cache.json').exists()
+assert read(p.root/'working/control.json')['command']=='resume'
+assert cache.read_bytes()==before and not d.resume.isEnabled()
+write(fresh/'reconstruction/simfoundry/cache.json',{})
+p.update(candidate='auto_002')
+d.close()
+d=ui.ReconstructionDialog(p.root,sys.executable)
+assert d.candidate_name=='auto_002' and d.resume.isEnabled()
+assert [b.text() for b in (d.start,d.resume,d.stop)]==['새로 생성','이어서 실행','중단']
+d.busy=lambda:True
+d.controls()
+assert not d.start.isEnabled() and not d.resume.isEnabled() and d.stop.isEnabled()
+d.stop.click()
+assert read(p.root/'working/control.json')['command']=='stop' and cache.read_bytes()==before
+d.busy=lambda:False
+d.close()
+''')
+
+
+def test_reconstruction_history_selection_routes_progress_evidence_and_resume(tmp_path):
+    qt_check(tmp_path,'''
+from real2sim_builder.candidate import Candidate
+for name, stage in [('auto_001',5),('auto_002',3)]:
+ c=Candidate.create(p,name)
+ write(c.root/'reconstruction/simfoundry/cache.json',{})
+ write(c.root/'reconstruction.json',{'pipeline':'simfoundry/1','status':'STOPPED','failed_stage':stage})
+ (c.root/'evidence').mkdir(exist_ok=True)
+ (c.root/'evidence/index.html').write_text(name)
+Candidate.create(p,'unrelated')
+p.update(candidate='auto_002')
+d=ui.ReconstructionDialog(p.root,sys.executable)
+commands=[];d.start_cli=commands.append
+assert d.candidate.count()==2 and d.candidate.currentData()=='auto_002'
+d.candidate.setCurrentIndex(d.candidate.findData('auto_001'))
+assert '중단' in d.candidate.currentText() and 'Stage 5' in d.candidate.currentText()
+assert 'Stage 5' in d.current.text() and not commands and p.state['candidate']=='auto_002'
+opened=[];ui.QDesktopServices.openUrl=lambda u:opened.append(u.toLocalFile())
+d.open_evidence()
+assert opened==[str(p.root/'scratch/agent/auto_001/evidence/index.html')]
+d.resume.click()
+assert not d.candidate.isEnabled()
+d.account_result({'error':'offline fixture'},0)
+assert commands[-1][3]=='auto_001'
+d.start.click();d.account_result({'error':'offline fixture'},0)
+assert commands[-1][3]=='auto_003' and d.candidate.currentData()=='auto_003'
+d.busy=lambda:True;d.controls()
+assert not d.candidate.isEnabled()
 d.busy=lambda:False;d.close()
 ''')

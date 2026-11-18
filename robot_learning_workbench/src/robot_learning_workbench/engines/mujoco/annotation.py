@@ -1,5 +1,6 @@
 """Recorded-source MuJoCo replay, post-step Tasks and Native Annotation publish."""
 from pathlib import Path
+from ...recipe import workflow_sources
 from dataclasses import asdict
 import time
 import numpy as np
@@ -112,7 +113,7 @@ def run(plan,*,events,commands):
     if catalog.execution.get('urdf_sha256',b.urdf_sha256)!=b.urdf_sha256:raise ValueError('Source robot model coordinates differ from replay URDF')
     execution={**catalog.execution,'engine':'mujoco','model_sha256':b.model_sha256,'urdf_sha256':b.urdf_sha256,'model_config':_plain(asdict(cfg)),'replay_source_engine':catalog.execution.get('engine'),'physics_equivalence_verified':False,'stage':'annotation','source_dataset':_plain(catalog.identity),
                'task_code':_plain(plan.effective_settings['task_modules_sha256']),'annotation_mode':plan.effective_settings['execution']['mode'],
-               'workflow_code':{Path(k).name:v for k,v in plan.effective_settings['code_files'].items()}}
+               'workflow_code':workflow_sources(plan.effective_settings['code_files'])}
     execution['recording']={**execution['recording'],'position_target_policy':'saturation_inward_v1','joint_targets_role':'applied'}
     saved=0;cancelled=False;reports=[]
     with NativeRun(plan.output_path,execution) as owner:

@@ -100,7 +100,7 @@ def run(plan,*,events,commands):
     from ...generation.mimic import bind_kinematics
     from ...robot.calibration import JOINTS
     verify_prepared_inputs(plan);settings=settings_for(plan)
-    if tuple(settings['active_object_ids'])!=tuple(plan.object_order):raise ValueError('Evaluation object order differs from bound Scene')
+    if not set(plan.object_order)<=set(settings['active_object_ids']):raise ValueError('Evaluation object order differs from bound Scene')
     inputs=execution_inputs(plan.scene,settings);urdf=inputs['robot_urdf'];sha=file_sha256(urdf)
     bundle=policy_inputs(plan,sha);kin=bind_kinematics(urdf,model_sha256=sha,joint_order=JOINTS)
     execution=evaluation_execution(plan,execution_contract(plan,settings),bundle[3]);previous=plan.resolved_inputs.get('resume_dataset')

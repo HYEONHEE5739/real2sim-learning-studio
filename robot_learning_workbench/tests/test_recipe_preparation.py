@@ -247,3 +247,22 @@ def test_replay_preparation_requires_native_recording_not_generic_artifact(tmp_p
         (data/'meta').mkdir();(data/'meta/info.json').write_text('{}')
     with pytest.raises(r.RecipeError) as exc:r.prepare_recipe(annotation_doc(tmp_path),scene=scene,tasks=registry(),inputs={})
     assert exc.value.code=='INPUT_FORMAT_UNSUPPORTED'
+
+
+def test_workflow_identity_distinguishes_same_basename(tmp_path, scene, monkeypatch):
+    doc = source_doc(tmp_path)
+    tasks = registry()
+    original = r.prepare_recipe(doc, scene=scene, tasks=tasks, inputs={})
+    sources = r.workflow_sources(original.effective_settings['code_files'])
+    base = Path(r.__file__).parent
+    changed = base / 'engines/mujoco/control.py'
+    assert sources['robot_learning_workbench/robot/control.py'] == r._sha((base / 'robot/control.py').read_bytes())
+    assert sources['robot_learning_workbench/engines/mujoco/control.py'] == r._sha(changed.read_bytes())
+    # Change only what the hasher observes, without writing into the source tree.
+    read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: read_bytes(path) + (b'\n' if path == changed else b''))
+    updated = r.prepare_recipe(doc, scene=scene, tasks=tasks, inputs={})
+    assert updated.code_identity != original.code_identity
+    assert updated.sha256 != original.sha256
+    with pytest.raises(r.RecipeError, match='changed'):
+        r.verify_prepared_inputs(original)

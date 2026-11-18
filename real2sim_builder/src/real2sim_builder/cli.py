@@ -189,7 +189,8 @@ def main(argv=None):
             print(json.dumps(result,indent=2));return 2 if result.get('status') in ('NEEDS_MORE_DATA','NOT_IMPROVED','REJECTED') and args.action=='fit' else 0
         except Unavailable as exc:
             print(json.dumps({'status':'UNAVAILABLE','engine':'blender','reason':str(exc)}));return 3
-    if args.command in ('add','import-reference') and (project.root/'working/run.lock').exists():
+    from real2sim_builder.candidate import project_busy
+    if args.command in ('add','import-reference') and project_busy(project):
         raise RuntimeError('Stop/resume the reconstruction worker before changing this project input')
     if args.command=='add':
         from . import project as evidence

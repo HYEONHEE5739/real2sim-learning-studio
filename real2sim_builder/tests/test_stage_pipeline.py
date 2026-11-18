@@ -109,3 +109,53 @@ def test_new_model_reference_or_memo_does_not_regenerate_phone_depth(tmp_path):
 
 
 from pathlib import Path
+
+
+def test_mesh_cache_includes_support_configuration():
+    from real2sim_builder.reconstruction_stages import mesh_options
+    baseline=mesh_options({})
+    assert mesh_options({'support_asset':{'thickness':0.1}})!=baseline
+    assert mesh_options({'physics':{'steps':10}})==baseline
+
+
+def test_resume_stage_five_after_progress_display_change(tmp_path, monkeypatch):
+    from real2sim_builder import automation, reconstruction_stages
+
+    project = synthetic_project(tmp_path)
+    worker = MockModels()
+    config = {'scene_state_id':'layout','support':{'frame_selection':{'mode':'heuristic','min_component_px':4}}}
+    completed = []
+
+    def decomposition(candidate, config, previous, folder, call):
+        for operation in ('first', 'second'):
+            call(operation, {'object': 'cup'}, folder / operation)
+        return {'done': True}
+
+    class InterruptibleWorker(MockModels):
+        def __call__(self, operation, request, folder):
+            if operation not in ('first', 'second'):
+                return worker(operation, request, folder)
+            completed.append(operation)
+            if completed == ['first']:
+                project.control('stop')
+            return {'object': 'cup'}
+
+    provider = InterruptibleWorker()
+    monkeypatch.setattr(reconstruction_stages, 'decompose', decomposition)
+    def run(end):
+        return automation._run_stage_pipeline(project, candidate='resume', config=config, worker=provider, through_stage=end)
+
+    with monkeypatch.context() as patch:
+        # The adaptive run already has its policy stamp. Change presentation
+        # identities alone, while keeping all worker and calculation hashes.
+        display={'ui_reconstruction.py','visual_evidence.py','evidence_dashboard.py'}
+        patch.setattr(automation,'sha',lambda p:'a'*64 if Path(p).name in display else sha(p))
+        first = run(5)
+    assert first['status'] == 'STOPPED' and completed == ['first']
+    provider.runtime_identity = {'kind':'mock','version':'unrelated'}
+    run(1)  # A later, shorter attempt replaced the index entry for Stage 1.
+    provider.runtime_identity = MockModels.runtime_identity
+    resumed = run(5)
+    assert all(resumed['stages'][str(n)]['reused'] for n in range(1,5))
+    assert completed == ['first', 'second']
+    assert worker.calls == ['da3', 'support']

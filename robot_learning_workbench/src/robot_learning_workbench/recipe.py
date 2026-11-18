@@ -30,6 +30,19 @@ def _freeze(v):
     if isinstance(v,(list,tuple)):return tuple(_freeze(x) for x in v)
     return v
 
+def workflow_sources(files):
+    from importlib.util import find_spec
+    roots=[Path(find_spec(name).origin).parent for name in
+           ('robot_learning_workbench','real2sim_builder','scene_contract') if find_spec(name)]
+    result={}
+    for filename,digest in files.items():
+        path=Path(filename).resolve()
+        root=next((root for root in roots if path.is_relative_to(root)),None)
+        if root is None:raise ValueError('Execution source outside installed packages: '+str(path))
+        result[path.relative_to(root.parent).as_posix()]=digest
+    return result
+
+
 def _plain(v):
     if isinstance(v,Mapping):return {k:_plain(x) for k,x in v.items()}
     if is_dataclass(v):return {f.name:_plain(getattr(v,f.name)) for f in fields(v)}
@@ -149,6 +162,8 @@ def _validate(data,path):
             if not isinstance(value,str) or not value.strip():_fail(where,'explicit language instruction required',path)
         elif key=='mode':
             if value not in (('fake_all','observe_only','gripper_once') if stage=='teleoperation' else ('manual','auto') if stage=='annotation' else {'capture':('offline','observe_only','live_capture'),'precision_calibration':('offline',),'real_evaluation':('offline','observe_only','gripper_once','fake_all'),'real_sim':('offline',)}[stage] if stage in ('capture','precision_calibration','real_evaluation','real_sim') else ('scratch','finetune','resume')):_fail(where,'unsupported stage mode',path)
+    if stage=='real_evaluation' and data['execution'].get('mode')=='observe_only' and data['execution']['episodes']!=1:
+        _fail('execution.episodes','Observation-only Real Eval requires episodes=1; max_frames controls sample count',path)
     if stage=='scene_capture'and data['execution']['device_source']!='hardware':_fail('execution.device_source','Scene materials use real observations; use capture_session for mapped memory tests',path)
     if stage=='sdk_calibration'and data['execution']['confirm_on_site']is not True:_fail('execution.confirm_on_site','Explicit on-site calibration approval required',path)
     if stage in ('source','datagen'):
@@ -565,7 +580,7 @@ def prepare_recipe(doc,*,scene=None,tasks=None,inputs=None):
     if spec.stage=='train':pending.append('official_training_validation')
     if 'policy' in spec.inputs:pending.append('official_policy_processor_validation')
     if any(k in spec.inputs for k in ('device_profile','camera_config','calibration_profile')):pending.append('device_calibration_validation')
-    code=_sha(_bytes({'task_sources':sorted(set(source_files.values())),'core_sources':{Path(p).name:h for p,h in code_files.items()}}))
+    code=_sha(_bytes({'task_sources':sorted(set(source_files.values())),'core_sources':workflow_sources(code_files)}))
     return PreparedRun(doc.sha256,spec.stage,engine,_freeze(resolved),_freeze(_plain(scene.identity)) if scene else None,order,bindings,_freeze(effective),code,output,tuple(pending),_freeze(documents),scene,tasks)
 
 

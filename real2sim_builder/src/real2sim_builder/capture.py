@@ -113,7 +113,7 @@ def register_unbound(project, destination, manifest, samples, *, evidence=None):
     for sample in samples:
         if sample.get('metadata_path'):
             metadata=sample['metadata_path'];paths.add(metadata)
-            paths.update((Path(metadata).parent/p).as_posix()for p in read(destination/metadata)['files'])
+            paths.update((Path(metadata).parent/p).as_posix()for p in snapshot_metadata((destination/metadata).parent)['files'])
     source['input_files']=[dict(path=(destination/p).relative_to(project.root).as_posix(),sha256=sha(destination/p))for p in sorted(paths)]
     evidence.setdefault('capture_sessions',[]).append(source)
     project.write_evidence(evidence);project.invalidate()
@@ -377,7 +377,7 @@ def _import_session(project, root, max_skew_ns=100000000, loaded=None, *, eviden
             metadata_path = sample['metadata_path']
             paths.add(metadata_path)
             folder = Path(metadata_path).parent
-            for path in read(destination / metadata_path)['files']:
+            for path in snapshot_metadata((destination/metadata_path).parent)['files']:
                 paths.add((folder / path).as_posix())
         source['input_files'] = [{'path': (destination / p).relative_to(project.root).as_posix(), 'sha256': sha(destination / p)} for p in sorted(paths)]
     if m.get('quality_override'):
@@ -515,6 +515,11 @@ def validate_model_files(root, manifest):
             dependency = (path.parent / prefix / name).resolve()
             if not dependency.is_relative_to(root) or dependency.relative_to(root).as_posix() not in manifest['files']:
                 raise ValueError('Unhashed or external robot dependency')
+            if dependency.suffix.lower() in ('.obj','.mtl'):
+                from .export import verify_native_closure
+                for part in verify_native_closure(root,dependency):
+                    if part.relative_to(root).as_posix() not in manifest['files']:
+                        raise ValueError('Unhashed robot material dependency')
             if node.tag == 'include':
                 inspect(dependency, meshdir, texturedir)
     inspect(root / manifest['robot']['path'])
@@ -535,6 +540,26 @@ def legacy_static_reasons(manifest, events, timestamp):
     if manifest['purpose'] == 'demonstration' and (not any((e['event'] in ('static_hold', 'pre_grasp') for e in active))):
         reasons.append('no_explicit_static_or_pregrasp_interval')
     return reasons
+
+
+def snapshot_metadata(folder):
+    """Resolve a sealed Pair sidecar without altering the raw observation."""
+    folder = Path(folder)
+    raw = read(folder / 'metadata.json')
+    marker = folder / 'pair-manifest.json'
+    if marker.exists():
+        record = read(marker)
+        files = record['files']
+        if (record.get('schema') != 'real2sim.capture-pair/1'
+                or record['raw_metadata_sha256'] != sha(folder / 'metadata.json')
+                or 'pair.json' not in files or set(files).intersection(raw['files'])):
+            raise ValueError('Changed or invalid Pair manifest')
+        for name, digest in files.items():
+            if sha(local_path(folder, name)) != digest:
+                raise ValueError('Pair file hash changed: ' + name)
+        raw['files'].update(files)
+        raw['files'][marker.name] = sha(marker)
+    return raw
 
 
 def load_snapshots(root, validation=(), scene_state=None):
@@ -580,7 +605,7 @@ def load_snapshots(root, validation=(), scene_state=None):
     for row in selected:
         identifier(row['id'])
         folder = local_path(root, row['path'])
-        metadata = read(folder / 'metadata.json')
+        metadata = snapshot_metadata(folder)
         if not (folder / 'COMPLETE').is_file() or sha(folder / 'metadata.json') != row['metadata_sha256']:
             raise ValueError('Incomplete or changed snapshot metadata')
         if metadata['id'] != row['id'] or metadata['scene_state_id'] != scene_state:
@@ -632,6 +657,11 @@ def load_snapshots(root, validation=(), scene_state=None):
                 pair = read(folder / 'pair.json')
                 if pair.get('schema') != 'real2sim.paired-observation/1' or pair.get('meaning') != 'historical_runtime_baseline_not_ground_truth':
                     raise ValueError('Invalid paired observation')
+                if (folder/'pair-manifest.json').exists() and (
+                        pair.get('measured_q_rad') != state['q_measured']
+                        or pair.get('source_capture_timestamp_ns') != state['timestamp_ns']
+                        or (manifest.get('pair_scene_identity') is not None and pair.get('scene_identity') != manifest['pair_scene_identity'])):
+                    raise ValueError('Pair differs from original observation or Scene')
                 baseline = pair['sim_images'][image['camera']]
                 if baseline not in metadata['files']:
                     raise ValueError('Unhashed runtime baseline')

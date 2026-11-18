@@ -121,3 +121,23 @@ def test_initial_feedback_outside_command_range_stays_observation(tmp_path,monke
         assert state['initial_target_rad']==target.tolist()
         assert not any(x.startswith('write_')for x in ft)
     finally:l.close();f.close()
+
+
+
+def test_stale_feedback_reports_each_age_before_send(tmp_path, monkeypatch):
+    control, leader, follower, _, trace, _ = controller(tmp_path)
+    try:
+        control.start(command_id='start')
+        feedback = control.feedback
+        def delayed_feedback():
+            sample, interval, q = feedback()
+            interval['end']['monotonic_ns'] -= 120_000_000
+            return sample, interval, q
+        monkeypatch.setattr(control, 'feedback', delayed_feedback)
+        sends = trace.count('send')
+        with pytest.raises(Exception, match=r'Stale feedback/Leader command .*Follower .*Leader .*100 ms'):
+            control.tick()
+        assert not control.active and trace.count('send') == sends
+    finally:
+        leader.close()
+        follower.close()

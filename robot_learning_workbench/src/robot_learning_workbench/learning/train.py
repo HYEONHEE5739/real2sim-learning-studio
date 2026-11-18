@@ -66,14 +66,22 @@ def freeze_inputs(plan,args: list[str],config: dict) -> list[str]:
     """Exact owned official config; Resume uses a standard linked checkpoint."""
     if plan.effective_settings['execution']['mode']=='resume':
         source=Path(plan.resolved_inputs['checkpoint']['path']);record=checkpoint_record(source)
-        root=plan.output_path.with_name(plan.output_path.name+'.resume-input');root.mkdir()
-        for name,sha in record['files'].items():
-            p=source/name;target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
-            if name.endswith('.json'):
-                raw=p.read_bytes()
-                if __import__('hashlib').sha256(raw).hexdigest()!=sha:raise DataError('INPUT_CHANGED',name,'Checkpoint changed before snapshot')
-                target.write_bytes(raw)
-            else:os.link(p,target)
+        import tempfile
+        from ..data.native import link_or_copy_verified,file_sha256
+        root=plan.output_path.with_name(plan.output_path.name+'.resume-input')
+        if root.exists():
+            existing={p.relative_to(root).as_posix():file_sha256(p) for p in root.rglob('*') if p.is_file()}
+            if existing!=record['files']:raise DataError('INPUT_CHANGED',str(root),'Conflicting frozen resume snapshot')
+        else:
+            with tempfile.TemporaryDirectory(dir=root.parent,prefix='.resume-') as tmp:
+                stage=Path(tmp)/'input';stage.mkdir()
+                for name,expected in record['files'].items():
+                    p=source/name;target=stage/name;target.parent.mkdir(parents=True,exist_ok=True)
+                    if name.endswith('.json'):
+                        target.write_bytes(p.read_bytes())
+                        if file_sha256(target)!=expected:raise DataError('INPUT_CHANGED',name,'Checkpoint changed before snapshot')
+                    else:link_or_copy_verified(p,target,expected)
+                stage.rename(root)
         path=root/'pretrained_model/train_config.json'
     else:
         path=plan.output_path.with_name(plan.output_path.name+'.official-config.json');atomic_json(path,config,exclusive=True)

@@ -39,6 +39,18 @@ def plain(v):
 
 def encoded(v):return json.dumps(plain(v),sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(v):return hashlib.sha256(encoded(v)).hexdigest()
+def link_or_copy_verified(source,target,expected):
+    import errno,shutil
+    try:
+        os.link(source,target)
+    except OSError as error:
+        if error.errno not in (errno.EXDEV,errno.EOPNOTSUPP,errno.EPERM,errno.EMLINK):raise
+        with open(source,'rb') as src,open(target,'xb') as dst:
+            shutil.copyfileobj(src,dst)
+    if file_sha256(target)!=expected:
+        raise DataError('INPUT_CHANGED',str(source),'Copied input hash changed')
+
+
 def file_sha256(path):
     h=hashlib.sha256()
     with Path(path).open('rb') as f:

@@ -63,3 +63,30 @@ def test_protected_scale_is_rejected_even_if_a_worker_returns_it(tmp_path):
     def malicious(*args):return {'rotation':np.eye(3).tolist(),'translation':[0,0,1],'scale':1.2}
     with pytest.raises(ValueError,match='protected measured'):
         poses(c,{}, {7:{'objects':[obj]}},tmp_path,malicious)
+
+
+def test_changing_then_removing_support_rebuilds_only_mesh_stage(tmp_path, monkeypatch):
+    from real2sim_builder import reconstruction_stages
+    from real2sim_builder.automation import _run_stage_pipeline
+
+    project = synthetic_project(tmp_path)
+    worker = PoseModels()
+    config = {'scene_state_id': 'layout', 'support': {'frame_selection': {
+        'mode': 'heuristic', 'min_component_px': 4}}, 'image_preparation': {'size': 32}}
+    calls = []
+
+    def record_mesh_inputs(candidate, settings, previous, folder, provider):
+        assert previous[6]['objects']
+        calls.append(settings.get('support_asset'))
+        return {'support_asset': settings.get('support_asset')}
+
+    monkeypatch.setattr(reconstruction_stages, 'meshes', record_mesh_inputs)
+    support = {'thickness': 0.02}
+    for index, options in enumerate(({}, {'support_asset': support}, {})):
+        result = _run_stage_pipeline(project, candidate='test', config={**config, **options},
+                                     worker=worker, through_stage=7)
+        assert result['status'] == 'STAGES_COMPLETE'
+        assert not result['stages']['7']['reused']
+        if index:
+            assert all(result['stages'][str(n)]['reused'] for n in range(1, 7))
+    assert calls == [None, support, None]

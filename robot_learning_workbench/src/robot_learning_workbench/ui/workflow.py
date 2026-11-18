@@ -47,7 +47,7 @@ class WorkflowPage(QWidget):
         if stage in ('annotation','datagen','simulation_evaluation'):
             env_row=QHBoxLayout();box.addLayout(env_row);env_row.addWidget(QLabel('Preview Env'));env_row.addWidget(self.preview_env);env_row.addStretch()
         self.progress_bar=QProgressBar();self.progress_bar.setRange(0,1);self.progress_bar.setValue(0);self.progress_bar.setFormat('Worker 대기');self.progress_text=QLabel('');self.progress_text.setWordWrap(True)
-        if stage in ('annotation','datagen','train','simulation_evaluation'):box.addWidget(self.progress_bar);box.addWidget(self.progress_text)
+        if stage in ('annotation','datagen','train','simulation_evaluation','real_evaluation'):box.addWidget(self.progress_bar);box.addWidget(self.progress_text)
         self.media_splitter=QSplitter(Qt.Orientation.Vertical);box.addWidget(self.media_splitter,1)
         self.preview_card=QWidget();self.preview_card.setObjectName('previewCard');grid=QGridLayout(self.preview_card);self.media_splitter.addWidget(self.preview_card)
         self.previews={};self.sim_previews={}
@@ -265,6 +265,9 @@ class WorkflowPage(QWidget):
             outcome=run_outcome({**record,'status':status.status,'exit_code':status.exit_code,'process_error':status.process_error});self.outcome=outcome
             terminal=outcome['worker_finished']or status.status=='unknown';self.progress_bar.setRange(0,1 if terminal else 0);self.progress_bar.setValue(1 if status.status=='completed'else 0);self.progress_bar.setFormat('Worker '+status.status)
             self.progress_text.setText('Episode '+str(outcome['completed_episodes'])+' · Attempt '+str(outcome['attempts']if outcome['attempts']is not None else'미집계')+' · Env '+str(self.context.get('env_index','—'))+' / tick '+str(self.context.get('tick','—'))+(' · 목표 미달'if outcome['goal_reached']is False else''))
+            observed_frames=(record.get('attempt_summary') or {}).get('frames', (record.get('progress') or {}).get('measured_frames'))
+            if self.stage=='real_evaluation' and observed_frames is not None:
+                self.progress_text.setText(f'관측 {observed_frames} 프레임')
             for kind,button in self.commands.items():button.setEnabled(not self.stop_requested and not outcome['worker_finished'] and status.status!='unknown' and (kind!='step' or self.pending_step_id is None and (self.engine.currentText()!='isaaclab' or int(self.execution.get('env_num',self.execution.get('num_envs',1)))==1)) and (kind!='mark' or (self.execution.get('mode')=='manual' and self.mark_frame.value()<=getattr(self,'env_contexts',{}).get(self.preview_env.value(),getattr(self,'context',{})).get('tick',-1))))
             if outcome['worker_finished'] or status.status=='unknown':
                 self.cancel_button.setEnabled(False)
@@ -279,6 +282,7 @@ class WorkflowPage(QWidget):
                     for name,label in self.previews.items():label.clear();label.setText(name+' · Live Preview 종료')
                     self._preview_terminal_cleared=self.handle['run_id']
                 text='작업 '+status.status+' · '+self.dataset_state+' · 완료 Episode '+str(outcome['completed_episodes'])
+                if self.stage=='real_evaluation' and observed_frames is not None:text=f'작업 {status.status} · 관측 {observed_frames} 프레임'
                 text+=' · 프로세스 종료 미확인'if status.exit_code is None else ' · Process exit '+str(status.exit_code)+(' (비정상 종료)'if status.exit_code!=0 else' (정상 종료)')
                 if outcome.get('existing_episodes') is not None:text+=' · 기존 '+str(outcome['existing_episodes'])+' / 추가 '+str(outcome['added_episodes'])
                 if outcome['goal_reached'] is False:text+=' · 목표 미달'

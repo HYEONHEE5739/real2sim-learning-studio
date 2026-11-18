@@ -389,3 +389,15 @@ def test_readonly_empty_evidence_analysis_and_rectification_never_write(tmp_path
     with pytest.raises(PermissionError):analyze(readonly)
     with pytest.raises(PermissionError):undistort_evidence(readonly)
     assert before=={p:p.read_bytes() for p in project.root.rglob('*') if p.is_file()}
+
+
+def test_exited_lock_owner_can_be_resumed(tmp_path):
+    import multiprocessing,os
+    from real2sim_builder.candidate import exclusive
+    project=Project.create(tmp_path,'lock recovery')
+    def die():
+        with exclusive(project):os._exit(17)
+    child=multiprocessing.get_context('fork').Process(target=die)
+    child.start();child.join(10)
+    assert child.exitcode==17
+    with exclusive(project):pass

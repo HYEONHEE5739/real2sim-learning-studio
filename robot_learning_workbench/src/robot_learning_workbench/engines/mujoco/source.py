@@ -5,6 +5,8 @@ Isaac Lab EpisodeData is a CPU data API, never an Isaac environment here.
 """
 from dataclasses import asdict
 from pathlib import Path
+from ...recipe import workflow_sources
+from scene_contract.objects import present_objects
 import time
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -109,8 +111,8 @@ def execution_contract(plan,b,cfg):
     if not plan.scene.scene['robot'].get('bindings',{}).get('mujoco',{}).get('asset_path'):
         for key in('eef_site','robot_base_body','finger_bodies'):model_config.pop(key)
     return dict(**({'single_task':plan.effective_settings['execution']['single_task']}if plan.effective_settings['execution'].get('single_task')else{}),**({'source_functions':{k:_plain(b)for k,b in plan.function_bindings.items()if b.kind!='placement'}}if any(b.kind!='placement'for b in plan.function_bindings.values())else{}),task_objects=list(plan.effective_settings.get('task_objects',plan.object_order)),stage=plan.stage,engine='mujoco',scene_identity=_plain(plan.scene_identity),calibration=_plain(plan.scene.calibration),
-        model_sha256=b.model_sha256,urdf_sha256=b.urdf_sha256,active_objects=list(b.dynamic_objects),partition='unpartitioned',
-        task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code={Path(k).name:v for k,v in plan.effective_settings['code_files'].items()},
+        model_sha256=b.model_sha256,urdf_sha256=b.urdf_sha256,active_objects=list(b.dynamic_objects),static_environment=[name for name in present_objects(plan.scene.scene,b.dynamic_objects) if name not in b.dynamic_objects],partition='unpartitioned',
+        task_code=_plain(plan.effective_settings['task_modules_sha256']),workflow_code=workflow_sources(plan.effective_settings['code_files']),
         recording=dict(position_target_policy='saturation_inward_v1',joint_targets_role='applied',joint_order=list(JOINTS),units='m_rad_s',pose_frame='robot_base',observation_phase='pre_step',
                        task_phase='post_step',collection_units=['rad']*5+['fraction'],collection_gripper_endpoints_rad=[0.,float(np.deg2rad(100))],fps=30,resolution=[640,480],codec='libx264',crf=18),
         rng_policy='entropy_placement_per_call_v1',
@@ -131,7 +133,7 @@ def resolved_model_config(plan,recorded=None):
         from dataclasses import asdict
         if identity!=asdict(plan.scene.identity):raise ValueError('Engine configuration belongs to another Scene revision')
     values.setdefault('active_object_ids',list(plan.object_order));values.setdefault('object_physics',{})
-    if plan.stage in('source','datagen','simulation_evaluation')and not(plan.stage=='source'and recorded is not None):
+    if plan.stage in('source','datagen','simulation_evaluation')and recorded is None:
         from scene_contract.objects import active_objects
         values['active_object_ids']=list(active_objects(plan.scene.scene,plan.object_order,values['active_object_ids']))
     if isinstance(values.get('initial_joint_rad'),dict):values['initial_joint_rad']=[values['initial_joint_rad'][n]for n in JOINTS]

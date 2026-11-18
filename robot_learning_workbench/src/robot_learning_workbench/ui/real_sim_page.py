@@ -14,7 +14,7 @@ from .theme import action_icon
 
 class RealSimPage(QWidget):
     def __init__(self,python,modules,workspace,parent=None):
-        super().__init__(parent);self.workspace=Path(workspace);self.template=None;self.project=None;self.last_progress={};self.request_control=False;self.selection_key=None;self.recipe_path=None
+        super().__init__(parent);self.workspace=Path(workspace);self.template=None;self.project=None;self.last_progress={};self.start_pending=False;self.request_control=False;self.selection_key=None;self.recipe_path=None
         self.client=SessionClient(python,modules,self);self.client.progress.connect(self.update_progress);self.client.preview.connect(self.show_preview);self.client.error.connect(self.show_error);self.client.received.connect(self.event_received);self.client.terminal.connect(self.ended)
         self.job=BackendJob(python,self);self.job.finished.connect(self.loaded);self.job.log.connect(self.show_error);self.job.process.stateChanged.connect(lambda _:self.buttons())
         self.session_layout=LiveSessionLayout(self);box=self.session_layout.content_layout;title=QLabel('2. Real / Sim');title.setObjectName('dashboardTitle');self.session_layout.header.insertWidget(0,title)
@@ -97,10 +97,11 @@ class RealSimPage(QWidget):
     def buttons(self):
         from PyQt6.QtCore import QProcess
         idle=not self.active()and self.job.process.state()==QProcess.ProcessState.NotRunning
-        ready=self.client.running and not self.client.cancel_requested and self.last_progress.get('session_state')=='OBSERVING'and self.last_progress.get('teleoperation_available',False)
+        starting=self.request_control or self.start_pending
+        ready=not starting and self.client.running and not self.client.cancel_requested and self.last_progress.get('session_state')=='OBSERVING'and self.last_progress.get('teleoperation_available',False)
         self.scene_combo.setEnabled(idle);self.engine.setEnabled(idle);self.connect_button.setEnabled(idle and self.template is not None or bool(ready))
         if hasattr(self,'refit_button'):self.refit_button.setEnabled(idle and self.project is not None)
-        self.connect_button.setText('Teleoperation 시작'if ready else'Real/Sim 연결 · Teleop')
+        self.connect_button.setText('Teleop 활성'if self.last_progress.get('teleop_active') else'Teleop 시작 중…'if starting else'Teleop 다시 시작'if ready else'Real/Sim 연결 · Teleop')
         self.capture_button.setEnabled(self.client.running and not self.client.cancel_requested and self.last_progress.get('capture_request_allowed',False))
         waiting=self.last_progress.get('capture_pending')and not self.last_progress.get('capture_request_allowed')
         full=self.last_progress.get('capture_queue_capacity')and self.last_progress.get('capture_queue_size',0)>=self.last_progress['capture_queue_capacity']
@@ -155,6 +156,7 @@ class RealSimPage(QWidget):
                 self.refinement_memo.setPlainText(record.get('text',''));self.memo_source=str(selected)
             self.capture_hint.setText('연결할 준비가 되었습니다.');self.capture_hint.show();self.operation_message.hide();self.buttons()
     def connect_session(self):
+        if not self.client.running:self.start_pending=False
         try:
             if self.client.running:self.start_teleoperation();return
             if any(p is not self and p.active()for p in getattr(self.window(),'sessions',{}).values())or any(p.active()for p in getattr(self.window(),'workflows',{}).values()):raise ValueError('다른 장치/Simulation Session을 먼저 중단하세요.')
@@ -167,7 +169,11 @@ class RealSimPage(QWidget):
             self.state.setText('CONNECTING · Scene/Follower/Camera 준비 중');self.buttons()
         except Exception as error:self.show_error(str(error))
     def send(self,kind,payload=None):
-        try:self.operation_message.hide();self.client.send(kind,payload)
+        try:
+            if kind=='teleop_start':
+                if self.start_pending:return
+                self.start_pending=True;self.buttons()
+            self.operation_message.hide();self.client.send(kind,payload)
         except Exception as error:self.show_error(str(error))
     def start_teleoperation(self):
         if self.isVisible():self.send('teleop_start')
@@ -175,6 +181,7 @@ class RealSimPage(QWidget):
         self.request_control=False
         self.client.cancel();self.buttons()
     def update_progress(self,progress):
+        if progress.get('teleop_active') or progress.get('error'):self.start_pending=False
         self.last_progress.update(progress);p=self.last_progress;self.state.setText(('MEMORY · 합성 시험 / 'if p.get('device_source')=='memory'else'')+p.get('session_state','CONNECTING'));self.buttons()
         from .view import capture_progress_text
         phases={'scene_check':'Scene 검사','devices':'장치 연결','cameras':'카메라 준비','sim_initialization':'Sim 초기화','first_frame':'첫 영상 대기'}
@@ -199,7 +206,8 @@ class RealSimPage(QWidget):
             self.run_folder.setText('Capture 저장 폴더 · '+folder.name);self.run_folder.setToolTip(str(folder));self.run_folder.show()
         if progress.get('error'):self.show_error(progress['error'])
         if self.request_control and p.get('session_state')=='OBSERVING'and p.get('teleoperation_available'):
-            self.request_control=False;self.send('teleop_start')
+            self.request_control=False
+            if self.isVisible() and not self.client.cancel_requested and not progress.get('error'):self.send('teleop_start')
     def event_received(self,event):
         if event['kind']=='error'or event['kind']=='command_ack'and event['payload'].get('status')=='rejected':
             payload=event['payload'];reason=payload.get('reason')or payload.get('message')or str(payload)
@@ -208,9 +216,9 @@ class RealSimPage(QWidget):
         if name in self.previews:
             image=QImage.fromData(raw,b'PPM')
             if not image.isNull():self.previews[name].setPixmap(QPixmap.fromImage(image))
-    def show_error(self,message):self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
+    def show_error(self,message):self.start_pending=False;self.request_control=False;self.log.appendPlainText(message);self.operation_message.setText(message);self.operation_message.show()
     def ended(self,status):
-        self.request_control=False
+        self.start_pending=False;self.request_control=False
         self.snapshot_table.finish_pending('연결 종료: 최종 저장·등록 완료를 확인하지 못했습니다. 원본 저장 경로를 확인하세요.')
         handle=self.client.handle
         if status in('completed','cancelled')and handle and self.recipe_path and self.recipe_path.stem==Path(handle['output_path']).name and not Path(handle['output_path']).exists():
@@ -221,6 +229,6 @@ class RealSimPage(QWidget):
         self.simulated.setText('Sim 관절값 (rad) · —')
         for name,view in self.previews.items():view.clear();view.setText('연결 종료');self.camera_labels[name].setText(('SIM 'if name.startswith('sim_')else'REAL ')+name.removeprefix('sim_').upper()+' · 연결 종료')
     def hideEvent(self,event):
-        self.request_control=False
+        self.start_pending=False;self.request_control=False
         if self.client.running:self.send('teleop_stop')
         super().hideEvent(event)

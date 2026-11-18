@@ -277,14 +277,10 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
         raise ValueError('max_iterations must be in [1,100]')
     if any((not np.isfinite(v) or v < 0 for v in thresholds.values())):
         raise ValueError('Invalid acceptance thresholds')
-    lock = project.root / 'working/run.lock'
-    try:
-        handle = lock.open('x')
-    except FileExistsError as exc:
-        raise RuntimeError('Project is busy or its prior owner is unknown; explicit recovery required') from exc
     import os
-    handle.write(str(os.getpid()))
-    handle.close()
+    from .candidate import exclusive
+    lock = exclusive(project)
+    lock.__enter__()
     current = project.root / 'working/current_scene.yaml'
     baseline_bytes = baseline = None
     backup = None
@@ -408,7 +404,7 @@ def run(project, renderer='software-egl', max_iterations=8, thresholds=None, *, 
         finally:
             if backup is not None:
                 backup.unlink(missing_ok=True)
-            lock.unlink(missing_ok=True)
+            lock.__exit__(None,None,None)
 
 
 def evaluate_project(project, engine='blender', renderer='software-egl'):

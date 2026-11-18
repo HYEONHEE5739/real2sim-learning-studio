@@ -32,7 +32,7 @@ def _xml_references(tree):
         assetdir=compiler.get('assetdir','')
         directories={'mesh':compiler.get('meshdir',assetdir),'texture':compiler.get('texturedir',assetdir)}
     for node in tree.iter():
-        key='filename' if node.tag=='mesh' and 'filename' in node.attrib else 'file'
+        key='filename' if node.tag in ('mesh','texture') and 'filename' in node.attrib else 'file'
         if key in node.attrib:yield node,key,str(Path(directories.get(node.tag,''))/node.get(key))
 
 
@@ -202,8 +202,11 @@ def verify_native_closure(root,entry):
         elif suffix in ('.obj','.mtl'):
             for row in path.read_text().splitlines():
                 words=row.split()
-                if words and words[0]=='mtllib':queue.extend(path.parent/p for p in words[1:])
-                elif words and (words[0].startswith('map_') or words[0] in ('bump','disp')):queue.append(path.parent/words[-1])
+                if not words:continue
+                references=words[1:] if words[0]=='mtllib' else words[-1:] if words[0].startswith('map_') or words[0] in ('bump','disp') else []
+                for reference in references:
+                    if Path(reference).is_absolute() or ':' in reference:raise ExportError('ASSET_UNRESOLVABLE',reference,'package-relative material dependency required')
+                    queue.append(path.parent/reference)
         elif suffix=='.mdl':queue.extend(_declared_children(path,{}))
     return seen
 
